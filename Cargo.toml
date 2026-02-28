@@ -1,0 +1,53 @@
+[package]
+name = "cliamp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Audio playback
+cpal = "0.15"
+symphonia = { version = "0.5", features = ["all"] }
+
+# DSP
+rustfft = "6"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# HTTP
+reqwest = { version = "0.12", features = ["stream"] }
+
+# XML (RSS feeds)
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Temp directories
+tempfile = "3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# URL parsing
+url = "2"
+
+# Random (shuffle)
+rand = "0.9"
+
+# Home directory
+dirs = "6"
