@@ -9,8 +9,8 @@ pub mod volume;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use self::eq::{Biquad, EQ_FREQS};
 use self::gapless::GaplessSource;
@@ -33,7 +33,7 @@ pub struct Player {
 }
 
 struct PlayerState {
-    volume: f64,       // dB [-30, +6]
+    volume: f64,         // dB [-30, +6]
     eq_bands: [f64; 10], // dB [-12, +12]
     mono: bool,
     playing: bool,
@@ -145,9 +145,8 @@ impl Player {
     /// Start playing an audio file.
     pub fn play(&self, path: &str) -> anyhow::Result<()> {
         let source = decode::decode_file(path, self.sample_rate)?;
-        let track_source: Arc<Mutex<Box<dyn AudioSource>>> = Arc::new(Mutex::new(
-            decode::decode_file(path, self.sample_rate)?,
-        ));
+        let track_source: Arc<Mutex<Box<dyn AudioSource>>> =
+            Arc::new(Mutex::new(decode::decode_file(path, self.sample_rate)?));
 
         // Use the first decode for playback, second for position queries
         self.gapless.replace(source);

@@ -72,11 +72,7 @@ pub fn is_ytdl(path: &str) -> bool {
 
     matches!(
         host,
-        "soundcloud.com"
-            | "youtube.com"
-            | "youtu.be"
-            | "music.youtube.com"
-            | "bandcamp.com"
+        "soundcloud.com" | "youtube.com" | "youtu.be" | "music.youtube.com" | "bandcamp.com"
     ) || host.ends_with(".bandcamp.com")
 }
 
@@ -717,7 +713,12 @@ mod tests {
     #[test]
     fn test_toggle_shuffle_preserves_current() {
         let mut pl = Playlist::new();
-        pl.add(&[make_track("A"), make_track("B"), make_track("C"), make_track("D")]);
+        pl.add(&[
+            make_track("A"),
+            make_track("B"),
+            make_track("C"),
+            make_track("D"),
+        ]);
         pl.next(); // move to B
 
         let (before, _) = pl.current().unwrap();

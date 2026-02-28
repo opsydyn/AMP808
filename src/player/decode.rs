@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::Path;
 
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -97,8 +97,8 @@ fn decode_symphonia(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn AudioS
     let source_sr = codec_params.sample_rate.unwrap_or(44100);
     let channels = codec_params.channels.map(|c| c.count()).unwrap_or(2);
 
-    let decoder = symphonia::default::get_codecs()
-        .make(&codec_params, &DecoderOptions::default())?;
+    let decoder =
+        symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
 
     // Decode entire file into memory for seekability
     let samples = decode_all_samples(format, decoder, track_id, channels)?;
@@ -231,7 +231,11 @@ impl AudioSource for PcmSource {
 
     fn seek(&mut self, frame: usize) -> anyhow::Result<()> {
         if frame > self.samples.len() {
-            anyhow::bail!("seek position {} out of range [0, {}]", frame, self.samples.len());
+            anyhow::bail!(
+                "seek position {} out of range [0, {}]",
+                frame,
+                self.samples.len()
+            );
         }
         self.pos = frame;
         Ok(())
@@ -259,10 +263,7 @@ mod tests {
 
     #[test]
     fn test_format_ext_url() {
-        assert_eq!(
-            format_ext("https://example.com/audio/song.flac"),
-            "flac"
-        );
+        assert_eq!(format_ext("https://example.com/audio/song.flac"), "flac");
         assert_eq!(
             format_ext("https://example.com/stream"),
             "mp3" // default

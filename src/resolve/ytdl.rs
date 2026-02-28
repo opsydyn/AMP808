@@ -166,10 +166,11 @@ pub async fn resolve_ytdl_track(
     // Create temp directory
     let tmp_dir = std::env::temp_dir().join(format!(
         "cliamp-ytdl-{}",
-        std::process::id() as u64 ^ (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64)
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64)
     ));
     std::fs::create_dir_all(&tmp_dir)?;
     tracker.register(tmp_dir.clone());

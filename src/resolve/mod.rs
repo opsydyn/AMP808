@@ -46,7 +46,11 @@ pub fn args(args: &[String]) -> anyhow::Result<ResolveResult> {
         };
         for path in matches {
             let resolved = collect_audio_files(&path)?;
-            files.extend(resolved.into_iter().map(|p| p.to_string_lossy().to_string()));
+            files.extend(
+                resolved
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().to_string()),
+            );
         }
     }
 
@@ -270,11 +274,21 @@ mod tests {
 
         // yt-dlp, feed, m3u go to pending
         assert_eq!(result.pending.len(), 3);
-        assert!(result.pending.contains(&"https://youtube.com/watch?v=abc".to_string()));
-        assert!(result.pending.contains(&"https://example.com/feed.xml".to_string()));
-        assert!(result
-            .pending
-            .contains(&"https://example.com/playlist.m3u".to_string()));
+        assert!(
+            result
+                .pending
+                .contains(&"https://youtube.com/watch?v=abc".to_string())
+        );
+        assert!(
+            result
+                .pending
+                .contains(&"https://example.com/feed.xml".to_string())
+        );
+        assert!(
+            result
+                .pending
+                .contains(&"https://example.com/playlist.m3u".to_string())
+        );
 
         // Direct URL becomes a track
         assert_eq!(result.tracks.len(), 1);

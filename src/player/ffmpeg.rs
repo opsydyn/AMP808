@@ -62,6 +62,7 @@ pub fn decode_ffmpeg(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn Audio
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

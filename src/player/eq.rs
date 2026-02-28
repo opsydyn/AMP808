@@ -83,6 +83,7 @@ impl Biquad {
         self.calc_coeffs(gain_db);
 
         for sample in samples.iter_mut() {
+            #[allow(clippy::needless_range_loop)]
             for ch in 0..2 {
                 let x = sample[ch] as f64;
                 let y = self.b0 * x + self.b1 * self.x1[ch] + self.b2 * self.x2[ch]

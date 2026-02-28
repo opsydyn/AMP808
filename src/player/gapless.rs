@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::source::AudioSource;
 
@@ -113,7 +113,8 @@ impl GaplessSource {
 
     /// Returns true (once) when a gapless transition happened.
     pub fn advanced(&self) -> bool {
-        self.advanced.compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+        self.advanced
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
 }
