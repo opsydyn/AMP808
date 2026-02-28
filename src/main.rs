@@ -1,4 +1,5 @@
 mod config;
+mod player;
 mod playlist;
 mod resolve;
 
