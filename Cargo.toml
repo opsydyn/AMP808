@@ -51,3 +51,6 @@ rand = "0.9"
 
 # Home directory
 dirs = "6"
+
+# Glob expansion
+glob = "0.3"
