@@ -14,7 +14,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use self::eq::{Biquad, EQ_FREQS};
 use self::gapless::GaplessSource;
-use self::source::AudioSource;
 use self::tap::Tap;
 
 /// Default CD-quality sample rate.
@@ -37,12 +36,6 @@ struct PlayerState {
     eq_bands: [f64; 10], // dB [-12, +12]
     mono: bool,
     playing: bool,
-    // Current track info for position/duration queries
-    current: Option<TrackInfo>,
-}
-
-struct TrackInfo {
-    source: Arc<Mutex<Box<dyn AudioSource>>>,
 }
 
 impl Player {
@@ -57,7 +50,6 @@ impl Player {
             eq_bands: [0.0; 10],
             mono: false,
             playing: false,
-            current: None,
         }));
 
         // Build cpal output stream
@@ -145,18 +137,11 @@ impl Player {
     /// Start playing an audio file.
     pub fn play(&self, path: &str) -> anyhow::Result<()> {
         let source = decode::decode_file(path, self.sample_rate)?;
-        let track_source: Arc<Mutex<Box<dyn AudioSource>>> =
-            Arc::new(Mutex::new(decode::decode_file(path, self.sample_rate)?));
-
-        // Use the first decode for playback, second for position queries
         self.gapless.replace(source);
         self.paused.store(false, Ordering::Release);
 
         let mut state = self.state.lock().unwrap();
         state.playing = true;
-        state.current = Some(TrackInfo {
-            source: track_source,
-        });
 
         Ok(())
     }
@@ -185,7 +170,6 @@ impl Player {
         self.paused.store(true, Ordering::Release);
         let mut state = self.state.lock().unwrap();
         state.playing = false;
-        state.current = None;
     }
 
     /// Check if a gapless transition occurred (consumes the flag).
@@ -249,5 +233,38 @@ impl Player {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    // --- Position / Seek ---
+
+    /// Get (position_seconds, duration_seconds). Duration is 0 for streams.
+    pub fn track_position(&self) -> (u64, u64) {
+        let pos_frames = self.gapless.position();
+        let dur_frames = self.gapless.duration_frames().unwrap_or(0);
+        let sr = self.sample_rate as u64;
+        if sr == 0 {
+            return (0, 0);
+        }
+        (pos_frames as u64 / sr, dur_frames as u64 / sr)
+    }
+
+    /// Seek to an absolute position in seconds.
+    pub fn seek_to(&self, seconds: f64) -> anyhow::Result<()> {
+        let frame = (seconds * self.sample_rate as f64) as usize;
+        self.gapless.seek(frame)
+    }
+
+    /// Seek relative to current position (positive = forward, negative = backward).
+    pub fn seek_relative(&self, seconds: f64) -> anyhow::Result<()> {
+        let pos = self.gapless.position();
+        let dur = self.gapless.duration_frames().unwrap_or(usize::MAX);
+        let delta = (seconds * self.sample_rate as f64) as i64;
+        let new_pos = (pos as i64 + delta).clamp(0, dur as i64) as usize;
+        self.gapless.seek(new_pos)
+    }
+
+    /// Whether the current source supports seeking.
+    pub fn seekable(&self) -> bool {
+        self.gapless.seekable()
     }
 }

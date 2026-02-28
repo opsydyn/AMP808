@@ -111,11 +111,33 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
         app.play_current_track();
     }
 
-    // Run TUI
-    ui::run(app, msg_rx).await?;
+    // Run TUI — returns App so we can save state
+    let app = ui::run(app, msg_rx).await?;
 
-    // Save config on exit
-    // TODO: persist current state back to config
+    // Save config on exit — persist current player/playlist state
+    let save_cfg = Config {
+        volume: app.player.volume(),
+        repeat: match app.playlist.repeat() {
+            playlist::RepeatMode::Off => "off".to_string(),
+            playlist::RepeatMode::All => "all".to_string(),
+            playlist::RepeatMode::One => "one".to_string(),
+        },
+        shuffle: app.playlist.shuffled(),
+        mono: app.player.mono(),
+        eq_preset: app.eq_preset_idx.map_or_else(
+            || "Custom".to_string(),
+            |idx| {
+                ui::eq_presets::EQ_PRESETS
+                    .get(idx)
+                    .map_or("Custom".to_string(), |p| p.name.to_string())
+            },
+        ),
+        eq: app.player.eq_bands().to_vec(),
+        ..cfg
+    };
+    if let Err(e) = save_cfg.save() {
+        eprintln!("warning: failed to save config: {e}");
+    }
 
     // Cleanup yt-dlp temp files
     tracker.cleanup();

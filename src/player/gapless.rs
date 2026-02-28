@@ -117,6 +117,43 @@ impl GaplessSource {
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
+
+    /// Current playback position in frames.
+    pub fn position(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        match &inner.current {
+            Some(src) => src.position(),
+            None => 0,
+        }
+    }
+
+    /// Total duration in frames, or None for streams.
+    pub fn duration_frames(&self) -> Option<usize> {
+        let inner = self.inner.lock().unwrap();
+        match &inner.current {
+            Some(src) => src.len_frames(),
+            None => None,
+        }
+    }
+
+    /// Whether the current source supports seeking.
+    pub fn seekable(&self) -> bool {
+        let inner = self.inner.lock().unwrap();
+        match &inner.current {
+            Some(src) => src.seekable(),
+            None => false,
+        }
+    }
+
+    /// Seek the current source to a frame position. Clears preloaded next track.
+    pub fn seek(&self, frame: usize) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(ref mut src) = inner.current {
+            src.seek(frame)?;
+            inner.next = None; // Invalidate preload
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -218,5 +255,65 @@ mod tests {
         gs.read(&mut buf);
         // Should drain since next was cleared
         assert!(gs.drained());
+    }
+
+    #[test]
+    fn test_position_and_duration() {
+        let gs = GaplessSource::new();
+        assert_eq!(gs.position(), 0);
+        assert_eq!(gs.duration_frames(), None);
+
+        gs.replace(make_source(&[1.0, 2.0, 3.0, 4.0], 44100));
+        assert_eq!(gs.position(), 0);
+        assert_eq!(gs.duration_frames(), Some(4));
+
+        // Read 2 frames to advance position
+        let mut buf = [[0.0f32; 2]; 2];
+        gs.read(&mut buf);
+        assert_eq!(gs.position(), 2);
+        assert_eq!(gs.duration_frames(), Some(4));
+    }
+
+    #[test]
+    fn test_seek() {
+        let gs = GaplessSource::new();
+        gs.replace(make_source(&[1.0, 2.0, 3.0, 4.0], 44100));
+
+        // Read 2 frames
+        let mut buf = [[0.0f32; 2]; 2];
+        gs.read(&mut buf);
+        assert_eq!(gs.position(), 2);
+
+        // Seek back to start
+        gs.seek(0).unwrap();
+        assert_eq!(gs.position(), 0);
+
+        // Read again — should get first samples
+        gs.read(&mut buf);
+        assert_eq!(buf[0][0], 1.0);
+        assert_eq!(buf[1][0], 2.0);
+    }
+
+    #[test]
+    fn test_seek_clears_next() {
+        let gs = GaplessSource::new();
+        gs.replace(make_source(&[1.0, 2.0], 44100));
+        gs.set_next(make_source(&[3.0, 4.0], 44100));
+
+        gs.seek(0).unwrap();
+
+        // Next should be cleared by seek — exhaust current, should drain
+        let mut buf = [[0.0f32; 2]; 4];
+        gs.read(&mut buf);
+        assert!(gs.drained());
+    }
+
+    #[test]
+    fn test_seekable() {
+        let gs = GaplessSource::new();
+        assert!(!gs.seekable());
+
+        gs.replace(make_source(&[1.0], 44100));
+        assert!(gs.seekable());
     }
 }

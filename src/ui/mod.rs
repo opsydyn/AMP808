@@ -238,18 +238,26 @@ impl App {
         }
     }
 
-    pub fn seek_relative(&self, _seconds: f64) {
-        // TODO: implement seek through player
+    pub fn seek_relative(&mut self, seconds: f64) {
+        if let Err(e) = self.player.seek_relative(seconds) {
+            self.err = Some(e.to_string());
+        } else {
+            // Seek invalidates preload (handled in gapless), re-preload
+            self.preload_next();
+        }
     }
 
-    pub fn seek_to(&self, _seconds: f64) {
-        // TODO: implement seek through player
+    pub fn seek_to(&mut self, seconds: f64) {
+        if let Err(e) = self.player.seek_to(seconds) {
+            self.err = Some(e.to_string());
+        } else {
+            self.preload_next();
+        }
     }
 
     /// Get (position_seconds, duration_seconds) of the current track.
     pub fn track_position(&self) -> (u64, u64) {
-        // TODO: full impl needs position tracking in player
-        (0, 0)
+        self.player.track_position()
     }
 
     // --- EQ ---
@@ -373,8 +381,8 @@ impl App {
     }
 }
 
-/// Run the TUI event loop.
-pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> anyhow::Result<()> {
+/// Run the TUI event loop. Returns the App so callers can extract state (e.g. for config save).
+pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> anyhow::Result<App> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -407,7 +415,7 @@ pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> a
                                 // Quit requested
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                return Ok(());
+                                return Ok(app);
                             }
                 }
 
@@ -421,7 +429,7 @@ pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> a
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-    Ok(())
+    Ok(app)
 }
 
 #[cfg(test)]

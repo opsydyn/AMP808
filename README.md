@@ -2,6 +2,8 @@
 
 A Winamp 2.x-inspired terminal music player, written in Rust with Ratatui. Port of [cliamp](https://github.com/bjarneo/cliamp) (Go/Bubbletea).
 
+<https://en.wikipedia.org/wiki/Winamp>
+
 ```
 C L I A M P
 ♫ Artist - Song Title
