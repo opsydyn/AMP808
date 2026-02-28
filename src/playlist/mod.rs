@@ -413,12 +413,6 @@ impl Playlist {
     pub fn set_repeat(&mut self, mode: RepeatMode) {
         self.repeat = mode;
     }
-
-    pub fn set_shuffle(&mut self, enabled: bool) {
-        if self.shuffle != enabled {
-            self.toggle_shuffle();
-        }
-    }
 }
 
 #[cfg(test)]

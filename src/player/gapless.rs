@@ -136,15 +136,6 @@ impl GaplessSource {
         }
     }
 
-    /// Whether the current source supports seeking.
-    pub fn seekable(&self) -> bool {
-        let inner = self.inner.lock().unwrap();
-        match &inner.current {
-            Some(src) => src.seekable(),
-            None => false,
-        }
-    }
-
     /// Seek the current source to a frame position. Clears preloaded next track.
     pub fn seek(&self, frame: usize) -> anyhow::Result<()> {
         let mut inner = self.inner.lock().unwrap();
@@ -306,14 +297,5 @@ mod tests {
         let mut buf = [[0.0f32; 2]; 4];
         gs.read(&mut buf);
         assert!(gs.drained());
-    }
-
-    #[test]
-    fn test_seekable() {
-        let gs = GaplessSource::new();
-        assert!(!gs.seekable());
-
-        gs.replace(make_source(&[1.0], 44100));
-        assert!(gs.seekable());
     }
 }

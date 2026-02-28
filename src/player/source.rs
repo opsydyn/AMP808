@@ -1,5 +1,5 @@
 /// Trait for audio sources that feed the player pipeline.
-/// All sources produce stereo f32 frames at the player's sample rate.
+/// All sources produce stereo f32 frames at the player's sample rate (44100 Hz).
 pub trait AudioSource: Send {
     /// Fill buffer with stereo samples. Returns number of frames written.
     /// Returns 0 when source is exhausted.
@@ -13,10 +13,4 @@ pub trait AudioSource: Send {
 
     /// Seek to frame position.
     fn seek(&mut self, frame: usize) -> anyhow::Result<()>;
-
-    /// Whether seeking is supported.
-    fn seekable(&self) -> bool;
-
-    /// Sample rate of this source.
-    fn sample_rate(&self) -> u32;
 }

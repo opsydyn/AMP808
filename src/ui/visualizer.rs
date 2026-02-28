@@ -131,7 +131,7 @@ impl Visualizer {
             let row_top = (HEIGHT - row) as f64 / HEIGHT as f64;
 
             let mut segments = Vec::with_capacity(NUM_BANDS);
-            for (i, &level) in bands.iter().enumerate() {
+            for &level in bands.iter() {
                 let block = if level >= row_top {
                     "█"
                 } else if level > row_bottom {
@@ -142,9 +142,7 @@ impl Visualizer {
                     " "
                 };
 
-                let col = i * (BW + 1); // +1 for gap
                 segments.push(SpectrumSegment {
-                    col,
                     text: block.repeat(BW),
                     row_bottom,
                 });
@@ -166,8 +164,7 @@ impl Visualizer {
             let row_threshold = (HEIGHT - 1 - row) as f64 / HEIGHT as f64;
 
             let mut segments = Vec::with_capacity(NUM_BANDS);
-            for (i, &level) in bands.iter().enumerate() {
-                let col = i * (BW + 1);
+            for &level in bands.iter() {
                 let text = if level > row_threshold {
                     "▄".repeat(BW)
                 } else {
@@ -175,7 +172,6 @@ impl Visualizer {
                 };
 
                 segments.push(SpectrumSegment {
-                    col,
                     text,
                     row_bottom: row_threshold,
                 });
@@ -195,7 +191,6 @@ pub struct SpectrumLine {
 
 /// A colored segment within a spectrum line.
 pub struct SpectrumSegment {
-    pub col: usize,
     pub text: String,
     pub row_bottom: f64,
 }

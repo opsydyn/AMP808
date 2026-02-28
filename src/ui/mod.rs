@@ -26,10 +26,9 @@ use crate::resolve;
 /// Messages sent from async tasks to the main event loop.
 pub enum AppMsg {
     YtdlResolved { index: usize, track: Track },
-    YtdlError { index: usize, error: anyhow::Error },
+    YtdlError { error: anyhow::Error },
     FeedsLoaded(Vec<Track>),
     FeedError(anyhow::Error),
-    Tick,
 }
 
 /// The main application state.
@@ -122,7 +121,7 @@ impl App {
                 self.playlist.set_track(index, track.clone());
                 self.play_track_owned(track);
             }
-            AppMsg::YtdlError { index: _, error } => {
+            AppMsg::YtdlError { error } => {
                 self.buffering = false;
                 self.err = Some(error.to_string());
             }
@@ -134,9 +133,6 @@ impl App {
             }
             AppMsg::FeedError(error) => {
                 self.err = Some(error.to_string());
-            }
-            AppMsg::Tick => {
-                self.on_tick();
             }
         }
     }
@@ -210,10 +206,7 @@ impl App {
                         });
                     }
                     Err(e) => {
-                        let _ = tx.send(AppMsg::YtdlError {
-                            index: idx,
-                            error: e.into(),
-                        });
+                        let _ = tx.send(AppMsg::YtdlError { error: e.into() });
                     }
                 }
             });

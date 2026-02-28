@@ -119,7 +119,8 @@ impl Config {
         }
     }
 
-    /// Load from a TOML string (for testing).
+    /// Load from a TOML string.
+    #[cfg(test)]
     pub fn from_str(s: &str) -> anyhow::Result<Self> {
         let mut cfg: Config = toml::from_str(s)?;
         cfg.clamp();

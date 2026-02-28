@@ -262,9 +262,4 @@ impl Player {
         let new_pos = (pos as i64 + delta).clamp(0, dur as i64) as usize;
         self.gapless.seek(new_pos)
     }
-
-    /// Whether the current source supports seeking.
-    pub fn seekable(&self) -> bool {
-        self.gapless.seekable()
-    }
 }

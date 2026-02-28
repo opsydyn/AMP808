@@ -10,11 +10,6 @@ use symphonia::core::probe::Hint;
 
 use super::source::AudioSource;
 
-/// Supported audio file extensions.
-pub const SUPPORTED_EXTS: &[&str] = &[
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "m4b", "alac", "wma", "opus",
-];
-
 /// Extensions that require FFmpeg to decode.
 const FFMPEG_EXTS: &[&str] = &["m4a", "aac", "m4b", "alac", "wma", "opus"];
 
@@ -199,16 +194,11 @@ fn resample(samples: &[[f32; 2]], source_sr: u32, target_sr: u32) -> Vec<[f32; 2
 pub struct PcmSource {
     samples: Vec<[f32; 2]>,
     pos: usize,
-    sample_rate: u32,
 }
 
 impl PcmSource {
-    pub fn new(samples: Vec<[f32; 2]>, sample_rate: u32) -> Self {
-        Self {
-            samples,
-            pos: 0,
-            sample_rate,
-        }
+    pub fn new(samples: Vec<[f32; 2]>, _sample_rate: u32) -> Self {
+        Self { samples, pos: 0 }
     }
 }
 
@@ -239,14 +229,6 @@ impl AudioSource for PcmSource {
         }
         self.pos = frame;
         Ok(())
-    }
-
-    fn seekable(&self) -> bool {
-        true
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
     }
 }
 
@@ -287,8 +269,6 @@ mod tests {
 
         assert_eq!(src.len_frames(), Some(3));
         assert_eq!(src.position(), 0);
-        assert!(src.seekable());
-        assert_eq!(src.sample_rate(), 44100);
 
         let mut buf = [[0.0f32; 2]; 2];
         let n = src.read(&mut buf);
