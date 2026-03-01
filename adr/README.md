@@ -27,3 +27,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0006: HTTP streaming with ICY metadata](0006-http-streaming-with-icy-metadata.md) (accepted, 2026-03-01)
 - [ADR-0007: Provider trait for external music services](0007-provider-trait-for-external-music-services.md) (accepted, 2026-03-01)
 - [ADR-0008: Album art display via ratatui-image](0008-album-art-display-via-ratatui-image.md) (accepted, 2026-03-01)
+- [ADR-0009: Oscilloscope visualizer mode](0009-oscilloscope-visualizer-mode.md) (proposed, 2026-03-01)

@@ -8,6 +8,7 @@ use super::App;
 use super::keys::Focus;
 use super::styles::PANEL_WIDTH;
 use super::theme;
+use super::visualizer::VisMode;
 
 impl App {
     /// Render the full TUI frame.
@@ -224,8 +225,13 @@ impl App {
 
     fn render_spectrum(&mut self, frame: &mut Frame, area: Rect) {
         let samples = self.player.samples();
-        let bands = self.vis.analyze(&samples);
-        let spec_lines = self.vis.render(&bands);
+        let spec_lines = if self.vis.mode == VisMode::Scope {
+            self.vis
+                .render_scope(&samples, area.width as usize, area.height as usize)
+        } else {
+            let bands = self.vis.analyze(&samples);
+            self.vis.render(&bands)
+        };
 
         for (row, spec_line) in spec_lines.iter().enumerate() {
             if row >= area.height as usize {
