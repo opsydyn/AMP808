@@ -1,4 +1,5 @@
 mod config;
+mod external;
 mod player;
 mod playlist;
 mod resolve;
@@ -17,7 +18,12 @@ use crate::ui::{App, AppMsg};
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty() {
+    // Check for Navidrome provider from env
+    let provider: Option<Box<dyn playlist::Provider>> =
+        external::navidrome::NavidromeClient::from_env()
+            .map(|c| Box::new(c) as Box<dyn playlist::Provider>);
+
+    if args.is_empty() && provider.is_none() {
         eprintln!(
             "usage: cliamp <file|folder|url> [...]
 
@@ -28,6 +34,7 @@ async fn main() -> Result<()> {
   SoundCloud      cliamp https://soundcloud.com/user/sets/playlist
   YouTube         cliamp https://www.youtube.com/watch?v=...
   Bandcamp        cliamp https://artist.bandcamp.com/album/...
+  Navidrome       NAVIDROME_URL=... NAVIDROME_USER=... NAVIDROME_PASS=... cliamp
 
 Formats: mp3, wav, flac, ogg, m4a, aac, opus, wma (aac/opus/wma need ffmpeg)
 SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
@@ -50,7 +57,14 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     .ok();
 
     // Resolve args into tracks + pending URLs
-    let resolved = resolve::args(&args)?;
+    let resolved = if !args.is_empty() {
+        resolve::args(&args)?
+    } else {
+        resolve::ResolveResult {
+            tracks: Vec::new(),
+            pending: Vec::new(),
+        }
+    };
 
     // Build playlist
     let mut pl = Playlist::new();
@@ -93,7 +107,7 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     }
 
     // Build app
-    let mut app = App::new(player, pl, tracker.clone(), msg_tx);
+    let mut app = App::new(player, pl, tracker.clone(), msg_tx, provider);
 
     // Apply EQ preset from config
     if !cfg.eq_preset.is_empty() && cfg.eq_preset != "Custom" {

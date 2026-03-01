@@ -30,6 +30,21 @@ impl std::fmt::Display for RepeatMode {
     }
 }
 
+/// Metadata for a remote playlist (e.g. Navidrome/Subsonic).
+#[derive(Debug, Clone)]
+pub struct PlaylistInfo {
+    pub id: String,
+    pub name: String,
+    pub track_count: usize,
+}
+
+/// A provider that supplies browsable playlists from an external service.
+pub trait Provider: Send + Sync {
+    fn name(&self) -> &str;
+    fn playlists(&self) -> anyhow::Result<Vec<PlaylistInfo>>;
+    fn tracks(&self, playlist_id: &str) -> anyhow::Result<Vec<Track>>;
+}
+
 /// A single audio track (local file or HTTP stream).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {

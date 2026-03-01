@@ -2,15 +2,19 @@ pub mod decode;
 pub mod eq;
 pub mod ffmpeg;
 pub mod gapless;
+pub mod http;
+pub mod icy;
 pub mod source;
+pub mod stream;
 pub mod tap;
 pub mod volume;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use cpal::Stream;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio::sync::mpsc;
 
 use self::eq::{Biquad, EQ_FREQS};
 use self::gapless::GaplessSource;
@@ -28,6 +32,7 @@ pub struct Player {
     // Shared state between audio callback and control thread
     state: Arc<Mutex<PlayerState>>,
     paused: Arc<AtomicBool>,
+    stream_title: Arc<RwLock<String>>,
     _stream: Option<Stream>,
 }
 
@@ -130,13 +135,18 @@ impl Player {
             tap,
             state,
             paused,
+            stream_title: Arc::new(RwLock::new(String::new())),
             _stream: Some(stream),
         })
     }
 
-    /// Start playing an audio file.
+    /// Start playing an audio file or HTTP stream.
     pub fn play(&self, path: &str) -> anyhow::Result<()> {
-        let source = decode::decode_file(path, self.sample_rate)?;
+        // Clear stream title for new track
+        *self.stream_title.write().unwrap() = String::new();
+
+        let source =
+            decode::decode_source(path, self.sample_rate, Some(Arc::clone(&self.stream_title)))?;
         self.gapless.replace(source);
         self.paused.store(false, Ordering::Release);
 
@@ -148,9 +158,50 @@ impl Player {
 
     /// Preload the next track for gapless transition.
     pub fn preload(&self, path: &str) -> anyhow::Result<()> {
-        let source = decode::decode_file(path, self.sample_rate)?;
+        let source = decode::decode_source(path, self.sample_rate, None)?;
         self.gapless.set_next(source);
         Ok(())
+    }
+
+    /// Play an audio source asynchronously (for HTTP streams).
+    /// The blocking decode happens on a spawned thread; the result is sent via `tx`.
+    pub fn play_async(&self, path: String, tx: mpsc::UnboundedSender<super::ui::AppMsg>) {
+        let sr = self.sample_rate;
+        let gapless = Arc::clone(&self.gapless);
+        let paused = Arc::clone(&self.paused);
+        let state = Arc::clone(&self.state);
+        let stream_title = Arc::clone(&self.stream_title);
+
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                // Clear stream title
+                *stream_title.write().unwrap() = String::new();
+
+                let source = decode::decode_source(&path, sr, Some(Arc::clone(&stream_title)))?;
+                gapless.replace(source);
+                paused.store(false, Ordering::Release);
+                state.lock().unwrap().playing = true;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await;
+
+            let error = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(e) => Some(e.to_string()),
+            };
+            let _ = tx.send(super::ui::AppMsg::StreamPlayed { error });
+        });
+    }
+
+    /// Whether the current track is seekable (has known duration).
+    pub fn seekable(&self) -> bool {
+        self.gapless.duration_frames().is_some()
+    }
+
+    /// Get the current ICY stream title (empty if none).
+    pub fn stream_title(&self) -> String {
+        self.stream_title.read().unwrap().clone()
     }
 
     /// Clear the preloaded next track.

@@ -68,8 +68,13 @@ impl App {
         self.render_seek_bar(frame, chunks[5]);
         self.render_volume(frame, chunks[7]);
         self.render_eq(frame, chunks[8]);
-        self.render_playlist_header(frame, chunks[10]);
-        self.render_playlist(frame, chunks[11]);
+        if self.focus == Focus::Provider {
+            self.render_provider_header(frame, chunks[10]);
+            self.render_provider_list(frame, chunks[11]);
+        } else {
+            self.render_playlist_header(frame, chunks[10]);
+            self.render_playlist(frame, chunks[11]);
+        }
         self.render_help(frame, chunks[13]);
 
         // Error / save message at the bottom
@@ -84,7 +89,9 @@ impl App {
     }
 
     fn render_track_info(&self, frame: &mut Frame, area: Rect) {
-        let name = if let Some((track, _)) = self.playlist.current() {
+        let name = if !self.stream_title.is_empty() {
+            self.stream_title.clone()
+        } else if let Some((track, _)) = self.playlist.current() {
             track.display_name()
         } else {
             "No track loaded".to_string()
@@ -114,15 +121,27 @@ impl App {
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
-        let dur_min = dur_secs / 60;
-        let dur_sec = dur_secs % 60;
 
-        let time_str = format!("{pos_min:02}:{pos_sec:02} / {dur_min:02}:{dur_sec:02}");
+        let is_stream = self
+            .playlist
+            .current()
+            .map(|(t, _)| t.stream)
+            .unwrap_or(false);
+
+        let time_str = if is_stream && dur_secs == 0 {
+            format!("{pos_min:02}:{pos_sec:02} / --:--")
+        } else {
+            let dur_min = dur_secs / 60;
+            let dur_sec = dur_secs % 60;
+            format!("{pos_min:02}:{pos_sec:02} / {dur_min:02}:{dur_sec:02}")
+        };
 
         let status = if self.buffering {
             Span::styled("◌ Buffering...", self.palette.status_style())
         } else if self.player.is_playing() && self.player.is_paused() {
             Span::styled("⏸ Paused", self.palette.status_style())
+        } else if self.player.is_playing() && !self.player.seekable() {
+            Span::styled("● Streaming", self.palette.status_style())
         } else if self.player.is_playing() {
             Span::styled("▶ Playing", self.palette.status_style())
         } else {
@@ -166,6 +185,23 @@ impl App {
     }
 
     fn render_seek_bar(&self, frame: &mut Frame, area: Rect) {
+        let w = area.width as usize;
+
+        // Non-seekable streams: static streaming bar
+        if !self.player.seekable() && self.player.is_playing() {
+            let label = "━━━ STREAMING ━━━";
+            let pad = w.saturating_sub(label.len()) / 2;
+            let bar = format!(
+                "{}{}{}",
+                "━".repeat(pad),
+                label,
+                "━".repeat(w.saturating_sub(pad + label.len()))
+            );
+            let line = Line::from(Span::styled(bar, self.palette.seek_dim_style()));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
         let (pos_secs, dur_secs) = self.track_position();
         let progress = if dur_secs > 0 {
             (pos_secs as f64 / dur_secs as f64).clamp(0.0, 1.0)
@@ -173,7 +209,6 @@ impl App {
             0.0
         };
 
-        let w = area.width as usize;
         let filled = (progress * (w.saturating_sub(1)) as f64) as usize;
 
         let mut spans = vec![
@@ -420,15 +455,73 @@ impl App {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    fn render_provider_header(&self, frame: &mut Frame, area: Rect) {
+        let name = self.provider_name();
+        let line = Line::from(Span::styled(
+            format!("── {name} Playlists ──"),
+            self.palette.dim_style(),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    fn render_provider_list(&self, frame: &mut Frame, area: Rect) {
+        if self.prov_loading {
+            let name = self.provider_name();
+            let line = Line::from(Span::styled(
+                format!("  Loading {name}..."),
+                self.palette.dim_style(),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        if self.provider_lists.is_empty() {
+            let line = Line::from(Span::styled(
+                "  No playlists found",
+                self.palette.dim_style(),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        let visible = (area.height as usize).min(self.provider_lists.len());
+        let scroll = if self.prov_cursor >= visible {
+            self.prov_cursor - visible + 1
+        } else {
+            0
+        };
+
+        let mut lines = Vec::with_capacity(visible);
+        for i in scroll..self.provider_lists.len().min(scroll + visible) {
+            let pl = &self.provider_lists[i];
+            let style = if i == self.prov_cursor {
+                self.palette.playlist_selected_style()
+            } else {
+                self.palette.playlist_item_style()
+            };
+            let prefix = if i == self.prov_cursor { "> " } else { "  " };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{} ({} tracks)", pl.name, pl.track_count),
+                style,
+            )));
+        }
+
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
     fn render_help(&self, frame: &mut Frame, area: Rect) {
-        let text = if self.searching {
+        let text = if self.focus == Focus::Provider {
+            "[↑↓]Navigate [Enter]Load Playlist [Tab]Focus [Q]Quit".to_string()
+        } else if self.searching {
             let count = self.search_results.len();
             format!(
                 "/ {}  ({count} found)  [↑↓]Navigate [Enter]Play [Esc]Cancel",
                 self.search_query
             )
-        } else {
+        } else if self.player.seekable() {
             "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+        } else {
+            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         };
 
         let line = Line::from(Span::styled(text, self.palette.help_style()));

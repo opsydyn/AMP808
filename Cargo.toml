@@ -24,7 +24,7 @@ serde_json = "1"
 toml = "0.8"
 
 # HTTP
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["stream", "blocking", "json"] }
 
 # XML (RSS feeds)
 quick-xml = { version = "0.37", features = ["serialize"] }
@@ -57,3 +57,6 @@ glob = "0.3"
 
 # Signal handling
 ctrlc = "3"
+
+# Hashing (Subsonic API auth)
+md5 = "0.7"

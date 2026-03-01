@@ -24,7 +24,7 @@ use self::styles::Palette;
 use self::theme::Theme;
 use self::visualizer::Visualizer;
 use crate::player::Player;
-use crate::playlist::{self, Playlist, Track};
+use crate::playlist::{self, Playlist, PlaylistInfo, Provider, Track};
 use crate::resolve;
 use crate::resolve::ytdl::YtdlTempTracker;
 
@@ -34,6 +34,10 @@ pub enum AppMsg {
     YtdlError { error: anyhow::Error },
     FeedsLoaded(Vec<Track>),
     FeedError(anyhow::Error),
+    StreamPlayed { error: Option<String> },
+    ProviderPlaylists(Vec<PlaylistInfo>),
+    ProviderTracks(Vec<Track>),
+    ProviderError(String),
 }
 
 /// The main application state.
@@ -61,8 +65,14 @@ pub struct App {
     pub theme_idx: Option<usize>,
     pub theme_cursor: usize,
     pub show_themes: bool,
+    pub theme_idx_before_picker: Option<Option<usize>>,
     pub mode_808: bool,
     pub palette: Palette,
+    pub stream_title: String,
+    pub provider: Option<std::sync::Arc<dyn Provider>>,
+    pub provider_lists: Vec<PlaylistInfo>,
+    pub prov_cursor: usize,
+    pub prov_loading: bool,
     tracker: YtdlTempTracker,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
 }
@@ -73,14 +83,22 @@ impl App {
         playlist: Playlist,
         tracker: YtdlTempTracker,
         msg_tx: mpsc::UnboundedSender<AppMsg>,
+        provider: Option<Box<dyn Provider>>,
     ) -> Self {
         let sr = player.sample_rate() as f64;
         let themes = theme::load_all();
-        Self {
+        let has_provider = provider.is_some();
+        let provider: Option<std::sync::Arc<dyn Provider>> = provider.map(std::sync::Arc::from);
+        let initial_focus = if has_provider && playlist.is_empty() {
+            Focus::Provider
+        } else {
+            Focus::Playlist
+        };
+        let app = Self {
             player,
             playlist,
             vis: Visualizer::new(sr),
-            focus: Focus::Playlist,
+            focus: initial_focus,
             eq_cursor: 0,
             eq_preset_idx: None,
             pl_cursor: 0,
@@ -100,11 +118,24 @@ impl App {
             theme_idx: None,
             theme_cursor: 0,
             show_themes: false,
+            theme_idx_before_picker: None,
             mode_808: false,
             palette: Palette::default(),
+            stream_title: String::new(),
+            provider,
+            provider_lists: Vec::new(),
+            prov_cursor: 0,
+            prov_loading: has_provider,
             tracker,
             msg_tx,
+        };
+
+        // Fetch playlists in background if provider exists
+        if has_provider {
+            app.fetch_provider_playlists();
         }
+
+        app
     }
 
     /// Apply a theme by index (None = default ANSI theme).
@@ -143,6 +174,12 @@ impl App {
             self.preload_next();
         }
 
+        // Poll ICY stream title
+        let title = self.player.stream_title();
+        if !title.is_empty() {
+            self.stream_title = title;
+        }
+
         // Check if drained (end of current, no next)
         if self.player.is_playing()
             && !self.player.is_paused()
@@ -175,6 +212,31 @@ impl App {
             }
             AppMsg::FeedError(error) => {
                 self.err = Some(error.to_string());
+            }
+            AppMsg::StreamPlayed { error } => {
+                self.buffering = false;
+                if let Some(e) = error {
+                    self.err = Some(e);
+                } else {
+                    self.err = None;
+                    self.preload_next();
+                }
+            }
+            AppMsg::ProviderPlaylists(lists) => {
+                self.prov_loading = false;
+                self.provider_lists = lists;
+            }
+            AppMsg::ProviderTracks(tracks) => {
+                self.prov_loading = false;
+                self.playlist.add(&tracks);
+                self.focus = Focus::Playlist;
+                if !self.player.is_playing() {
+                    self.play_current_track();
+                }
+            }
+            AppMsg::ProviderError(e) => {
+                self.prov_loading = false;
+                self.err = Some(e);
             }
         }
     }
@@ -227,6 +289,8 @@ impl App {
 
     /// Play a track (takes ownership to avoid borrow conflicts).
     pub fn play_track_owned(&mut self, track: Track) {
+        self.stream_title.clear();
+
         // Lazy-resolve yt-dlp URLs
         if playlist::is_ytdl(&track.path) {
             self.buffering = true;
@@ -248,6 +312,16 @@ impl App {
                     }
                 }
             });
+            return;
+        }
+
+        // HTTP stream tracks — play asynchronously (HTTP connect + Symphonia probe blocks)
+        if track.stream && playlist::is_url(&track.path) {
+            self.buffering = true;
+            self.err = None;
+            self.title_off = 0;
+            self.player
+                .play_async(track.path.clone(), self.msg_tx.clone());
             return;
         }
 
@@ -336,6 +410,58 @@ impl App {
         if self.pl_cursor >= self.pl_scroll + self.pl_visible {
             self.pl_scroll = self.pl_cursor - self.pl_visible + 1;
         }
+    }
+
+    // --- Save ---
+
+    // --- Provider ---
+
+    pub fn fetch_provider_playlists(&self) {
+        if let Some(ref prov) = self.provider {
+            let prov = std::sync::Arc::clone(prov);
+            let tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || prov.playlists()).await;
+                match result {
+                    Ok(Ok(lists)) => {
+                        let _ = tx.send(AppMsg::ProviderPlaylists(lists));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(AppMsg::ProviderError(e.to_string()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::ProviderError(e.to_string()));
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn fetch_provider_tracks(&mut self, playlist_id: &str) {
+        if let Some(ref prov) = self.provider {
+            self.prov_loading = true;
+            let prov = std::sync::Arc::clone(prov);
+            let id = playlist_id.to_string();
+            let tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || prov.tracks(&id)).await;
+                match result {
+                    Ok(Ok(tracks)) => {
+                        let _ = tx.send(AppMsg::ProviderTracks(tracks));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(AppMsg::ProviderError(e.to_string()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::ProviderError(e.to_string()));
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn provider_name(&self) -> &str {
+        self.provider.as_ref().map_or("Provider", |p| p.name())
     }
 
     // --- Save ---

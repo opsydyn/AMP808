@@ -56,7 +56,7 @@ impl App {
                     if self.eq_cursor > 0 {
                         self.eq_cursor -= 1;
                     }
-                } else {
+                } else if self.player.seekable() {
                     self.seek_relative(-5.0);
                 }
             }
@@ -66,13 +66,17 @@ impl App {
                     if self.eq_cursor < 9 {
                         self.eq_cursor += 1;
                     }
-                } else {
+                } else if self.player.seekable() {
                     self.seek_relative(5.0);
                 }
             }
 
             (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                if self.focus == Focus::EQ {
+                if self.focus == Focus::Provider {
+                    if self.prov_cursor > 0 {
+                        self.prov_cursor -= 1;
+                    }
+                } else if self.focus == Focus::EQ {
                     let bands = self.player.eq_bands();
                     self.player
                         .set_eq_band(self.eq_cursor, bands[self.eq_cursor] + 1.0);
@@ -84,7 +88,11 @@ impl App {
             }
 
             (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                if self.focus == Focus::EQ {
+                if self.focus == Focus::Provider {
+                    if self.prov_cursor < self.provider_lists.len().saturating_sub(1) {
+                        self.prov_cursor += 1;
+                    }
+                } else if self.focus == Focus::EQ {
                     let bands = self.player.eq_bands();
                     self.player
                         .set_eq_band(self.eq_cursor, bands[self.eq_cursor] - 1.0);
@@ -96,9 +104,18 @@ impl App {
             }
 
             (_, KeyCode::Enter) => {
-                if self.focus == Focus::Playlist {
+                if self.focus == Focus::Provider && !self.provider_lists.is_empty() {
+                    let id = self.provider_lists[self.prov_cursor].id.clone();
+                    self.fetch_provider_tracks(&id);
+                } else if self.focus == Focus::Playlist {
                     self.playlist.set_index(self.pl_cursor);
                     self.play_current_track();
+                }
+            }
+
+            (_, KeyCode::Esc) | (_, KeyCode::Backspace) => {
+                if self.focus == Focus::Playlist && self.provider.is_some() {
+                    self.focus = Focus::Provider;
                 }
             }
 
@@ -125,7 +142,14 @@ impl App {
             (_, KeyCode::Tab) => {
                 self.focus = match self.focus {
                     Focus::Playlist => Focus::EQ,
-                    Focus::EQ => Focus::Playlist,
+                    Focus::EQ => {
+                        if self.provider.is_some() {
+                            Focus::Provider
+                        } else {
+                            Focus::Playlist
+                        }
+                    }
+                    Focus::Provider => Focus::Playlist,
                 };
             }
 
@@ -154,6 +178,7 @@ impl App {
                     Some(i) => i + 1, // +1 because Default is at 0
                     None => 0,
                 };
+                self.theme_idx_before_picker = Some(self.theme_idx);
                 self.show_themes = true;
             }
 
@@ -201,6 +226,10 @@ impl App {
         let count = self.themes.len() + 1; // +1 for Default
         match key.code {
             KeyCode::Esc => {
+                // Restore original theme on cancel
+                if let Some(saved) = self.theme_idx_before_picker.take() {
+                    self.apply_theme(saved);
+                }
                 self.show_themes = false;
             }
 
@@ -222,6 +251,7 @@ impl App {
 
             KeyCode::Enter => {
                 self.apply_theme_from_cursor();
+                self.theme_idx_before_picker = None; // confirm selection
                 self.show_themes = false;
             }
 
@@ -286,4 +316,5 @@ impl App {
 pub enum Focus {
     Playlist,
     EQ,
+    Provider,
 }

@@ -58,7 +58,11 @@ impl App {
         self.render_808_now_playing(frame, chunks[4]);
         self.render_808_status(frame, chunks[5]);
         self.render_808_spectrum(frame, chunks[7]);
-        self.render_808_playlist(frame, chunks[9]);
+        if self.focus == Focus::Provider {
+            self.render_808_provider(frame, chunks[9]);
+        } else {
+            self.render_808_playlist(frame, chunks[9]);
+        }
         self.render_808_help(frame, chunks[10]);
 
         if chunks.len() > 11 {
@@ -155,11 +159,17 @@ impl App {
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
-        let dur_min = dur_secs / 60;
-        let dur_sec = dur_secs % 60;
+
+        let is_stream = self
+            .playlist
+            .current()
+            .map(|(t, _)| t.stream)
+            .unwrap_or(false);
 
         // Track name
-        let name = if let Some((track, _)) = self.playlist.current() {
+        let name = if !self.stream_title.is_empty() {
+            self.stream_title.clone()
+        } else if let Some((track, _)) = self.playlist.current() {
             track.display_name()
         } else {
             "No track loaded".to_string()
@@ -169,13 +179,21 @@ impl App {
             "◌"
         } else if self.player.is_playing() && self.player.is_paused() {
             "⏸"
+        } else if self.player.is_playing() && !self.player.seekable() {
+            "●"
         } else if self.player.is_playing() {
             "▶"
         } else {
             "■"
         };
 
-        let time_str = format!("{pos_min:02}:{pos_sec:02}/{dur_min:02}:{dur_sec:02}");
+        let time_str = if is_stream && dur_secs == 0 {
+            format!("{pos_min:02}:{pos_sec:02}/--:--")
+        } else {
+            let dur_min = dur_secs / 60;
+            let dur_sec = dur_secs % 60;
+            format!("{pos_min:02}:{pos_sec:02}/{dur_min:02}:{dur_sec:02}")
+        };
         let max_name = area.width as usize - time_str.len() - 5;
         let display_name: String = if name.chars().count() > max_name {
             let mut s: String = name.chars().take(max_name - 1).collect();
@@ -200,23 +218,34 @@ impl App {
         let track_line = Line::from(vec![name_span, spaces, time_span]);
 
         // Seek bar
-        let progress = if dur_secs > 0 {
-            (pos_secs as f64 / dur_secs as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
         let w = area.width as usize;
-        let filled = (progress * (w.saturating_sub(2)) as f64) as usize;
-        let seek_spans = vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("━".repeat(filled), Style::default().fg(C808_AMBER)),
-            Span::styled("●", Style::default().fg(C808_YELLOW)),
-            Span::styled(
-                "━".repeat(w.saturating_sub(filled + 2)),
-                Style::default().fg(C808_DIM),
-            ),
-        ];
-        let seek_line = Line::from(seek_spans);
+        let seek_line = if !self.player.seekable() && self.player.is_playing() {
+            let label = "━━━ STREAMING ━━━";
+            let pad = w.saturating_sub(label.len() + 1) / 2;
+            let bar = format!(
+                " {}{}{}",
+                "━".repeat(pad),
+                label,
+                "━".repeat(w.saturating_sub(pad + label.len() + 1))
+            );
+            Line::from(Span::styled(bar, Style::default().fg(C808_DIM)))
+        } else {
+            let progress = if dur_secs > 0 {
+                (pos_secs as f64 / dur_secs as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let filled = (progress * (w.saturating_sub(2)) as f64) as usize;
+            Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled("━".repeat(filled), Style::default().fg(C808_AMBER)),
+                Span::styled("●", Style::default().fg(C808_YELLOW)),
+                Span::styled(
+                    "━".repeat(w.saturating_sub(filled + 2)),
+                    Style::default().fg(C808_DIM),
+                ),
+            ])
+        };
 
         frame.render_widget(Paragraph::new(vec![track_line, seek_line]), area);
     }
@@ -414,6 +443,57 @@ impl App {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    fn render_808_provider(&self, frame: &mut Frame, area: Rect) {
+        if self.prov_loading {
+            let name = self.provider_name();
+            let line = Line::from(Span::styled(
+                format!("  Loading {name}..."),
+                Style::default().fg(C808_DIM),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        if self.provider_lists.is_empty() {
+            let line = Line::from(Span::styled(
+                "  No playlists found",
+                Style::default().fg(C808_DIM),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        let visible = (area.height as usize).min(self.provider_lists.len());
+        let scroll = if self.prov_cursor >= visible {
+            self.prov_cursor - visible + 1
+        } else {
+            0
+        };
+
+        let mut lines = Vec::with_capacity(visible);
+        for i in scroll..self.provider_lists.len().min(scroll + visible) {
+            let pl = &self.provider_lists[i];
+            let style = if i == self.prov_cursor {
+                Style::default()
+                    .fg(C808_YELLOW)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(C808_GREY)
+            };
+            let prefix = if i == self.prov_cursor {
+                " ► "
+            } else {
+                "   "
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{} ({} tracks)", pl.name, pl.track_count),
+                style,
+            )));
+        }
+
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
     fn render_808_search(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(vec![
             Span::styled(" / ", Style::default().fg(C808_YELLOW)),
@@ -462,8 +542,13 @@ impl App {
     }
 
     fn render_808_help(&self, frame: &mut Frame, area: Rect) {
-        let text =
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [e]EQ [8]808 [/]Search [Tab]Focus [Q]Quit";
+        let text = if self.focus == Focus::Provider {
+            "[↑↓]Navigate [Enter]Load Playlist [Tab]Focus [Q]Quit"
+        } else if self.player.seekable() {
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [e]EQ [8]808 [/]Search [Tab]Focus [Q]Quit"
+        } else {
+            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [e]EQ [8]808 [/]Search [Tab]Focus [Q]Quit"
+        };
         let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
         frame.render_widget(Paragraph::new(line), area);
     }

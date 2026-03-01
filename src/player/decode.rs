@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
@@ -9,6 +10,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use super::source::AudioSource;
+use super::stream::StreamingSource;
 
 /// Extensions that require FFmpeg to decode.
 const FFMPEG_EXTS: &[&str] = &["m4a", "aac", "m4b", "alac", "wma", "opus"];
@@ -42,6 +44,67 @@ pub fn format_ext(path: &str) -> String {
 /// Check if the extension needs FFmpeg.
 pub fn needs_ffmpeg(ext: &str) -> bool {
     FFMPEG_EXTS.contains(&ext)
+}
+
+/// Decode audio from any source (local file or HTTP URL).
+pub fn decode_source(
+    path: &str,
+    target_sr: u32,
+    stream_title: Option<Arc<RwLock<String>>>,
+) -> anyhow::Result<Box<dyn AudioSource>> {
+    if crate::playlist::is_url(path) {
+        return decode_http(path, target_sr, stream_title);
+    }
+    decode_file(path, target_sr)
+}
+
+/// Decode audio from an HTTP URL using Symphonia streaming or FFmpeg.
+fn decode_http(
+    url: &str,
+    target_sr: u32,
+    stream_title: Option<Arc<RwLock<String>>>,
+) -> anyhow::Result<Box<dyn AudioSource>> {
+    let ext = format_ext(url);
+
+    // FFmpeg handles HTTP natively for its formats
+    if needs_ffmpeg(&ext) {
+        return super::ffmpeg::decode_ffmpeg(url, target_sr);
+    }
+
+    // Symphonia streaming decode (with ICY metadata extraction if supported)
+    let media_source = super::http::HttpMediaSource::open(url, stream_title)?;
+    let mss = MediaSourceStream::new(Box::new(media_source), Default::default());
+
+    let mut hint = Hint::new();
+    if !ext.is_empty() {
+        hint.with_extension(&ext);
+    }
+
+    let probed = symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
+
+    let format = probed.format;
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| anyhow::anyhow!("no audio track found in stream"))?;
+
+    let codec_params = track.codec_params.clone();
+    let track_id = track.id;
+    let source_sr = codec_params.sample_rate.unwrap_or(44100);
+    let channels = codec_params.channels.map(|c| c.count()).unwrap_or(2);
+
+    let decoder =
+        symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+
+    Ok(Box::new(StreamingSource::new(
+        format, decoder, track_id, channels, source_sr, target_sr,
+    )))
 }
 
 /// Decode a local audio file using Symphonia, returning an AudioSource.
