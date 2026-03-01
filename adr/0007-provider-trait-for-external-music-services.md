@@ -44,8 +44,28 @@ Key design choices:
 * Bad, because blocking provider calls hold a thread pool thread — fine for a CLI tool, but wouldn't scale to many concurrent providers
 * Neutral, because only Navidrome/Subsonic is implemented; the trait's value is proven when a second provider is added
 
+## Implementation Plan
+
+* **Affected paths**: `src/playlist/mod.rs` (`Provider`, `PlaylistInfo`), `src/external/navidrome.rs`, `src/ui/mod.rs` (`AppMsg` + async dispatch), `src/ui/keys.rs`/`src/ui/view.rs`/`src/ui/view_808.rs` (`Focus::Provider` UX), `src/main.rs` (provider wiring)
+* **Dependencies**: `reqwest` blocking client, `md5` + `url` helpers for Subsonic token auth/query encoding
+* **Patterns to follow**: Keep provider trait small and synchronous; dispatch provider calls via `tokio::task::spawn_blocking`; return provider tracks as regular `Track { stream: true, ... }` so they reuse playback pipeline.
+* **Patterns to avoid**: Do not couple UI directly to Navidrome types; do not add provider-specific branching in playlist core; do not block the UI thread on provider HTTP calls.
+
+### Verification
+
+* [x] `Provider` trait contract is defined in playlist module and consumed via trait object in `App`
+* [x] Navidrome client implements trait methods for playlist and track fetch
+* [x] Provider calls run through `spawn_blocking` and return via `AppMsg` (`ProviderPlaylists`, `ProviderTracks`, `ProviderError`)
+* [x] Focus/navigation paths include `Focus::Provider`
+* [ ] Manual validation: with `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASS` set, browse provider playlists and load tracks into main playlist
+
 ## Alternatives Considered
 
 * **No trait — hardcode Navidrome**: Simpler, but couples the UI to Navidrome specifics and makes adding providers require touching many files.
 * **Async trait (`async fn`)**: Would avoid blocking threads, but the rest of the codebase uses `spawn_blocking` for I/O-heavy operations, and async traits add complexity (boxing, lifetime issues) for no practical benefit here.
 * **Config file for credentials**: More flexible than env vars, but the Go version uses env vars and it matches twelve-factor app conventions. Config file support can be added later without changing the trait.
+
+## More Information
+
+* Subsonic API auth docs: token auth with `t`/`s` parameters
+* ADR-0004 defines why blocking provider I/O is bridged through `spawn_blocking`

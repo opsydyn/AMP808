@@ -1,5 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -63,16 +64,48 @@ impl App {
 
         self.render_title(frame, chunks[0]);
         self.render_track_info(frame, chunks[1]);
-        self.render_time_status(frame, chunks[2]);
+        let show_art = self.show_cover_art && self.cover_art_proto.is_some();
+        if show_art {
+            let time_status_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(24)])
+                .split(chunks[2]);
+            self.render_time_only(frame, time_status_chunks[0]);
+            self.render_status_only(frame, time_status_chunks[1]);
+        } else {
+            self.render_time_status(frame, chunks[2]);
+        }
 
         // Split spectrum area for album art when available
-        if self.show_cover_art && self.cover_art_proto.is_some() {
+        if show_art {
             let spec_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(40), Constraint::Length(24)])
                 .split(chunks[4]);
             self.render_spectrum(frame, spec_chunks[0]);
-            self.render_cover_art(frame, spec_chunks[1]);
+            // Anchor art under the play status row while keeping it in the spectrum zone.
+            // ratatui-image Fit mode may encode a narrower protocol area (e.g. square art in a
+            // wide slot), so center that effective area in the right column.
+            let art_slot = Rect::new(
+                spec_chunks[1].x,
+                chunks[3].y,
+                spec_chunks[1].width,
+                spec_chunks[1].height,
+            );
+            let art_area = if let Some(proto) = self.cover_art_proto.as_ref() {
+                let proto_area = proto.area();
+                let w = proto_area.width.min(art_slot.width);
+                let h = proto_area.height.min(art_slot.height);
+                Rect::new(
+                    art_slot.x + art_slot.width.saturating_sub(w) / 2,
+                    art_slot.y,
+                    w,
+                    h,
+                )
+            } else {
+                art_slot
+            };
+            self.render_cover_art(frame, art_area);
         } else {
             self.render_spectrum(frame, chunks[4]);
         }
@@ -128,7 +161,7 @@ impl App {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn render_time_status(&self, frame: &mut Frame, area: Rect) {
+    fn time_string(&self) -> String {
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
@@ -139,33 +172,53 @@ impl App {
             .map(|(t, _)| t.stream)
             .unwrap_or(false);
 
-        let time_str = if is_stream && dur_secs == 0 {
+        if is_stream && dur_secs == 0 {
             format!("{pos_min:02}:{pos_sec:02} / --:--")
         } else {
             let dur_min = dur_secs / 60;
             let dur_sec = dur_secs % 60;
             format!("{pos_min:02}:{pos_sec:02} / {dur_min:02}:{dur_sec:02}")
-        };
+        }
+    }
 
-        let status = if self.buffering {
-            Span::styled("◌ Buffering...", self.palette.status_style())
+    fn playback_status(&self) -> (String, Style) {
+        if self.buffering {
+            ("◌ Buffering...".to_string(), self.palette.status_style())
         } else if self.player.is_playing() && self.player.is_paused() {
-            Span::styled("⏸ Paused", self.palette.status_style())
+            ("⏸ Paused".to_string(), self.palette.status_style())
         } else if self.player.is_playing() && !self.player.seekable() {
-            Span::styled("● Streaming", self.palette.status_style())
+            ("● Streaming".to_string(), self.palette.status_style())
         } else if self.player.is_playing() {
-            Span::styled("▶ Playing", self.palette.status_style())
+            ("▶ Playing".to_string(), self.palette.status_style())
         } else {
-            Span::styled("■ Stopped", self.palette.dim_style())
-        };
+            ("■ Stopped".to_string(), self.palette.dim_style())
+        }
+    }
 
-        let time_span = Span::styled(time_str, self.palette.time_style());
+    fn render_time_only(&self, frame: &mut Frame, area: Rect) {
+        let time_span = Span::styled(self.time_string(), self.palette.time_style());
+        frame.render_widget(Paragraph::new(Line::from(time_span)), area);
+    }
+
+    fn render_status_only(&self, frame: &mut Frame, area: Rect) {
+        let (status_text, status_style) = self.playback_status();
+        let status_span = Span::styled(status_text, status_style);
+        frame.render_widget(
+            Paragraph::new(Line::from(status_span)).alignment(Alignment::Center),
+            area,
+        );
+    }
+
+    fn render_time_status(&self, frame: &mut Frame, area: Rect) {
+        let time_span = Span::styled(self.time_string(), self.palette.time_style());
+        let (status_text, status_style) = self.playback_status();
+        let status_span = Span::styled(status_text, status_style);
         let gap = area
             .width
-            .saturating_sub(time_span.width() as u16 + status.width() as u16);
+            .saturating_sub(time_span.width() as u16 + status_span.width() as u16);
         let spaces = Span::raw(" ".repeat(gap as usize));
 
-        let line = Line::from(vec![time_span, spaces, status]);
+        let line = Line::from(vec![time_span, spaces, status_span]);
         frame.render_widget(Paragraph::new(line), area);
     }
 

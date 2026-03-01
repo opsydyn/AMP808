@@ -37,8 +37,28 @@ For bridging blocking HTTP with async TUI: `Player::play_async()` clones individ
 * Bad, because blocking HTTP in `spawn_blocking` ties up a thread pool thread for the stream's lifetime — acceptable for a CLI player with one active stream
 * Neutral, because `reqwest::blocking` adds the `json` feature for Navidrome API, increasing binary size slightly
 
+## Implementation Plan
+
+* **Affected paths**: `src/player/http.rs`, `src/player/icy.rs`, `src/player/stream.rs`, `src/player/decode.rs`, `src/player/mod.rs`, `src/ui/mod.rs`
+* **Dependencies**: `reqwest` (blocking client), `symphonia` (probe/decode), `tokio` (`spawn_blocking` bridge)
+* **Patterns to follow**: Keep HTTP decode path synchronous (`Read`-based) and non-seekable; parse ICY metadata in `IcyReader`; update stream title via shared `Arc<RwLock<String>>`; surface stream setup completion through `AppMsg::StreamPlayed`.
+* **Patterns to avoid**: Do not buffer full HTTP streams in memory; do not make `Player` cross-thread `Send`; do not introduce async reads into Symphonia's blocking decode path.
+
+### Verification
+
+* [x] `HttpMediaSource` reports non-seekable contract (`is_seekable() = false`, `byte_len() = None`) with tests
+* [x] `IcyReader` strips metadata blocks and extracts `StreamTitle` with unit tests
+* [x] `StreamingSource` keeps stream semantics (`len_frames() = None`, `seek()` errors) and handles packet decode loop
+* [x] Async-to-blocking bridge sends `AppMsg::StreamPlayed` from `Player::play_async()`
+* [ ] Manual validation: play a live ICY stream and observe live title updates in the UI
+
 ## Alternatives Considered
 
 * **Async HTTP with `reqwest` + `tokio::io`**: Would avoid blocking a thread, but Symphonia's `FormatReader` requires synchronous `Read`, making this impractical without a bridge layer that adds complexity for no user-visible benefit.
 * **Decode entire HTTP response into memory**: Simpler but defeats the purpose of streaming — radio stations are infinite streams.
 * **Separate process for HTTP (like ffmpeg)**: ffmpeg already handles HTTP for its formats (m4a, aac, opus). Using it for all HTTP would simplify code but lose Symphonia's native decode quality for mp3/flac/ogg and prevent ICY metadata extraction.
+
+## More Information
+
+* ADR-0003 defines decode routing and FFmpeg fallback strategy
+* ADR-0004 defines async architecture and `tokio::spawn`/`spawn_blocking` boundaries

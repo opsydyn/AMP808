@@ -22,7 +22,7 @@ Key design choices:
 
 3. **Art threaded through `Arc<RwLock<Option<CoverArt>>>`**: The decode thread writes cover art to a shared lock. The UI polls it once per track in `on_tick()`, decodes the image bytes via `image::load_from_memory()`, and creates a `Protocol` instance sized to the render area.
 
-4. **Spectrum area split**: When art is available and display is enabled, the spectrum visualizer area splits horizontally: `[Min(40), Length(24)]`. The art occupies ~24 columns × 5 rows (roughly square given terminal character aspect ratio). When no art exists, the spectrum gets full width.
+4. **Spectrum-side placement anchored to status column**: When art is available and display is enabled, the main view spectrum region splits horizontally: `[Min(40), Length(24)]`. Art stays in the right-side visualizer column and is vertically anchored under the play-status row for cleaner alignment. In 808 mode, art remains in the existing spectrum split behavior.
 
 5. **Toggle with `c` key**: Users can hide/show cover art. No art is fetched for HTTP streams or FFmpeg-decoded files — only Symphonia-probed local files provide embedded visuals.
 
@@ -37,9 +37,29 @@ Key design choices:
 * Bad, because terminals without image protocol support fall back to halfblocks which are low fidelity
 * Neutral, because cover art is decoded in the UI thread (once per track) — acceptable since `image::load_from_memory` is fast for typical cover art sizes (~100-500KB)
 
+## Implementation Plan
+
+* **Affected paths**: `src/player/decode.rs` (cover extraction), `src/player/mod.rs` (cover state lifecycle), `src/ui/mod.rs` (protocol init + per-track polling), `src/ui/view.rs` and `src/ui/view_808.rs` (placement/render), `src/ui/keys.rs` (`c` toggle)
+* **Dependencies**: `ratatui-image` (protocol-backed widget), `image` (decode bytes to image), existing Symphonia metadata APIs
+* **Patterns to follow**: Extract `FrontCover` first then fallback visual; carry art via `Arc<RwLock<Option<CoverArt>>>`; draw art only when toggle is enabled and protocol is available; gracefully fall back to full-width visualizer when art is missing.
+* **Patterns to avoid**: Do not fetch cover art from network during playback; do not block audio callback for image decode/render work; do not hard-fail UI when protocol negotiation is unavailable.
+
+### Verification
+
+* [x] Local files with embedded visuals populate `CoverArt` from Symphonia metadata probe path
+* [x] UI creates a `ratatui-image` protocol instance and renders only when available
+* [x] `c` key toggles art visibility without affecting playback
+* [x] Main view keeps art in spectrum-side column aligned under playback status text
+* [ ] Manual validation: confirm protocol behavior on at least one native image terminal and one fallback terminal
+
 ## Alternatives Considered
 
 * **Fetch cover art from web APIs (MusicBrainz, Discogs)**: Would provide art for streams and files without embedded art, but adds network dependency, API keys, and complexity. Can be layered on later.
 * **`viuer` crate**: Simpler API but doesn't integrate with Ratatui's widget system — would require manual cursor positioning and wouldn't compose with the layout.
 * **`chafa`-based rendering**: Higher quality ASCII/braille art, but requires the chafa C library to be installed, adding a system dependency.
 * **Extract art via FFmpeg**: Could pipe `ffmpeg -i file -an -vcodec copy -f image2 -` to extract art from any format, but adds subprocess overhead and Symphonia already handles the common cases natively.
+
+## More Information
+
+* ADR-0003 defines Symphonia/FFmpeg decode routing, which limits where embedded visuals are available
+* `ratatui-image` docs: protocol selection via terminal query (Sixel/Kitty/iTerm2/halfblocks)
