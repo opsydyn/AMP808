@@ -6,11 +6,19 @@ use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardVisualKey};
 use symphonia::core::probe::Hint;
 
 use super::source::AudioSource;
 use super::stream::StreamingSource;
+
+/// Embedded cover art extracted from audio file metadata.
+#[derive(Debug, Clone)]
+pub struct CoverArt {
+    pub data: Vec<u8>,
+    #[allow(dead_code)]
+    pub media_type: String,
+}
 
 /// Extensions that require FFmpeg to decode.
 const FFMPEG_EXTS: &[&str] = &["m4a", "aac", "m4b", "alac", "wma", "opus"];
@@ -51,9 +59,10 @@ pub fn decode_source(
     path: &str,
     target_sr: u32,
     stream_title: Option<Arc<RwLock<String>>>,
-) -> anyhow::Result<Box<dyn AudioSource>> {
+) -> anyhow::Result<(Box<dyn AudioSource>, Option<CoverArt>)> {
     if crate::playlist::is_url(path) {
-        return decode_http(path, target_sr, stream_title);
+        let source = decode_http(path, target_sr, stream_title)?;
+        return Ok((source, None));
     }
     decode_file(path, target_sr)
 }
@@ -107,27 +116,54 @@ fn decode_http(
     )))
 }
 
-/// Decode a local audio file using Symphonia, returning an AudioSource.
-pub fn decode_file(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn AudioSource>> {
+/// Decode a local audio file using Symphonia, returning an AudioSource and optional cover art.
+pub fn decode_file(
+    path: &str,
+    target_sr: u32,
+) -> anyhow::Result<(Box<dyn AudioSource>, Option<CoverArt>)> {
     let ext = format_ext(path);
 
     // Try FFmpeg first for formats it handles better
     if needs_ffmpeg(&ext) {
-        return super::ffmpeg::decode_ffmpeg(path, target_sr);
+        let source = super::ffmpeg::decode_ffmpeg(path, target_sr)?;
+        return Ok((source, None));
     }
 
     // Try Symphonia
     match decode_symphonia(path, target_sr) {
-        Ok(source) => Ok(source),
+        Ok((source, art)) => Ok((source, art)),
         Err(_) => {
             // Fallback to FFmpeg for anything Symphonia can't handle
-            super::ffmpeg::decode_ffmpeg(path, target_sr)
+            let source = super::ffmpeg::decode_ffmpeg(path, target_sr)?;
+            Ok((source, None))
         }
     }
 }
 
+/// Extract cover art from a metadata revision.
+fn extract_cover_art(revision: &MetadataRevision) -> Option<CoverArt> {
+    let visuals = revision.visuals();
+    if visuals.is_empty() {
+        return None;
+    }
+
+    // Prefer front cover, fall back to first visual
+    let visual = visuals
+        .iter()
+        .find(|v| v.usage == Some(StandardVisualKey::FrontCover))
+        .unwrap_or(&visuals[0]);
+
+    Some(CoverArt {
+        data: visual.data.to_vec(),
+        media_type: visual.media_type.clone(),
+    })
+}
+
 /// Decode using Symphonia's native decoders.
-fn decode_symphonia(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn AudioSource>> {
+fn decode_symphonia(
+    path: &str,
+    target_sr: u32,
+) -> anyhow::Result<(Box<dyn AudioSource>, Option<CoverArt>)> {
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -136,12 +172,25 @@ fn decode_symphonia(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn AudioS
         hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe().format(
+    let mut probed = symphonia::default::get_probe().format(
         &hint,
         mss,
         &FormatOptions::default(),
         &MetadataOptions::default(),
     )?;
+
+    // Extract cover art from probe metadata or format metadata
+    let cover_art = probed
+        .metadata
+        .get()
+        .and_then(|m| m.current().and_then(extract_cover_art))
+        .or_else(|| {
+            probed
+                .format
+                .metadata()
+                .current()
+                .and_then(extract_cover_art)
+        });
 
     let format = probed.format;
     let track = format
@@ -168,7 +217,7 @@ fn decode_symphonia(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn AudioS
         samples
     };
 
-    Ok(Box::new(PcmSource::new(samples, target_sr)))
+    Ok((Box::new(PcmSource::new(samples, target_sr)), cover_art))
 }
 
 /// Decode all samples from a format reader into stereo f32 frames.

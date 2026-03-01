@@ -300,7 +300,7 @@ mod tests {
         // Test the M3U line parsing logic directly
         let content = b"#EXTM3U\n#EXTINF:-1,Station\nhttps://stream1.example.com\n\nhttps://stream2.example.com\n";
         let mut urls = Vec::new();
-        for line in content.as_ref().lines() {
+        for line in (&content[..]).lines() {
             let line = line.unwrap();
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {

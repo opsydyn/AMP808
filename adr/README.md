@@ -24,3 +24,6 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0003: Symphonia decode with FFmpeg fallback](0003-symphonia-decode-with-ffmpeg-fallback.md) (accepted, 2026-02-28)
 - [ADR-0004: Tokio async with dedicated cpal audio thread](0004-tokio-async-with-cpal-audio-thread.md) (accepted, 2026-02-28)
 - [ADR-0005: Two-phase yt-dlp resolution](0005-two-phase-ytdlp-resolution.md) (accepted, 2026-02-28)
+- [ADR-0006: HTTP streaming with ICY metadata](0006-http-streaming-with-icy-metadata.md) (accepted, 2026-03-01)
+- [ADR-0007: Provider trait for external music services](0007-provider-trait-for-external-music-services.md) (accepted, 2026-03-01)
+- [ADR-0008: Album art display via ratatui-image](0008-album-art-display-via-ratatui-image.md) (accepted, 2026-03-01)

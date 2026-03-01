@@ -28,11 +28,12 @@ impl App {
     pub fn render_808(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        // Content sizing — use most of the terminal width
+        // Content sizing — centre both horizontally and vertically
         let content_width = 80u16.min(area.width);
-        let content_height = area.height;
+        let content_height = 28u16.min(area.height);
         let x = area.width.saturating_sub(content_width) / 2;
-        let inner = Rect::new(x, 0, content_width, content_height);
+        let y = area.height.saturating_sub(content_height) / 2;
+        let inner = Rect::new(x, y, content_width, content_height);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -57,7 +58,18 @@ impl App {
         self.render_808_knob_row2(frame, chunks[2]);
         self.render_808_now_playing(frame, chunks[4]);
         self.render_808_status(frame, chunks[5]);
-        self.render_808_spectrum(frame, chunks[7]);
+
+        // Split spectrum area for album art when available
+        if self.show_cover_art && self.cover_art_proto.is_some() {
+            let spec_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(24)])
+                .split(chunks[7]);
+            self.render_808_spectrum(frame, spec_chunks[0]);
+            self.render_cover_art(frame, spec_chunks[1]);
+        } else {
+            self.render_808_spectrum(frame, chunks[7]);
+        }
         if self.focus == Focus::Provider {
             self.render_808_provider(frame, chunks[9]);
         } else {
@@ -77,7 +89,10 @@ impl App {
                 Style::default().fg(C808_DIM),
             )),
             Line::from(vec![
-                Span::styled("  ▬▬▬  RHYTHM COMPOSER  ", Style::default().fg(C808_GREY)),
+                Span::styled(
+                    "  ▬▬▬  🦀 RHYTHM COMPOSER  ",
+                    Style::default().fg(C808_GREY),
+                ),
                 Span::styled(
                     "TR-808",
                     Style::default()
@@ -545,9 +560,9 @@ impl App {
         let text = if self.focus == Focus::Provider {
             "[↑↓]Navigate [Enter]Load Playlist [Tab]Focus [Q]Quit"
         } else if self.player.seekable() {
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [e]EQ [8]808 [/]Search [Tab]Focus [Q]Quit"
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [e]EQ [c]Art [8]808 [/]Search [Tab]Focus [Q]Quit"
         } else {
-            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [e]EQ [8]808 [/]Search [Tab]Focus [Q]Quit"
+            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [e]EQ [c]Art [8]808 [/]Search [Tab]Focus [Q]Quit"
         };
         let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
         frame.render_widget(Paragraph::new(line), area);

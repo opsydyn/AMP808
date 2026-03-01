@@ -32,6 +32,7 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 - Gapless playback with preloaded next track
 - 10-band parametric EQ with 10 built-in presets
 - FFT spectrum visualizer (bars and bricks modes)
+- Album art display from embedded cover art (sixel/kitty/iTerm2/halfblocks, auto-detected)
 - 17 built-in themes + custom user themes
 - Roland TR-808 alternate UI mode
 - Playlist: shuffle (Fisher-Yates), repeat (off/all/one), queue
@@ -157,6 +158,7 @@ Key architectural decisions are documented in [adr/](adr/):
 - [ADR-0005: Two-phase yt-dlp resolution](adr/0005-two-phase-ytdlp-resolution.md)
 - [ADR-0006: HTTP streaming with ICY metadata](adr/0006-http-streaming-with-icy-metadata.md)
 - [ADR-0007: Provider trait for external music services](adr/0007-provider-trait-for-external-music-services.md)
+- [ADR-0008: Album art display via ratatui-image](adr/0008-album-art-display-via-ratatui-image.md)
 
 ## Keyboard Shortcuts
 
@@ -171,6 +173,7 @@ Key architectural decisions are documented in [adr/](adr/):
 | `m` | Toggle mono |
 | `e` | Cycle EQ preset |
 | `v` | Cycle visualizer |
+| `c` | Toggle album art |
 | `↑ ↓` | Playlist scroll / EQ adjust |
 | `h l` | EQ cursor left/right |
 | `Enter` | Play selected track |

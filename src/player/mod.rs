@@ -16,6 +16,7 @@ use cpal::Stream;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
 
+use self::decode::CoverArt;
 use self::eq::{Biquad, EQ_FREQS};
 use self::gapless::GaplessSource;
 use self::tap::Tap;
@@ -33,6 +34,7 @@ pub struct Player {
     state: Arc<Mutex<PlayerState>>,
     paused: Arc<AtomicBool>,
     stream_title: Arc<RwLock<String>>,
+    cover_art: Arc<RwLock<Option<CoverArt>>>,
     _stream: Option<Stream>,
 }
 
@@ -136,17 +138,20 @@ impl Player {
             state,
             paused,
             stream_title: Arc::new(RwLock::new(String::new())),
+            cover_art: Arc::new(RwLock::new(None)),
             _stream: Some(stream),
         })
     }
 
     /// Start playing an audio file or HTTP stream.
     pub fn play(&self, path: &str) -> anyhow::Result<()> {
-        // Clear stream title for new track
+        // Clear stream title and cover art for new track
         *self.stream_title.write().unwrap() = String::new();
+        *self.cover_art.write().unwrap() = None;
 
-        let source =
+        let (source, art) =
             decode::decode_source(path, self.sample_rate, Some(Arc::clone(&self.stream_title)))?;
+        *self.cover_art.write().unwrap() = art;
         self.gapless.replace(source);
         self.paused.store(false, Ordering::Release);
 
@@ -158,7 +163,7 @@ impl Player {
 
     /// Preload the next track for gapless transition.
     pub fn preload(&self, path: &str) -> anyhow::Result<()> {
-        let source = decode::decode_source(path, self.sample_rate, None)?;
+        let (source, _art) = decode::decode_source(path, self.sample_rate, None)?;
         self.gapless.set_next(source);
         Ok(())
     }
@@ -171,13 +176,17 @@ impl Player {
         let paused = Arc::clone(&self.paused);
         let state = Arc::clone(&self.state);
         let stream_title = Arc::clone(&self.stream_title);
+        let cover_art = Arc::clone(&self.cover_art);
 
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                // Clear stream title
+                // Clear stream title and cover art
                 *stream_title.write().unwrap() = String::new();
+                *cover_art.write().unwrap() = None;
 
-                let source = decode::decode_source(&path, sr, Some(Arc::clone(&stream_title)))?;
+                let (source, art) =
+                    decode::decode_source(&path, sr, Some(Arc::clone(&stream_title)))?;
+                *cover_art.write().unwrap() = art;
                 gapless.replace(source);
                 paused.store(false, Ordering::Release);
                 state.lock().unwrap().playing = true;
@@ -204,6 +213,11 @@ impl Player {
         self.stream_title.read().unwrap().clone()
     }
 
+    /// Get the current track's cover art (if any).
+    pub fn cover_art(&self) -> Option<CoverArt> {
+        self.cover_art.read().unwrap().clone()
+    }
+
     /// Clear the preloaded next track.
     pub fn clear_preload(&self) {
         self.gapless.clear_next();
@@ -219,6 +233,7 @@ impl Player {
     pub fn stop(&self) {
         self.gapless.clear();
         self.paused.store(true, Ordering::Release);
+        *self.cover_art.write().unwrap() = None;
         let mut state = self.state.lock().unwrap();
         state.playing = false;
     }

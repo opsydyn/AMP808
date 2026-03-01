@@ -207,6 +207,10 @@ impl App {
                 self.vis.cycle_mode();
             }
 
+            (_, KeyCode::Char('c')) => {
+                self.show_cover_art = !self.show_cover_art;
+            }
+
             (_, KeyCode::Char('8')) => {
                 self.mode_808 = !self.mode_808;
                 if self.mode_808 {

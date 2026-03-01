@@ -44,6 +44,7 @@
 - [x] Search mode (`/`) with live filtering
 - [x] Keymap overlay (`Ctrl+K`)
 - [x] Error and save message display with TTL
+- [x] Album art display from embedded cover art (ratatui-image, sixel/kitty/iTerm2/halfblocks)
 
 ### Themes
 
@@ -87,7 +88,7 @@
 
 - [x] 113 unit tests across all modules
 - [x] Zero warnings, zero clippy issues
-- [x] 7 Architecture Decision Records (ADRs)
+- [x] 8 Architecture Decision Records (ADRs)
 
 ---
 
@@ -101,12 +102,12 @@
 - [ ] **`install.sh`** — Curl-pipe installer from GitHub releases
 - [ ] **CI release workflow** — GitHub Actions for cross-platform binaries (linux/darwin amd64/arm64, windows amd64)
 - [ ] **`config.toml.example`** — Sample config file with all fields documented
-- [ ] **tachyonfx effects** — Post-render visual effects for 808 mode (blocked on ratatui version compatibility)
+- [ ] **tachyonfx effects** — Post-render visual effects for 808 mode (unblocked: ratatui 0.30 + tachyonfx 0.25)
+- [x] ~~**Album art display** — Embedded cover art via `ratatui-image` (sixel/kitty/iTerm2/halfblocks, auto-detected)~~ (done)
 
 ### Ideas / Future
 
 - [ ] Mouse support for seek bar and playlist
-- [ ] Album art display (sixel/kitty protocol)
 - [ ] Last.fm scrobbling
 - [ ] Discord rich presence
 - [ ] Lyrics display (synced/unsynced)

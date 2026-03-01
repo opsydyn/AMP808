@@ -64,7 +64,18 @@ impl App {
         self.render_title(frame, chunks[0]);
         self.render_track_info(frame, chunks[1]);
         self.render_time_status(frame, chunks[2]);
-        self.render_spectrum(frame, chunks[4]);
+
+        // Split spectrum area for album art when available
+        if self.show_cover_art && self.cover_art_proto.is_some() {
+            let spec_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(40), Constraint::Length(24)])
+                .split(chunks[4]);
+            self.render_spectrum(frame, spec_chunks[0]);
+            self.render_cover_art(frame, spec_chunks[1]);
+        } else {
+            self.render_spectrum(frame, chunks[4]);
+        }
         self.render_seek_bar(frame, chunks[5]);
         self.render_volume(frame, chunks[7]);
         self.render_eq(frame, chunks[8]);
@@ -84,7 +95,7 @@ impl App {
     }
 
     fn render_title(&self, frame: &mut Frame, area: Rect) {
-        let line = Line::from(Span::styled("T U I A M P", self.palette.title_style()));
+        let line = Line::from(Span::styled("🦀 T U I A M P", self.palette.title_style()));
         frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), area);
     }
 
@@ -181,6 +192,13 @@ impl App {
             let y = area.y + row as u16;
             let line_area = Rect::new(area.x, y, area.width, 1);
             frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
+        }
+    }
+
+    pub fn render_cover_art(&self, frame: &mut Frame, area: Rect) {
+        if let Some(ref proto) = self.cover_art_proto {
+            let image = ratatui_image::Image::new(proto);
+            frame.render_widget(image, area);
         }
     }
 
@@ -519,9 +537,9 @@ impl App {
                 self.search_query
             )
         } else if self.player.seekable() {
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         } else {
-            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         };
 
         let line = Line::from(Span::styled(text, self.palette.help_style()));
@@ -553,6 +571,7 @@ impl App {
             ("e", "Cycle EQ preset"),
             ("t", "Choose theme"),
             ("v", "Cycle visualizer"),
+            ("c", "Toggle album art"),
             ("↑ ↓", "Playlist scroll / EQ adjust"),
             ("h l", "EQ cursor left/right"),
             ("Enter", "Play selected track"),

@@ -69,6 +69,10 @@ pub struct App {
     pub mode_808: bool,
     pub palette: Palette,
     pub stream_title: String,
+    pub show_cover_art: bool,
+    pub cover_art_proto: Option<ratatui_image::protocol::Protocol>,
+    cover_art_loaded: bool,
+    image_picker: Option<ratatui_image::picker::Picker>,
     pub provider: Option<std::sync::Arc<dyn Provider>>,
     pub provider_lists: Vec<PlaylistInfo>,
     pub prov_cursor: usize,
@@ -94,6 +98,7 @@ impl App {
         } else {
             Focus::Playlist
         };
+        let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
         let app = Self {
             player,
             playlist,
@@ -122,6 +127,10 @@ impl App {
             mode_808: false,
             palette: Palette::default(),
             stream_title: String::new(),
+            show_cover_art: true,
+            cover_art_proto: None,
+            cover_art_loaded: false,
+            image_picker,
             provider,
             provider_lists: Vec::new(),
             prov_cursor: 0,
@@ -178,6 +187,23 @@ impl App {
         let title = self.player.stream_title();
         if !title.is_empty() {
             self.stream_title = title;
+        }
+
+        // Poll cover art (once per track)
+        if !self.cover_art_loaded
+            && let Some(art) = self.player.cover_art()
+        {
+            if let Ok(img) = image::load_from_memory(&art.data)
+                && let Some(ref picker) = self.image_picker
+                && let Ok(proto) = picker.new_protocol(
+                    img,
+                    ratatui::layout::Rect::new(0, 0, 24, 5),
+                    ratatui_image::Resize::Fit(None),
+                )
+            {
+                self.cover_art_proto = Some(proto);
+            }
+            self.cover_art_loaded = true;
         }
 
         // Check if drained (end of current, no next)
@@ -290,6 +316,8 @@ impl App {
     /// Play a track (takes ownership to avoid borrow conflicts).
     pub fn play_track_owned(&mut self, track: Track) {
         self.stream_title.clear();
+        self.cover_art_proto = None;
+        self.cover_art_loaded = false;
 
         // Lazy-resolve yt-dlp URLs
         if playlist::is_ytdl(&track.path) {
