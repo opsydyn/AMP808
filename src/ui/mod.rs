@@ -26,6 +26,7 @@ use self::visualizer::Visualizer;
 use crate::player::Player;
 use crate::playlist::{self, Playlist, Track};
 use crate::resolve;
+use crate::resolve::ytdl::YtdlTempTracker;
 
 /// Messages sent from async tasks to the main event loop.
 pub enum AppMsg {
@@ -62,11 +63,17 @@ pub struct App {
     pub show_themes: bool,
     pub mode_808: bool,
     pub palette: Palette,
+    tracker: YtdlTempTracker,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
 }
 
 impl App {
-    pub fn new(player: Player, playlist: Playlist, msg_tx: mpsc::UnboundedSender<AppMsg>) -> Self {
+    pub fn new(
+        player: Player,
+        playlist: Playlist,
+        tracker: YtdlTempTracker,
+        msg_tx: mpsc::UnboundedSender<AppMsg>,
+    ) -> Self {
         let sr = player.sample_rate() as f64;
         let themes = theme::load_all();
         Self {
@@ -95,6 +102,7 @@ impl App {
             show_themes: false,
             mode_808: false,
             palette: Palette::default(),
+            tracker,
             msg_tx,
         }
     }
@@ -226,13 +234,9 @@ impl App {
             let idx = self.playlist.index().unwrap_or(0);
             let url = track.path.clone();
             let tx = self.msg_tx.clone();
+            let tracker = self.tracker.clone();
             tokio::spawn(async move {
-                match resolve::ytdl::resolve_ytdl_track(
-                    &url,
-                    &resolve::ytdl::YtdlTempTracker::new(),
-                )
-                .await
-                {
+                match resolve::ytdl::resolve_ytdl_track(&url, &tracker).await {
                     Ok(resolved) => {
                         let _ = tx.send(AppMsg::YtdlResolved {
                             index: idx,

@@ -93,7 +93,7 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     }
 
     // Build app
-    let mut app = App::new(player, pl, msg_tx);
+    let mut app = App::new(player, pl, tracker.clone(), msg_tx);
 
     // Apply EQ preset from config
     if !cfg.eq_preset.is_empty() && cfg.eq_preset != "Custom" {
