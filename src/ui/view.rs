@@ -23,6 +23,11 @@ impl App {
             return;
         }
 
+        if self.mode_808 {
+            self.render_808(frame);
+            return;
+        }
+
         // Center content in terminal
         let content_width = PANEL_WIDTH + 6; // panel + padding
         let content_height = 28u16; // approximate
@@ -74,7 +79,7 @@ impl App {
     }
 
     fn render_title(&self, frame: &mut Frame, area: Rect) {
-        let line = Line::from(Span::styled("C L I A M P", self.palette.title_style()));
+        let line = Line::from(Span::styled("T U I A M P", self.palette.title_style()));
         frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), area);
     }
 
@@ -423,7 +428,7 @@ impl App {
                 self.search_query
             )
         } else {
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         };
 
         let line = Line::from(Span::styled(text, self.palette.help_style()));
@@ -462,6 +467,7 @@ impl App {
             ("S", "Save track to ~/Music"),
             ("r", "Cycle repeat"),
             ("z", "Toggle shuffle"),
+            ("8", "Toggle 808 mode"),
             ("/", "Search playlist"),
             ("Tab", "Toggle focus"),
             ("Ctrl+K", "This keymap"),

@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
 use super::eq_presets::EQ_PRESETS;
+use super::styles::Palette;
 
 impl App {
     /// Process a key event and return whether the app should quit.
@@ -179,6 +180,15 @@ impl App {
 
             (_, KeyCode::Char('v')) => {
                 self.vis.cycle_mode();
+            }
+
+            (_, KeyCode::Char('8')) => {
+                self.mode_808 = !self.mode_808;
+                if self.mode_808 {
+                    self.palette = Palette::tr808();
+                } else {
+                    self.apply_theme(self.theme_idx);
+                }
             }
 
             _ => {}

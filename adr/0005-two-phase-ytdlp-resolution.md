@@ -17,20 +17,24 @@ The Go version solves this with a two-phase approach: fast enumerate first, lazy
 Implement two-phase yt-dlp resolution, matching the Go version's approach:
 
 **Phase 1 — Fast enumerate** (`resolve_ytdl_playlist`):
+
 ```
 yt-dlp --flat-playlist -j <page_url>
 ```
+
 - Runs async via `tokio::process::Command`
 - Parses stdout line-by-line as `YtdlFlatEntry` JSON (serde)
 - Maps to `Track { path: webpage_url, stream: true }` — the path is still a page URL, not audio
 - Fallback chain for fields: `webpage_url` -> `url` -> skip; `title` -> humanize(basename) -> url; `uploader` -> `playlist_uploader`
 
 **Phase 2 — Lazy download** (`resolve_ytdl_track`):
+
 ```
 yt-dlp -f "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio" \
        --no-playlist --print-json \
        -o "<tmpdir>/%(id)s.%(ext)s" <page_url>
 ```
+
 - Triggered on-demand when user selects a track for playback
 - Creates a temp directory (`/tmp/cliamp-ytdl-*`) registered in `YtdlTempTracker`
 - Parses stdout as `YtdlFullEntry` for metadata; falls back to `find_first_file(tmpdir)` for the audio file path
@@ -43,19 +47,19 @@ yt-dlp -f "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio" \
 
 ## Consequences
 
-* Good, because playlist enumeration is near-instant (~1s for flat-playlist)
-* Good, because audio is only downloaded when actually played — saves bandwidth and disk
-* Good, because downloaded files are seekable local PCM (full position/duration support)
-* Bad, because there's a download delay (2-10s) when first playing a yt-dlp track
-* Bad, because temp files accumulate during playback (cleaned on exit)
-* Bad, because yt-dlp must be installed separately (`brew install yt-dlp`)
+- Good, because playlist enumeration is near-instant (~1s for flat-playlist)
+- Good, because audio is only downloaded when actually played — saves bandwidth and disk
+- Good, because downloaded files are seekable local PCM (full position/duration support)
+- Bad, because there's a download delay (2-10s) when first playing a yt-dlp track
+- Bad, because temp files accumulate during playback (cleaned on exit)
+- Bad, because yt-dlp must be installed separately (`brew install yt-dlp`)
 
 ## Implementation Plan
 
-* **Affected paths**: `src/resolve/ytdl.rs` (both phases + temp tracker), `src/resolve/mod.rs` (URL routing), `src/ui/mod.rs` (buffering state + AppMsg handling)
-* **Dependencies**: `serde`, `serde_json`, `tokio` (process feature)
-* **Patterns to follow**: Phase 2 runs in `tokio::spawn`, sends `AppMsg::YtdlResolved` or `AppMsg::YtdlError` via channel. UI sets `buffering = true` during download. Preload is skipped for yt-dlp tracks (can't preload without downloading).
-* **Patterns to avoid**: Do not download audio during Phase 1 (flat-playlist only). Do not preload yt-dlp tracks. Do not use `tempfile::TempDir` (auto-cleanup would delete files during playback).
+- **Affected paths**: `src/resolve/ytdl.rs` (both phases + temp tracker), `src/resolve/mod.rs` (URL routing), `src/ui/mod.rs` (buffering state + AppMsg handling)
+- **Dependencies**: `serde`, `serde_json`, `tokio` (process feature)
+- **Patterns to follow**: Phase 2 runs in `tokio::spawn`, sends `AppMsg::YtdlResolved` or `AppMsg::YtdlError` via channel. UI sets `buffering = true` during download. Preload is skipped for yt-dlp tracks (can't preload without downloading).
+- **Patterns to avoid**: Do not download audio during Phase 1 (flat-playlist only). Do not preload yt-dlp tracks. Do not use `tempfile::TempDir` (auto-cleanup would delete files during playback).
 
 ### Verification
 
@@ -68,9 +72,9 @@ yt-dlp -f "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio" \
 
 ## Alternatives Considered
 
-* **Stream directly via URL**: Use yt-dlp to extract direct audio URL, stream without downloading. Rejected because direct URLs are often short-lived and not seekable.
-* **Download all tracks upfront**: Download entire playlist at load time. Rejected because it's slow and wastes bandwidth for skipped tracks.
-* **Use yt-dlp as a library (pyo3)**: Embed Python yt-dlp via PyO3. Rejected because it adds Python as a runtime dependency and complicates the build.
+- **Stream directly via URL**: Use yt-dlp to extract direct audio URL, stream without downloading. Rejected because direct URLs are often short-lived and not seekable.
+- **Download all tracks upfront**: Download entire playlist at load time. Rejected because it's slow and wastes bandwidth for skipped tracks.
+- **Use yt-dlp as a library (pyo3)**: Embed Python yt-dlp via PyO3. Rejected because it adds Python as a runtime dependency and complicates the build.
 
 ## More Information
 

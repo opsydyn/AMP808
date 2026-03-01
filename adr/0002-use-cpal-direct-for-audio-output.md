@@ -26,18 +26,20 @@ Use `cpal 0.15` directly, without rodio or kira wrappers.
 
 ## Consequences
 
-* Good, because full control over the audio callback enables zero-gap transitions and custom DSP
-* Good, because no wrapper overhead — we process interleaved `[f32; 2]` frames directly
-* Good, because cpal is the most widely used Rust audio crate with macOS/Linux/Windows support
-* Bad, because more boilerplate than rodio (we write the callback, manage the stream lifetime)
-* Bad, because no built-in resampling — we implement linear interpolation ourselves
+- Good, because full control over the audio callback enables zero-gap transitions and custom DSP
+
+- Good, because no wrapper overhead — we process interleaved `[f32; 2]` frames directly
+
+- Good, because cpal is the most widely used Rust audio crate with macOS/Linux/Windows support
+- Bad, because more boilerplate than rodio (we write the callback, manage the stream lifetime)
+- Bad, because no built-in resampling — we implement linear interpolation ourselves
 
 ## Implementation Plan
 
-* **Affected paths**: `src/player/mod.rs`, `src/player/gapless.rs`, `src/player/eq.rs`, `src/player/volume.rs`, `src/player/tap.rs`
-* **Dependencies**: `cpal = "0.15"`
-* **Patterns to follow**: Audio callback must never block (use `try_lock`, pre-allocated buffers). All DSP operates on `&mut [[f32; 2]]` stereo frames.
-* **Patterns to avoid**: Do not allocate in the audio callback. Do not hold locks across the callback boundary. Do not use tokio in the audio thread.
+- **Affected paths**: `src/player/mod.rs`, `src/player/gapless.rs`, `src/player/eq.rs`, `src/player/volume.rs`, `src/player/tap.rs`
+- **Dependencies**: `cpal = "0.15"`
+- **Patterns to follow**: Audio callback must never block (use `try_lock`, pre-allocated buffers). All DSP operates on `&mut [[f32; 2]]` stereo frames.
+- **Patterns to avoid**: Do not allocate in the audio callback. Do not hold locks across the callback boundary. Do not use tokio in the audio thread.
 
 ### Verification
 
@@ -49,8 +51,8 @@ Use `cpal 0.15` directly, without rodio or kira wrappers.
 
 ## Alternatives Considered
 
-* **rodio**: Higher-level API with built-in decoders and mixer. Rejected because it doesn't expose the raw audio callback — we need custom DSP chain control and gapless source swapping.
-* **kira**: Game audio engine with tweening and spatial audio. Rejected as overkill — we don't need spatial audio, and kira's abstraction model doesn't map to our pipeline.
+- **rodio**: Higher-level API with built-in decoders and mixer. Rejected because it doesn't expose the raw audio callback — we need custom DSP chain control and gapless source swapping.
+- **kira**: Game audio engine with tweening and spatial audio. Rejected as overkill — we don't need spatial audio, and kira's abstraction model doesn't map to our pipeline.
 
 ## More Information
 

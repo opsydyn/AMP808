@@ -36,6 +36,10 @@ pub struct Config {
     /// Bands: 70Hz, 180Hz, 320Hz, 600Hz, 1kHz, 3kHz, 6kHz, 12kHz, 14kHz, 16kHz.
     #[serde(default = "default_eq")]
     pub eq: Vec<f64>,
+
+    /// Whether 808 mode (Roland TR-808 layout) is active.
+    #[serde(default)]
+    pub mode_808: bool,
 }
 
 fn default_repeat() -> String {
@@ -56,6 +60,7 @@ impl Default for Config {
             theme: String::new(),
             eq_preset: String::new(),
             eq: vec![0.0; 10],
+            mode_808: false,
         }
     }
 }
@@ -224,6 +229,7 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
             theme: "dracula".to_string(),
             eq_preset: "Jazz".to_string(),
             eq: vec![1.0, 2.0, 3.0, 4.0, 5.0, -1.0, -2.0, -3.0, -4.0, -5.0],
+            mode_808: false,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();

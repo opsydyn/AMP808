@@ -11,6 +11,7 @@ decision-makers: alan
 CLIAMP-RS must decode multiple audio formats: MP3, FLAC, WAV, OGG (native priority) and M4A, AAC, OPUS, WMA, ALAC (codec-licensed formats). The Go version uses gopxl/beep decoders for native formats and shells out to FFmpeg for the rest.
 
 We need a decode strategy that:
+
 1. Handles common formats without external dependencies
 2. Falls back gracefully for codec-licensed formats
 3. Produces in-memory seekable PCM for the gapless playback engine
@@ -21,6 +22,7 @@ We need a decode strategy that:
 Use `symphonia 0.5` (all features) for native decoding of MP3, FLAC, WAV, and OGG. Fall back to FFmpeg subprocess (`ffmpeg -i <path> -f f32le -ar 44100 -ac 2 pipe:1`) for M4A, AAC, OPUS, WMA, and ALAC.
 
 **Decode pipeline**:
+
 1. `format_ext()` determines the file extension (handles URLs with query params)
 2. Extensions in `FFMPEG_EXTS` (`m4a`, `aac`, `m4b`, `alac`, `wma`, `opus`) go directly to FFmpeg
 3. All other extensions try Symphonia first, with FFmpeg as a fallback on error
@@ -47,11 +49,11 @@ Use `symphonia 0.5` (all features) for native decoding of MP3, FLAC, WAV, and OG
 
 ### Verification
 
-- [x] `decode_file("test.mp3", 44100)` returns a seekable PcmSource via Symphonia
-- [x] `decode_file("test.m4a", 44100)` routes to FFmpeg and returns PcmSource
-- [x] FFmpeg unavailable produces a clear error message
-- [x] Resampling from 48000 Hz to 44100 Hz produces correct output length
-- [x] PcmSource seek/position/len_frames are correct (unit tests passing)
+* [x] `decode_file("test.mp3", 44100)` returns a seekable PcmSource via Symphonia
+* [x] `decode_file("test.m4a", 44100)` routes to FFmpeg and returns PcmSource
+* [x] FFmpeg unavailable produces a clear error message
+* [x] Resampling from 48000 Hz to 44100 Hz produces correct output length
+* [x] PcmSource seek/position/len_frames are correct (unit tests passing)
 
 ## Alternatives Considered
 
@@ -61,6 +63,6 @@ Use `symphonia 0.5` (all features) for native decoding of MP3, FLAC, WAV, and OG
 
 ## More Information
 
-- ADR-0002 covers the audio output (cpal direct)
-- The Go version uses the same dual strategy: native beep decoders + FFmpeg fallback
-- FFmpeg command: `ffmpeg -i <path> -f f32le -ar 44100 -ac 2 -loglevel error pipe:1`
+* ADR-0002 covers the audio output (cpal direct)
+* The Go version uses the same dual strategy: native beep decoders + FFmpeg fallback
+* FFmpeg command: `ffmpeg -i <path> -f f32le -ar 44100 -ac 2 -loglevel error pipe:1`

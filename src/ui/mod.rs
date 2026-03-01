@@ -3,6 +3,7 @@ pub mod keys;
 pub mod styles;
 pub mod theme;
 pub mod view;
+pub mod view_808;
 pub mod visualizer;
 
 use std::io;
@@ -59,6 +60,7 @@ pub struct App {
     pub theme_idx: Option<usize>,
     pub theme_cursor: usize,
     pub show_themes: bool,
+    pub mode_808: bool,
     pub palette: Palette,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
 }
@@ -91,6 +93,7 @@ impl App {
             theme_idx: None,
             theme_cursor: 0,
             show_themes: false,
+            mode_808: false,
             palette: Palette::default(),
             msg_tx,
         }

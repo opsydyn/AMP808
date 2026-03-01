@@ -112,6 +112,12 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
         app.apply_theme(idx);
     }
 
+    // Apply 808 mode from config
+    if cfg.mode_808 {
+        app.mode_808 = true;
+        app.palette = ui::styles::Palette::tr808();
+    }
+
     // Auto-play first track if we have any
     if !app.playlist.is_empty() {
         app.play_current_track();
@@ -143,6 +149,7 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
             .and_then(|i| app.themes.get(i))
             .map_or_else(String::new, |t| t.name.clone()),
         eq: app.player.eq_bands().to_vec(),
+        mode_808: app.mode_808,
     };
     if let Err(e) = save_cfg.save() {
         eprintln!("warning: failed to save config: {e}");

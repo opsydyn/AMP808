@@ -23,6 +23,23 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// 808 color palette (Roland TR-808 inspired).
+    pub fn tr808() -> Self {
+        Self {
+            title: Color::Rgb(0xFF, 0xD4, 0x00),         // yellow
+            text: Color::Rgb(0xC9, 0xC9, 0xC9),          // panel grey
+            dim: Color::Rgb(0x66, 0x66, 0x66),           // darker grey
+            accent: Color::Rgb(0xFF, 0xD4, 0x00),        // yellow
+            playing: Color::Rgb(0xF0, 0x5A, 0x28),       // orange
+            seek_bar: Color::Rgb(0xF6, 0xA6, 0x23),      // amber
+            volume: Color::Rgb(0xF0, 0x5A, 0x28),        // orange
+            error: Color::Rgb(0xD7, 0x26, 0x2E),         // red
+            spectrum_low: Color::Rgb(0xFF, 0xD4, 0x00),  // yellow
+            spectrum_mid: Color::Rgb(0xF6, 0xA6, 0x23),  // amber
+            spectrum_high: Color::Rgb(0xD7, 0x26, 0x2E), // red
+        }
+    }
+
     /// Create a palette from a theme.
     pub fn from_theme(theme: &Theme) -> Self {
         if theme.is_default() {

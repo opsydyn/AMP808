@@ -20,6 +20,7 @@ The Go version uses goroutines for everything. In Rust, we need to choose betwee
 Use **tokio** (full features) for all I/O-bound work. The cpal audio thread runs independently — it is NOT managed by tokio.
 
 **Architecture**:
+
 - `main()` is `#[tokio::main]` — the tokio runtime owns the event loop
 - The TUI event loop uses `tokio::select!` to multiplex:
   - `tokio::time::sleep(50ms)` tick intervals
@@ -33,18 +34,18 @@ Use **tokio** (full features) for all I/O-bound work. The cpal audio thread runs
 
 ## Consequences
 
-* Good, because yt-dlp resolution and HTTP fetching don't block the UI
-* Good, because `tokio::select!` cleanly multiplexes events, messages, and ticks
-* Good, because the audio thread has no async overhead — pure real-time processing
-* Bad, because crossterm events are sync and must be polled (not truly async in `select!`)
-* Neutral, because `tokio = { features = ["full"] }` adds compile time but we need process, time, sync, and net features
+- Good, because yt-dlp resolution and HTTP fetching don't block the UI
+- Good, because `tokio::select!` cleanly multiplexes events, messages, and ticks
+- Good, because the audio thread has no async overhead — pure real-time processing
+- Bad, because crossterm events are sync and must be polled (not truly async in `select!`)
+- Neutral, because `tokio = { features = ["full"] }` adds compile time but we need process, time, sync, and net features
 
 ## Implementation Plan
 
-* **Affected paths**: `src/main.rs` (`#[tokio::main]`), `src/ui/mod.rs` (event loop with `tokio::select!`), `src/resolve/ytdl.rs` (`tokio::process::Command`), `src/resolve/mod.rs` (async feed/M3U resolution)
-* **Dependencies**: `tokio = { version = "1", features = ["full"] }`
-* **Patterns to follow**: All I/O tasks use `tokio::spawn` and send results via `AppMsg` channel. The `App` struct is NOT `Send` — it lives on the main thread and processes messages synchronously.
-* **Patterns to avoid**: Do not use `tokio::spawn_blocking` for decode (it's fast enough sync). Do not pass `&Player` across await points (it's not `Send`). Do not use async in the cpal callback.
+- **Affected paths**: `src/main.rs` (`#[tokio::main]`), `src/ui/mod.rs` (event loop with `tokio::select!`), `src/resolve/ytdl.rs` (`tokio::process::Command`), `src/resolve/mod.rs` (async feed/M3U resolution)
+- **Dependencies**: `tokio = { version = "1", features = ["full"] }`
+- **Patterns to follow**: All I/O tasks use `tokio::spawn` and send results via `AppMsg` channel. The `App` struct is NOT `Send` — it lives on the main thread and processes messages synchronously.
+- **Patterns to avoid**: Do not use `tokio::spawn_blocking` for decode (it's fast enough sync). Do not pass `&Player` across await points (it's not `Send`). Do not use async in the cpal callback.
 
 ### Verification
 
@@ -56,9 +57,9 @@ Use **tokio** (full features) for all I/O-bound work. The cpal audio thread runs
 
 ## Alternatives Considered
 
-* **Pure sync with std::thread**: Spawn OS threads for I/O tasks. Rejected because managing thread pools, channels, and timeouts manually is error-prone — tokio handles this.
-* **async-std**: Alternative async runtime. Rejected because tokio has broader ecosystem support (reqwest, tokio::process) and is the de facto standard.
-* **smol**: Lightweight async runtime. Rejected because we need `tokio::process::Command` for yt-dlp subprocess and reqwest for HTTP — both are tokio-native.
+- **Pure sync with std::thread**: Spawn OS threads for I/O tasks. Rejected because managing thread pools, channels, and timeouts manually is error-prone — tokio handles this.
+- **async-std**: Alternative async runtime. Rejected because tokio has broader ecosystem support (reqwest, tokio::process) and is the de facto standard.
+- **smol**: Lightweight async runtime. Rejected because we need `tokio::process::Command` for yt-dlp subprocess and reqwest for HTTP — both are tokio-native.
 
 ## More Information
 
