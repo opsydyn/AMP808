@@ -12,6 +12,12 @@ impl App {
             return false;
         }
 
+        // Theme picker mode
+        if self.show_themes {
+            self.handle_theme_key(key);
+            return false;
+        }
+
         // Search mode
         if self.searching {
             self.handle_search_key(key);
@@ -141,6 +147,15 @@ impl App {
                 self.apply_eq_preset();
             }
 
+            (_, KeyCode::Char('t')) => {
+                // Set cursor to current theme position
+                self.theme_cursor = match self.theme_idx {
+                    Some(i) => i + 1, // +1 because Default is at 0
+                    None => 0,
+                };
+                self.show_themes = true;
+            }
+
             (_, KeyCode::Char('a')) => {
                 if self.focus == Focus::Playlist && !self.playlist.dequeue(self.pl_cursor) {
                     self.playlist.queue(self.pl_cursor);
@@ -170,6 +185,46 @@ impl App {
         }
 
         false
+    }
+
+    fn handle_theme_key(&mut self, key: KeyEvent) {
+        let count = self.themes.len() + 1; // +1 for Default
+        match key.code {
+            KeyCode::Esc => {
+                self.show_themes = false;
+            }
+
+            KeyCode::Up => {
+                if self.theme_cursor > 0 {
+                    self.theme_cursor -= 1;
+                    // Live preview
+                    self.apply_theme_from_cursor();
+                }
+            }
+
+            KeyCode::Down => {
+                if self.theme_cursor < count - 1 {
+                    self.theme_cursor += 1;
+                    // Live preview
+                    self.apply_theme_from_cursor();
+                }
+            }
+
+            KeyCode::Enter => {
+                self.apply_theme_from_cursor();
+                self.show_themes = false;
+            }
+
+            _ => {}
+        }
+    }
+
+    fn apply_theme_from_cursor(&mut self) {
+        if self.theme_cursor == 0 {
+            self.apply_theme(None);
+        } else {
+            self.apply_theme(Some(self.theme_cursor - 1));
+        }
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {

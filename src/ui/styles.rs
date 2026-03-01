@@ -1,113 +1,153 @@
 use ratatui::style::{Color, Modifier, Style};
 
-/// CLIAMP color palette using standard ANSI terminal colors.
-pub const COLOR_TITLE: Color = Color::LightGreen;
-pub const COLOR_TEXT: Color = Color::White;
-pub const COLOR_DIM: Color = Color::Gray;
-pub const COLOR_ACCENT: Color = Color::LightYellow;
-pub const COLOR_PLAYING: Color = Color::LightGreen;
-pub const COLOR_SEEK_BAR: Color = Color::LightYellow;
-pub const COLOR_VOLUME: Color = Color::Green;
-pub const COLOR_ERROR: Color = Color::LightRed;
-
-/// Spectrum gradient colors.
-pub const SPECTRUM_LOW: Color = Color::LightGreen;
-pub const SPECTRUM_MID: Color = Color::LightYellow;
-pub const SPECTRUM_HIGH: Color = Color::LightRed;
+use super::theme::Theme;
 
 /// Panel width (usable inner width).
 pub const PANEL_WIDTH: u16 = 74;
 
-// Pre-built styles
-
-pub fn title_style() -> Style {
-    Style::default()
-        .fg(COLOR_TITLE)
-        .add_modifier(Modifier::BOLD)
+/// Derived color palette from the active theme.
+/// Stored in App and used by all render functions.
+#[derive(Debug, Clone)]
+pub struct Palette {
+    pub title: Color,
+    pub text: Color,
+    pub dim: Color,
+    pub accent: Color,
+    pub playing: Color,
+    pub seek_bar: Color,
+    pub volume: Color,
+    pub error: Color,
+    pub spectrum_low: Color,
+    pub spectrum_mid: Color,
+    pub spectrum_high: Color,
 }
 
-pub fn track_style() -> Style {
-    Style::default().fg(COLOR_ACCENT)
+impl Palette {
+    /// Create a palette from a theme.
+    pub fn from_theme(theme: &Theme) -> Self {
+        if theme.is_default() {
+            Self::default()
+        } else {
+            Self {
+                title: theme.accent,
+                text: theme.bright_fg,
+                dim: theme.fg,
+                accent: theme.accent,
+                playing: theme.green,
+                seek_bar: theme.accent,
+                volume: theme.green,
+                error: theme.red,
+                spectrum_low: theme.green,
+                spectrum_mid: theme.yellow,
+                spectrum_high: theme.red,
+            }
+        }
+    }
+
+    pub fn title_style(&self) -> Style {
+        Style::default().fg(self.title).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn track_style(&self) -> Style {
+        Style::default().fg(self.accent)
+    }
+
+    pub fn time_style(&self) -> Style {
+        Style::default().fg(self.text)
+    }
+
+    pub fn status_style(&self) -> Style {
+        Style::default()
+            .fg(self.playing)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn dim_style(&self) -> Style {
+        Style::default().fg(self.dim)
+    }
+
+    pub fn label_style(&self) -> Style {
+        Style::default().fg(self.text).add_modifier(Modifier::BOLD)
+    }
+
+    pub fn eq_active_style(&self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn eq_inactive_style(&self) -> Style {
+        Style::default().fg(self.dim)
+    }
+
+    pub fn playlist_active_style(&self) -> Style {
+        Style::default()
+            .fg(self.playing)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn playlist_item_style(&self) -> Style {
+        Style::default().fg(self.text)
+    }
+
+    pub fn playlist_selected_style(&self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn help_style(&self) -> Style {
+        Style::default().fg(self.dim)
+    }
+
+    pub fn error_style(&self) -> Style {
+        Style::default().fg(self.error)
+    }
+
+    pub fn active_toggle_style(&self) -> Style {
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn seek_fill_style(&self) -> Style {
+        Style::default().fg(self.seek_bar)
+    }
+
+    pub fn seek_dim_style(&self) -> Style {
+        Style::default().fg(self.dim)
+    }
+
+    pub fn vol_bar_style(&self) -> Style {
+        Style::default().fg(self.volume)
+    }
+
+    pub fn spectrum_style(&self, row_bottom: f64) -> Style {
+        let color = if row_bottom >= 0.6 {
+            self.spectrum_high
+        } else if row_bottom >= 0.3 {
+            self.spectrum_mid
+        } else {
+            self.spectrum_low
+        };
+        Style::default().fg(color)
+    }
 }
 
-pub fn time_style() -> Style {
-    Style::default().fg(COLOR_TEXT)
-}
-
-pub fn status_style() -> Style {
-    Style::default()
-        .fg(COLOR_PLAYING)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn dim_style() -> Style {
-    Style::default().fg(COLOR_DIM)
-}
-
-pub fn label_style() -> Style {
-    Style::default().fg(COLOR_TEXT).add_modifier(Modifier::BOLD)
-}
-
-pub fn eq_active_style() -> Style {
-    Style::default()
-        .fg(COLOR_ACCENT)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn eq_inactive_style() -> Style {
-    Style::default().fg(COLOR_DIM)
-}
-
-pub fn playlist_active_style() -> Style {
-    Style::default()
-        .fg(COLOR_PLAYING)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn playlist_item_style() -> Style {
-    Style::default().fg(COLOR_TEXT)
-}
-
-pub fn playlist_selected_style() -> Style {
-    Style::default()
-        .fg(COLOR_ACCENT)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn help_style() -> Style {
-    Style::default().fg(COLOR_DIM)
-}
-
-pub fn error_style() -> Style {
-    Style::default().fg(COLOR_ERROR)
-}
-
-pub fn active_toggle_style() -> Style {
-    Style::default()
-        .fg(COLOR_ACCENT)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub fn seek_fill_style() -> Style {
-    Style::default().fg(COLOR_SEEK_BAR)
-}
-
-pub fn seek_dim_style() -> Style {
-    Style::default().fg(COLOR_DIM)
-}
-
-pub fn vol_bar_style() -> Style {
-    Style::default().fg(COLOR_VOLUME)
-}
-
-/// Spectrum color for a given row height (0.0 to 1.0).
-pub fn spectrum_style(row_bottom: f64) -> Style {
-    let color = if row_bottom >= 0.6 {
-        SPECTRUM_HIGH
-    } else if row_bottom >= 0.3 {
-        SPECTRUM_MID
-    } else {
-        SPECTRUM_LOW
-    };
-    Style::default().fg(color)
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            title: Color::LightGreen,
+            text: Color::White,
+            dim: Color::Gray,
+            accent: Color::LightYellow,
+            playing: Color::LightGreen,
+            seek_bar: Color::LightYellow,
+            volume: Color::Green,
+            error: Color::LightRed,
+            spectrum_low: Color::LightGreen,
+            spectrum_mid: Color::LightYellow,
+            spectrum_high: Color::LightRed,
+        }
+    }
 }

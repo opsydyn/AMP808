@@ -106,6 +106,12 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
         }
     }
 
+    // Apply theme from config
+    if !cfg.theme.is_empty() {
+        let idx = ui::theme::find_by_name(&app.themes, &cfg.theme);
+        app.apply_theme(idx);
+    }
+
     // Auto-play first track if we have any
     if !app.playlist.is_empty() {
         app.play_current_track();
@@ -132,8 +138,11 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
                     .map_or("Custom".to_string(), |p| p.name.to_string())
             },
         ),
+        theme: app
+            .theme_idx
+            .and_then(|i| app.themes.get(i))
+            .map_or_else(String::new, |t| t.name.clone()),
         eq: app.player.eq_bands().to_vec(),
-        ..cfg
     };
     if let Err(e) = save_cfg.save() {
         eprintln!("warning: failed to save config: {e}");

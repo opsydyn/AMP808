@@ -5,7 +5,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::App;
 use super::keys::Focus;
-use super::styles::*;
+use super::styles::PANEL_WIDTH;
+use super::theme;
 
 impl App {
     /// Render the full TUI frame.
@@ -14,6 +15,11 @@ impl App {
 
         if self.show_keymap {
             self.render_keymap(frame, area);
+            return;
+        }
+
+        if self.show_themes {
+            self.render_theme_picker(frame, area);
             return;
         }
 
@@ -68,7 +74,7 @@ impl App {
     }
 
     fn render_title(&self, frame: &mut Frame, area: Rect) {
-        let line = Line::from(Span::styled("C L I A M P", title_style()));
+        let line = Line::from(Span::styled("C L I A M P", self.palette.title_style()));
         frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), area);
     }
 
@@ -95,7 +101,7 @@ impl App {
             format!("♫ {display}")
         };
 
-        let line = Line::from(Span::styled(display, track_style()));
+        let line = Line::from(Span::styled(display, self.palette.track_style()));
         frame.render_widget(Paragraph::new(line), area);
     }
 
@@ -109,16 +115,16 @@ impl App {
         let time_str = format!("{pos_min:02}:{pos_sec:02} / {dur_min:02}:{dur_sec:02}");
 
         let status = if self.buffering {
-            Span::styled("◌ Buffering...", status_style())
+            Span::styled("◌ Buffering...", self.palette.status_style())
         } else if self.player.is_playing() && self.player.is_paused() {
-            Span::styled("⏸ Paused", status_style())
+            Span::styled("⏸ Paused", self.palette.status_style())
         } else if self.player.is_playing() {
-            Span::styled("▶ Playing", status_style())
+            Span::styled("▶ Playing", self.palette.status_style())
         } else {
-            Span::styled("■ Stopped", dim_style())
+            Span::styled("■ Stopped", self.palette.dim_style())
         };
 
-        let time_span = Span::styled(time_str, time_style());
+        let time_span = Span::styled(time_str, self.palette.time_style());
         let gap = area
             .width
             .saturating_sub(time_span.width() as u16 + status.width() as u16);
@@ -140,7 +146,12 @@ impl App {
             let spans: Vec<Span> = spec_line
                 .segments
                 .iter()
-                .flat_map(|seg| vec![Span::styled(&seg.text, spectrum_style(seg.row_bottom))])
+                .flat_map(|seg| {
+                    vec![Span::styled(
+                        &seg.text,
+                        self.palette.spectrum_style(seg.row_bottom),
+                    )]
+                })
                 .collect();
 
             let y = area.y + row as u16;
@@ -161,12 +172,15 @@ impl App {
         let filled = (progress * (w.saturating_sub(1)) as f64) as usize;
 
         let mut spans = vec![
-            Span::styled("━".repeat(filled), seek_fill_style()),
-            Span::styled("●", seek_fill_style()),
+            Span::styled("━".repeat(filled), self.palette.seek_fill_style()),
+            Span::styled("●", self.palette.seek_fill_style()),
         ];
         let remaining = w.saturating_sub(filled + 1);
         if remaining > 0 {
-            spans.push(Span::styled("━".repeat(remaining), seek_dim_style()));
+            spans.push(Span::styled(
+                "━".repeat(remaining),
+                self.palette.seek_dim_style(),
+            ));
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -180,14 +194,14 @@ impl App {
         let filled = (frac * bar_w as f64) as usize;
 
         let mut spans = vec![
-            Span::styled("VOL ", label_style()),
-            Span::styled("█".repeat(filled), vol_bar_style()),
-            Span::styled("░".repeat(bar_w - filled), dim_style()),
-            Span::styled(format!(" {:+.1}dB", vol), dim_style()),
+            Span::styled("VOL ", self.palette.label_style()),
+            Span::styled("█".repeat(filled), self.palette.vol_bar_style()),
+            Span::styled("░".repeat(bar_w - filled), self.palette.dim_style()),
+            Span::styled(format!(" {:+.1}dB", vol), self.palette.dim_style()),
         ];
 
         if self.player.mono() {
-            spans.push(Span::styled(" [Mono]", active_toggle_style()));
+            spans.push(Span::styled(" [Mono]", self.palette.active_toggle_style()));
         }
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -199,7 +213,7 @@ impl App {
             "70", "180", "320", "600", "1k", "3k", "6k", "12k", "14k", "16k",
         ];
 
-        let mut spans = vec![Span::styled("EQ  ", label_style())];
+        let mut spans = vec![Span::styled("EQ  ", self.palette.label_style())];
 
         for (i, label) in labels.iter().enumerate() {
             let display = if bands[i] != 0.0 {
@@ -209,9 +223,9 @@ impl App {
             };
 
             let style = if self.focus == Focus::EQ && i == self.eq_cursor {
-                eq_active_style()
+                self.palette.eq_active_style()
             } else {
-                eq_inactive_style()
+                self.palette.eq_inactive_style()
             };
 
             spans.push(Span::styled(display, style));
@@ -222,38 +236,53 @@ impl App {
 
         // Preset name
         let preset_name = self.eq_preset_name();
-        spans.push(Span::styled(format!(" [{preset_name}]"), dim_style()));
+        spans.push(Span::styled(
+            format!(" [{preset_name}]"),
+            self.palette.dim_style(),
+        ));
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_playlist_header(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = vec![Span::styled("── Playlist ── ", dim_style())];
+        let mut spans = vec![Span::styled("── Playlist ── ", self.palette.dim_style())];
 
         if self.playlist.shuffled() {
-            spans.push(Span::styled("[Shuffle]", active_toggle_style()));
+            spans.push(Span::styled(
+                "[Shuffle]",
+                self.palette.active_toggle_style(),
+            ));
         } else {
-            spans.push(Span::styled("[Shuffle]", dim_style()));
+            spans.push(Span::styled("[Shuffle]", self.palette.dim_style()));
         }
 
         spans.push(Span::raw(" "));
 
         let repeat_str = format!("[Repeat: {}]", self.playlist.repeat());
         if self.playlist.repeat() != crate::playlist::RepeatMode::Off {
-            spans.push(Span::styled(repeat_str, active_toggle_style()));
+            spans.push(Span::styled(repeat_str, self.palette.active_toggle_style()));
         } else {
-            spans.push(Span::styled(repeat_str, dim_style()));
+            spans.push(Span::styled(repeat_str, self.palette.dim_style()));
         }
 
         let q_len = self.playlist.queue_len();
         if q_len > 0 {
             spans.push(Span::styled(
                 format!(" [Queue: {q_len}]"),
-                active_toggle_style(),
+                self.palette.active_toggle_style(),
             ));
         }
 
-        spans.push(Span::styled(" ──", dim_style()));
+        // Show theme name if not default
+        let name = self.theme_name();
+        if name != theme::DEFAULT_NAME {
+            spans.push(Span::styled(
+                format!(" [Theme: {name}]"),
+                self.palette.active_toggle_style(),
+            ));
+        }
+
+        spans.push(Span::styled(" ──", self.palette.dim_style()));
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
@@ -261,7 +290,7 @@ impl App {
     fn render_playlist(&self, frame: &mut Frame, area: Rect) {
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
-            let line = Line::from(Span::styled("  No tracks loaded", dim_style()));
+            let line = Line::from(Span::styled("  No tracks loaded", self.palette.dim_style()));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -286,15 +315,15 @@ impl App {
             }
 
             let mut prefix = "  ";
-            let mut style = playlist_item_style();
+            let mut style = self.palette.playlist_item_style();
 
             if i == current_idx && self.player.is_playing() {
                 prefix = "▶ ";
-                style = playlist_active_style();
+                style = self.palette.playlist_active_style();
             }
 
             if self.focus == Focus::Playlist && i == self.pl_cursor {
-                style = playlist_selected_style();
+                style = self.palette.playlist_selected_style();
             }
 
             let name = tracks[i].display_name();
@@ -314,7 +343,10 @@ impl App {
 
             let qp = self.playlist.queue_position(i);
             if qp > 0 {
-                spans.push(Span::styled(format!(" [Q{qp}]"), active_toggle_style()));
+                spans.push(Span::styled(
+                    format!(" [Q{qp}]"),
+                    self.palette.active_toggle_style(),
+                ));
             }
 
             lines.push(Line::from(spans));
@@ -330,7 +362,7 @@ impl App {
             } else {
                 "  No matches"
             };
-            let line = Line::from(Span::styled(text, dim_style()));
+            let line = Line::from(Span::styled(text, self.palette.dim_style()));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -353,15 +385,15 @@ impl App {
             let i = self.search_results[j];
 
             let mut prefix = "  ";
-            let mut style = playlist_item_style();
+            let mut style = self.palette.playlist_item_style();
 
             if i == current_idx && self.player.is_playing() {
                 prefix = "▶ ";
-                style = playlist_active_style();
+                style = self.palette.playlist_active_style();
             }
 
             if j == self.search_cursor {
-                style = playlist_selected_style();
+                style = self.palette.playlist_selected_style();
             }
 
             let name = tracks[i].display_name();
@@ -391,19 +423,22 @@ impl App {
                 self.search_query
             )
         } else {
-            "[Spc]⏯  [<>]Trk [←→]Seek [+-]Vol [m]Mono [e]EQ [v]Vis [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         };
 
-        let line = Line::from(Span::styled(text, help_style()));
+        let line = Line::from(Span::styled(text, self.palette.help_style()));
         frame.render_widget(Paragraph::new(line), area);
     }
 
     fn render_status_line(&self, frame: &mut Frame, area: Rect) {
         if let Some(ref err) = self.err {
-            let line = Line::from(Span::styled(format!("ERR: {err}"), error_style()));
+            let line = Line::from(Span::styled(
+                format!("ERR: {err}"),
+                self.palette.error_style(),
+            ));
             frame.render_widget(Paragraph::new(line), area);
         } else if !self.save_msg.is_empty() {
-            let line = Line::from(Span::styled(&self.save_msg, status_style()));
+            let line = Line::from(Span::styled(&self.save_msg, self.palette.status_style()));
             frame.render_widget(Paragraph::new(line), area);
         }
     }
@@ -418,6 +453,7 @@ impl App {
             ("+ -", "Volume up/down"),
             ("m", "Toggle mono"),
             ("e", "Cycle EQ preset"),
+            ("t", "Choose theme"),
             ("v", "Cycle visualizer"),
             ("↑ ↓", "Playlist scroll / EQ adjust"),
             ("h l", "EQ cursor left/right"),
@@ -433,21 +469,21 @@ impl App {
         ];
 
         let mut lines = vec![
-            Line::from(Span::styled("K E Y M A P", title_style())),
+            Line::from(Span::styled("K E Y M A P", self.palette.title_style())),
             Line::from(""),
         ];
 
         for (key, action) in &keys {
             lines.push(Line::from(Span::styled(
                 format!("  {key:<10} {action}"),
-                dim_style(),
+                self.palette.dim_style(),
             )));
         }
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Press any key to close",
-            help_style(),
+            self.palette.help_style(),
         )));
 
         let block = Block::default().borders(Borders::NONE);
@@ -455,11 +491,72 @@ impl App {
 
         // Center
         let w = 50u16.min(area.width);
-        let h = 24u16.min(area.height);
+        let h = 26u16.min(area.height);
         let x = area.width.saturating_sub(w) / 2;
         let y = area.height.saturating_sub(h) / 2;
         let inner = Rect::new(x, y, w, h);
 
+        frame.render_widget(paragraph, inner);
+    }
+
+    fn render_theme_picker(&self, frame: &mut Frame, area: Rect) {
+        let mut lines = vec![
+            Line::from(Span::styled("T H E M E S", self.palette.title_style())),
+            Line::from(""),
+        ];
+
+        // Theme list: Default at index 0, then all loaded themes
+        let count = self.themes.len() + 1;
+        let max_visible = 15;
+        let scroll = if self.theme_cursor >= max_visible {
+            self.theme_cursor - max_visible + 1
+        } else {
+            0
+        };
+
+        for i in scroll..count.min(scroll + max_visible) {
+            let name = if i == 0 {
+                theme::DEFAULT_NAME.to_string()
+            } else {
+                self.themes[i - 1].name.clone()
+            };
+
+            if i == self.theme_cursor {
+                lines.push(Line::from(Span::styled(
+                    format!("> {name}"),
+                    self.palette.playlist_selected_style(),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("  {name}"),
+                    self.palette.dim_style(),
+                )));
+            }
+        }
+
+        if count > max_visible {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}/{count} themes", self.theme_cursor + 1),
+                self.palette.dim_style(),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[↑↓]Navigate [Enter]Select [Esc]Cancel",
+            self.palette.help_style(),
+        )));
+
+        // Center
+        let w = 50u16.min(area.width);
+        let h = (lines.len() as u16 + 2).min(area.height);
+        let x = area.width.saturating_sub(w) / 2;
+        let y = area.height.saturating_sub(h) / 2;
+        let inner = Rect::new(x, y, w, h);
+
+        let block = Block::default().borders(Borders::NONE);
+        let paragraph = Paragraph::new(lines).block(block);
         frame.render_widget(paragraph, inner);
     }
 }

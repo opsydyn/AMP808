@@ -1,6 +1,7 @@
 pub mod eq_presets;
 pub mod keys;
 pub mod styles;
+pub mod theme;
 pub mod view;
 pub mod visualizer;
 
@@ -18,6 +19,8 @@ use tokio::sync::mpsc;
 
 use self::eq_presets::EQ_PRESETS;
 use self::keys::Focus;
+use self::styles::Palette;
+use self::theme::Theme;
 use self::visualizer::Visualizer;
 use crate::player::Player;
 use crate::playlist::{self, Playlist, Track};
@@ -52,12 +55,18 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<usize>,
     pub search_cursor: usize,
+    pub themes: Vec<Theme>,
+    pub theme_idx: Option<usize>,
+    pub theme_cursor: usize,
+    pub show_themes: bool,
+    pub palette: Palette,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
 }
 
 impl App {
     pub fn new(player: Player, playlist: Playlist, msg_tx: mpsc::UnboundedSender<AppMsg>) -> Self {
         let sr = player.sample_rate() as f64;
+        let themes = theme::load_all();
         Self {
             player,
             playlist,
@@ -78,7 +87,29 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_cursor: 0,
+            themes,
+            theme_idx: None,
+            theme_cursor: 0,
+            show_themes: false,
+            palette: Palette::default(),
             msg_tx,
+        }
+    }
+
+    /// Apply a theme by index (None = default ANSI theme).
+    pub fn apply_theme(&mut self, idx: Option<usize>) {
+        self.theme_idx = idx;
+        self.palette = match idx {
+            Some(i) if i < self.themes.len() => Palette::from_theme(&self.themes[i]),
+            _ => Palette::default(),
+        };
+    }
+
+    /// Get the current theme name.
+    pub fn theme_name(&self) -> &str {
+        match self.theme_idx {
+            Some(i) if i < self.themes.len() => &self.themes[i].name,
+            _ => theme::DEFAULT_NAME,
         }
     }
 
