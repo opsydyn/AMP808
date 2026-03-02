@@ -67,6 +67,15 @@ struct BuiltinTheme {
 
 const BUILTIN_THEMES: &[BuiltinTheme] = &[
     BuiltinTheme {
+        name: "astro",
+        toml: r##"accent = "#c3a6ff"
+bright_fg = "#ffd580"
+fg = "#a2aabc"
+green = "#bae67e"
+yellow = "#5ccfe6"
+red = "#ffae57""##,
+    },
+    BuiltinTheme {
         name: "ayu-mirage-dark",
         toml: r##"accent = "#73d0ff"
 bright_fg = "#f3f4f5"
@@ -307,7 +316,7 @@ mod tests {
     #[test]
     fn test_load_all_builtin() {
         let themes = load_all();
-        assert_eq!(themes.len(), 17);
+        assert_eq!(themes.len(), 18);
 
         // Check sorted order
         let names: Vec<&str> = themes.iter().map(|t| t.name.as_str()).collect();
@@ -331,5 +340,18 @@ mod tests {
         let t = &themes[idx];
         assert_eq!(t.accent, Color::Rgb(0x89, 0xb4, 0xfa));
         assert_eq!(t.green, Color::Rgb(0xa6, 0xe3, 0xa1));
+    }
+
+    #[test]
+    fn test_astro_colors() {
+        let themes = load_all();
+        let idx = find_by_name(&themes, "astro").unwrap();
+        let t = &themes[idx];
+        assert_eq!(t.accent, Color::Rgb(0xc3, 0xa6, 0xff));
+        assert_eq!(t.bright_fg, Color::Rgb(0xff, 0xd5, 0x80));
+        assert_eq!(t.fg, Color::Rgb(0xa2, 0xaa, 0xbc));
+        assert_eq!(t.green, Color::Rgb(0xba, 0xe6, 0x7e));
+        assert_eq!(t.yellow, Color::Rgb(0x5c, 0xcf, 0xe6));
+        assert_eq!(t.red, Color::Rgb(0xff, 0xae, 0x57));
     }
 }
