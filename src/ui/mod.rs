@@ -7,7 +7,7 @@ pub mod view_808;
 pub mod visualizer;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
@@ -77,6 +77,10 @@ pub struct App {
     pub provider_lists: Vec<PlaylistInfo>,
     pub prov_cursor: usize,
     pub prov_loading: bool,
+    pub fx_808_border: Option<tachyonfx::Effect>,
+    pub fx_808_header: Option<tachyonfx::Effect>,
+    pub fx_808_focus: Option<tachyonfx::Effect>,
+    pub fx_last_frame: Instant,
     tracker: YtdlTempTracker,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
 }
@@ -135,6 +139,10 @@ impl App {
             provider_lists: Vec::new(),
             prov_cursor: 0,
             prov_loading: has_provider,
+            fx_808_border: None,
+            fx_808_header: None,
+            fx_808_focus: None,
+            fx_last_frame: Instant::now(),
             tracker,
             msg_tx,
         };

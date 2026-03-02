@@ -28,3 +28,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0007: Provider trait for external music services](0007-provider-trait-for-external-music-services.md) (accepted, 2026-03-01)
 - [ADR-0008: Album art display via ratatui-image](0008-album-art-display-via-ratatui-image.md) (accepted, 2026-03-01)
 - [ADR-0009: Oscilloscope visualizer mode](0009-oscilloscope-visualizer-mode.md) (proposed, 2026-03-01)
+- [ADR-0010: Tachyonfx animated 808 chrome and visualizer parity](0010-tachyonfx-animated-808-chrome-and-visualizer-parity.md) (accepted, 2026-03-02)

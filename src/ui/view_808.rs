@@ -1,14 +1,17 @@
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Paragraph,
+    Block, Borders, Paragraph,
     canvas::{Canvas, Line as CanvasLine},
 };
+use tachyonfx::{CellFilter, EffectRenderer, Interpolation, fx};
+use tui_big_text::{BigText, PixelSize};
 
 use super::App;
 use super::keys::Focus;
+use super::visualizer::VisMode;
 
 /// 808 color constants.
 const C808_RED: Color = Color::Rgb(0xD7, 0x26, 0x2E);
@@ -17,11 +20,20 @@ const C808_AMBER: Color = Color::Rgb(0xF6, 0xA6, 0x23);
 const C808_YELLOW: Color = Color::Rgb(0xFF, 0xD4, 0x00);
 const C808_GREY: Color = Color::Rgb(0xC9, 0xC9, 0xC9);
 const C808_DIM: Color = Color::Rgb(0x66, 0x66, 0x66);
+const C808_IVORY: Color = Color::Rgb(0xEE, 0xEA, 0xD8);
+const C808_BLACK: Color = Color::Rgb(0x12, 0x12, 0x12);
 
 /// EQ frequency labels matching the 10-band EQ.
 const EQ_LABELS: [&str; 10] = [
     "70", "180", "320", "600", "1k", "3k", "6k", "12k", "14k", "16k",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderMode808 {
+    HorizontalBars,
+    LedColumns,
+    Oscilloscope,
+}
 
 impl App {
     /// Render the 808 layout (called when mode_808 == true).
@@ -38,17 +50,17 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // header
-                Constraint::Length(4), // knob row 1 (vol + 5 EQ)
-                Constraint::Length(4), // knob row 2 (5 EQ)
+                Constraint::Length(6), // header (large-style title)
+                Constraint::Length(3), // knob row 1 (vol + 5 EQ)
+                Constraint::Length(3), // knob row 2 (5 EQ)
                 Constraint::Length(1), // spacer
                 Constraint::Length(2), // now playing + seek
                 Constraint::Length(1), // status line (repeat/shuffle/mono)
                 Constraint::Length(1), // spacer
                 Constraint::Length(5), // spectrum LED
-                Constraint::Length(1), // spacer
+                Constraint::Length(0), // spacer
                 Constraint::Min(3),    // playlist
-                Constraint::Length(1), // help
+                Constraint::Length(2), // help controls
                 Constraint::Length(1), // error/save
             ])
             .split(inner);
@@ -80,37 +92,135 @@ impl App {
         if chunks.len() > 11 {
             self.render_808_status_line(frame, chunks[11]);
         }
+
+        let header_area = Rect::new(
+            inner.x,
+            chunks[0].y,
+            inner.width,
+            chunks[2].bottom().saturating_sub(chunks[0].y),
+        );
+        let focus_area = if self.focus == Focus::EQ {
+            Rect::new(
+                chunks[1].x,
+                chunks[1].y,
+                chunks[1].width,
+                chunks[2].bottom().saturating_sub(chunks[1].y),
+            )
+        } else {
+            chunks[9]
+        };
+        self.render_808_chrome(frame, inner, header_area, focus_area);
+    }
+
+    fn render_808_chrome(
+        &mut self,
+        frame: &mut Frame,
+        outer_area: Rect,
+        header_area: Rect,
+        focus_area: Rect,
+    ) {
+        self.ensure_808_effects();
+
+        let base = Style::default().fg(C808_DIM);
+        if outer_area.width >= 2 && outer_area.height >= 2 {
+            frame.render_widget(
+                Block::default().borders(Borders::ALL).border_style(base),
+                outer_area,
+            );
+        }
+        if header_area.width >= 2 && header_area.height >= 2 {
+            frame.render_widget(
+                Block::default().borders(Borders::ALL).border_style(base),
+                header_area,
+            );
+        }
+        if focus_area.width >= 2 && focus_area.height >= 2 {
+            frame.render_widget(
+                Block::default().borders(Borders::ALL).border_style(base),
+                focus_area,
+            );
+        }
+
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.fx_last_frame);
+        self.fx_last_frame = now;
+        let tick_ms = elapsed.as_millis().clamp(16, 120) as u32;
+        let tick = tachyonfx::Duration::from_millis(tick_ms);
+
+        if tachyon_should_animate(self.player.is_playing(), self.player.is_paused()) {
+            if let Some(effect) = self.fx_808_border.as_mut() {
+                frame.render_effect(effect, outer_area, tick);
+            }
+            if let Some(effect) = self.fx_808_header.as_mut() {
+                frame.render_effect(effect, header_area, tick);
+            }
+            if let Some(effect) = self.fx_808_focus.as_mut() {
+                frame.render_effect(effect, focus_area, tick);
+            }
+        }
+    }
+
+    fn ensure_808_effects(&mut self) {
+        if self.fx_808_border.is_none() {
+            self.fx_808_border = Some(make_808_border_effect());
+        }
+        if self.fx_808_header.is_none() {
+            self.fx_808_header = Some(make_808_header_effect());
+        }
+        if self.fx_808_focus.is_none() {
+            self.fx_808_focus = Some(make_808_focus_effect());
+        }
     }
 
     fn render_808_header(&self, frame: &mut Frame, area: Rect) {
-        let lines = vec![
-            Line::from(Span::styled(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                Style::default().fg(C808_DIM),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    "  ▬▬▬  🦀 RHYTHM COMPOSER  ",
-                    Style::default().fg(C808_GREY),
-                ),
-                Span::styled(
-                    "TR-808",
-                    Style::default()
-                        .fg(C808_YELLOW)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "  ▬▬▬   Computer Controlled",
-                    Style::default().fg(C808_GREY),
-                ),
-            ]),
-            Line::from(Span::styled(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                Style::default().fg(C808_DIM),
-            )),
-        ];
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // top divider
+                Constraint::Length(3), // big text
+                Constraint::Length(1), // subtitle
+                Constraint::Length(1), // bottom divider
+            ])
+            .split(area);
 
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                Style::default().fg(C808_DIM),
+            ))),
+            chunks[0],
+        );
+
+        let logo = BigText::builder()
+            .pixel_size(PixelSize::ThirdHeight)
+            .style(
+                Style::default()
+                    .fg(C808_YELLOW)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .centered()
+            .lines(vec![Line::from("TR-808")])
+            .build();
+        frame.render_widget(logo, chunks[1]);
+
+        let subtitle = Line::from(vec![
+            Span::styled("  ▬▬▬  ", Style::default().fg(C808_GREY)),
+            Span::styled("🦀 RHYTHM COMPOSER", Style::default().fg(C808_GREY)),
+            Span::styled("  ▬▬▬   ", Style::default().fg(C808_GREY)),
+            Span::styled("Computer Controlled", Style::default().fg(C808_GREY)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(subtitle).alignment(Alignment::Center),
+            chunks[2],
+        );
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                Style::default().fg(C808_DIM),
+            ))),
+            chunks[3],
+        );
     }
 
     fn render_808_knob_row1(&self, frame: &mut Frame, area: Rect) {
@@ -327,14 +437,60 @@ impl App {
             ));
         }
 
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("VIS:{}", vis_mode_label(self.vis.mode)),
+            Style::default().fg(C808_DIM),
+        ));
+
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_808_spectrum(&mut self, frame: &mut Frame, area: Rect) {
         let samples = self.player.samples();
-        let bands = self.vis.analyze(&samples);
+        match render_mode_808(self.vis.mode) {
+            RenderMode808::HorizontalBars => {
+                let bands = self.vis.analyze(&samples);
+                let solid = matches!(self.vis.mode, VisMode::BarsGap);
+                let lines = self.vis.render_808_horizontal(&bands, solid);
+                self.render_808_visual_lines(frame, area, lines);
+            }
+            RenderMode808::LedColumns => {
+                let bands = self.vis.analyze(&samples);
+                self.render_808_led_columns(frame, area, &bands);
+            }
+            RenderMode808::Oscilloscope => {
+                let lines =
+                    self.vis
+                        .render_scope(&samples, area.width as usize, area.height as usize);
+                self.render_808_visual_lines(frame, area, lines);
+            }
+        }
+    }
 
-        // LED-style columns using block elements with 808 color gradient
+    fn render_808_visual_lines(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lines: Vec<super::visualizer::SpectrumLine>,
+    ) {
+        for (row, spec_line) in lines.iter().enumerate() {
+            if row >= area.height as usize {
+                break;
+            }
+            let spans: Vec<Span> = spec_line
+                .segments
+                .iter()
+                .map(|seg| Span::styled(&seg.text, self.palette.spectrum_style(seg.row_bottom)))
+                .collect();
+
+            let y = area.y + row as u16;
+            let line_area = Rect::new(area.x, y, area.width, 1);
+            frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
+        }
+    }
+
+    fn render_808_led_columns(&self, frame: &mut Frame, area: Rect, bands: &[f64; 10]) {
         const HEIGHT: usize = 5;
 
         for row in 0..HEIGHT {
@@ -348,7 +504,6 @@ impl App {
             let mut spans = Vec::with_capacity(10);
 
             for &level in bands.iter() {
-                // Color gradient: yellow at bottom, amber mid, orange high, red peak
                 let color = if row_bottom >= 0.8 {
                     C808_RED
                 } else if row_bottom >= 0.6 {
@@ -371,7 +526,7 @@ impl App {
                 };
 
                 spans.push(Span::styled(block, Style::default().fg(color)));
-                spans.push(Span::raw(" ")); // gap between bands
+                spans.push(Span::raw(" "));
             }
 
             let y = area.y + row as u16;
@@ -557,15 +712,58 @@ impl App {
     }
 
     fn render_808_help(&self, frame: &mut Frame, area: Rect) {
-        let text = if self.focus == Focus::Provider {
-            "[↑↓]Navigate [Enter]Load Playlist [Tab]Focus [Q]Quit"
-        } else if self.player.seekable() {
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [e]EQ [c]Art [8]808 [/]Search [Tab]Focus [Q]Quit"
-        } else {
-            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [e]EQ [c]Art [8]808 [/]Search [Tab]Focus [Q]Quit"
-        };
-        let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
-        frame.render_widget(Paragraph::new(line), area);
+        let controls = controls_808(self.focus, self.player.seekable());
+        if controls.is_empty() {
+            return;
+        }
+
+        if area.height < 2 {
+            // Fallback for very small terminals.
+            let text = controls
+                .iter()
+                .map(|(key, action)| format!("[{key}]{action}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        const CELL_W: usize = 6;
+        let mut key_spans = Vec::new();
+        let mut action_spans = Vec::new();
+        let mut used = 0u16;
+
+        for (i, (key, action)) in controls.iter().enumerate() {
+            let extra_gap = if i == 0 { 0 } else { 1 };
+            let need = CELL_W as u16 + extra_gap;
+            if used + need > area.width {
+                break;
+            }
+
+            if i > 0 {
+                key_spans.push(Span::raw(" "));
+                action_spans.push(Span::raw(" "));
+                used += 1;
+            }
+
+            let pad_color = step_pad_color(i);
+            key_spans.push(Span::styled(
+                format!("{:^CELL_W$}", key),
+                Style::default()
+                    .fg(C808_BLACK)
+                    .bg(pad_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            action_spans.push(Span::styled(
+                format!("{:^CELL_W$}", action),
+                Style::default().fg(C808_DIM),
+            ));
+            used += CELL_W as u16;
+        }
+
+        let lines = vec![Line::from(key_spans), Line::from(action_spans)];
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     fn render_808_status_line(&self, frame: &mut Frame, area: Rect) {
@@ -674,4 +872,171 @@ fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected:
         Paragraph::new(label_line).alignment(Alignment::Center),
         label_area,
     );
+}
+
+fn step_pad_color(idx: usize) -> Color {
+    match idx {
+        0 | 1 => C808_RED,
+        2 | 3 => C808_ORANGE,
+        4 | 5 => C808_AMBER,
+        6 | 7 => C808_YELLOW,
+        _ => C808_IVORY,
+    }
+}
+
+fn render_mode_808(mode: VisMode) -> RenderMode808 {
+    match mode {
+        VisMode::BarsGap => RenderMode808::HorizontalBars,
+        VisMode::Bars => RenderMode808::HorizontalBars,
+        VisMode::VBars => RenderMode808::LedColumns,
+        VisMode::Bricks => RenderMode808::LedColumns,
+        VisMode::Scope => RenderMode808::Oscilloscope,
+    }
+}
+
+fn vis_mode_label(mode: VisMode) -> &'static str {
+    match mode {
+        VisMode::Bars => "BARS",
+        VisMode::BarsGap => "SOLID",
+        VisMode::VBars => "VBAR",
+        VisMode::Bricks => "LEDS",
+        VisMode::Scope => "SCOPE",
+    }
+}
+
+fn make_808_border_effect() -> tachyonfx::Effect {
+    fx::repeating(fx::sequence(&[
+        fx::fade_to_fg(C808_AMBER, (700, Interpolation::SineInOut)),
+        fx::fade_to_fg(C808_YELLOW, (500, Interpolation::SineInOut)),
+        fx::fade_to_fg(C808_DIM, (900, Interpolation::SineInOut)),
+    ]))
+    .with_filter(CellFilter::Outer(Margin::new(1, 1)))
+}
+
+fn make_808_header_effect() -> tachyonfx::Effect {
+    fx::repeating(fx::hsl_shift_fg(
+        [18.0, 0.0, 0.0],
+        (1400, Interpolation::SineInOut),
+    ))
+    .with_filter(CellFilter::Text)
+}
+
+fn make_808_focus_effect() -> tachyonfx::Effect {
+    fx::repeating(fx::sequence(&[
+        fx::fade_to_fg(C808_YELLOW, (280, Interpolation::QuadOut)),
+        fx::fade_to_fg(C808_DIM, (600, Interpolation::QuadIn)),
+    ]))
+    .with_filter(CellFilter::Outer(Margin::new(1, 1)))
+}
+
+fn tachyon_should_animate(is_playing: bool, is_paused: bool) -> bool {
+    is_playing && !is_paused
+}
+
+fn controls_808(focus: Focus, seekable: bool) -> Vec<(&'static str, &'static str)> {
+    if focus == Focus::Provider {
+        return vec![
+            ("↑↓", "NAV"),
+            ("Enter", "LOAD"),
+            ("Tab", "FOCS"),
+            ("Q", "QUIT"),
+        ];
+    }
+
+    let mut controls = vec![
+        ("Spc", "PLAY"),
+        ("<>", "TRK"),
+        ("S", "SAVE"),
+        ("+-", "VOL"),
+        ("e", "EQ"),
+        ("v", "VIS"),
+        ("c", "ART"),
+        ("8", "808"),
+        ("/", "FIND"),
+        ("Tab", "FOCS"),
+        ("Q", "QUIT"),
+    ];
+
+    if seekable {
+        controls.insert(2, ("←→", "SEEK"));
+    }
+
+    controls
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::visualizer::VisMode;
+
+    #[test]
+    fn controls_playlist_seekable_has_seek() {
+        let controls = controls_808(Focus::Playlist, true);
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "←→" && *action == "SEEK")
+        );
+    }
+
+    #[test]
+    fn controls_playlist_stream_hides_seek() {
+        let controls = controls_808(Focus::Playlist, false);
+        assert!(!controls.iter().any(|(key, _)| *key == "←→"));
+    }
+
+    #[test]
+    fn controls_playlist_has_visualizer_toggle() {
+        let controls = controls_808(Focus::Playlist, true);
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "v" && *action == "VIS")
+        );
+    }
+
+    #[test]
+    fn controls_provider_mode_is_compact() {
+        let controls = controls_808(Focus::Provider, true);
+        assert_eq!(
+            controls,
+            vec![
+                ("↑↓", "NAV"),
+                ("Enter", "LOAD"),
+                ("Tab", "FOCS"),
+                ("Q", "QUIT")
+            ]
+        );
+    }
+
+    #[test]
+    fn render_mode_mapping_matches_808_design() {
+        assert_eq!(
+            render_mode_808(VisMode::Bars),
+            RenderMode808::HorizontalBars
+        );
+        assert_eq!(
+            render_mode_808(VisMode::BarsGap),
+            RenderMode808::HorizontalBars
+        );
+        assert_eq!(render_mode_808(VisMode::VBars), RenderMode808::LedColumns);
+        assert_eq!(render_mode_808(VisMode::Bricks), RenderMode808::LedColumns);
+        assert_eq!(render_mode_808(VisMode::Scope), RenderMode808::Oscilloscope);
+    }
+
+    #[test]
+    fn vis_mode_labels_are_short_and_clear() {
+        assert_eq!(vis_mode_label(VisMode::Bars), "BARS");
+        assert_eq!(vis_mode_label(VisMode::BarsGap), "SOLID");
+        assert_eq!(vis_mode_label(VisMode::VBars), "VBAR");
+        assert_eq!(vis_mode_label(VisMode::Bricks), "LEDS");
+        assert_eq!(vis_mode_label(VisMode::Scope), "SCOPE");
+    }
+
+    #[test]
+    fn tachyon_animation_follows_play_pause_state() {
+        assert!(tachyon_should_animate(true, false));
+        assert!(!tachyon_should_animate(true, true));
+        assert!(!tachyon_should_animate(false, false));
+    }
 }

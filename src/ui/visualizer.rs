@@ -5,9 +5,14 @@ use rustfft::num_complex::Complex;
 
 const NUM_BANDS: usize = 10;
 const FFT_SIZE: usize = 2048;
+const BAND_FILL_WIDTH: usize = 4;
+const BAND_GAP_WIDTH: usize = 1;
+const SOLID_BAR_WIDTH: usize = NUM_BANDS * BAND_FILL_WIDTH + (NUM_BANDS - 1) * BAND_GAP_WIDTH;
 
-/// Unicode block elements for fractional bar height (9 levels including space).
-const BAR_BLOCKS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+/// Thin glyph for horizontal bars so adjacent rows keep a visible gap.
+const HBAR_GLYPH: &str = "▀";
+/// Block levels for vertical bar rendering (empty through full).
+const VBAR_BLOCKS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
 /// Frequency edges for 10 spectrum bands (Hz).
 const BAND_EDGES: [f64; 11] = [
@@ -18,6 +23,8 @@ const BAND_EDGES: [f64; 11] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisMode {
     Bars,
+    BarsGap,
+    VBars,
     Bricks,
     Scope,
 }
@@ -59,7 +66,9 @@ impl Visualizer {
 
     pub fn cycle_mode(&mut self) {
         self.mode = match self.mode {
-            VisMode::Bars => VisMode::Bricks,
+            VisMode::Bars => VisMode::BarsGap,
+            VisMode::BarsGap => VisMode::VBars,
+            VisMode::VBars => VisMode::Bricks,
             VisMode::Bricks => VisMode::Scope,
             VisMode::Scope => VisMode::Bars,
         };
@@ -132,9 +141,24 @@ impl Visualizer {
     /// Returns a Vec of (line_string, Vec<(start_col, width, row_bottom)>) for styling.
     pub fn render(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         match self.mode {
-            VisMode::Bars => self.render_bars(bands),
+            VisMode::Bars => self.render_vertical_bars_gapped(bands),
+            VisMode::BarsGap => self.render_bars_solid(bands),
+            VisMode::VBars => self.render_vertical_bars_gapped(bands),
             VisMode::Bricks => self.render_bricks(bands),
-            VisMode::Scope => self.render_bars(&[0.0; NUM_BANDS]),
+            VisMode::Scope => self.render_vertical_bars_gapped(&[0.0; NUM_BANDS]),
+        }
+    }
+
+    /// Render horizontal bars for 808 mode, independent of standard-view mode mappings.
+    pub fn render_808_horizontal(
+        &self,
+        bands: &[f64; NUM_BANDS],
+        solid: bool,
+    ) -> Vec<SpectrumLine> {
+        if solid {
+            self.render_bars_solid(bands)
+        } else {
+            self.render_bars_gapped(bands)
         }
     }
 
@@ -291,32 +315,48 @@ impl Visualizer {
         None
     }
 
-    fn render_bars(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
+    fn render_bars_solid(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         const HEIGHT: usize = 5;
-        const BW: usize = 6;
 
         let mut lines = Vec::with_capacity(HEIGHT);
 
         for row in 0..HEIGHT {
             let row_bottom = (HEIGHT - 1 - row) as f64 / HEIGHT as f64;
             let row_top = (HEIGHT - row) as f64 / HEIGHT as f64;
+            let filled = horizontal_row_fill_width(bands, row_bottom, row_top, SOLID_BAR_WIDTH)
+                .min(SOLID_BAR_WIDTH);
+            let text = format!(
+                "{}{}",
+                HBAR_GLYPH.repeat(filled),
+                " ".repeat(SOLID_BAR_WIDTH - filled)
+            );
+
+            lines.push(SpectrumLine {
+                segments: vec![SpectrumSegment { text, row_bottom }],
+            });
+        }
+
+        lines
+    }
+
+    fn render_bars_gapped(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
+        const HEIGHT: usize = 5;
+
+        let mut lines = Vec::with_capacity(HEIGHT);
+
+        for row in 0..HEIGHT {
+            let row_bottom = (HEIGHT - 1 - row) as f64 / HEIGHT as f64;
 
             let mut segments = Vec::with_capacity(NUM_BANDS);
-            for &level in bands.iter() {
-                let block = if level >= row_top {
-                    "█"
-                } else if level > row_bottom {
-                    let frac = (level - row_bottom) / (row_top - row_bottom);
-                    let idx = (frac * (BAR_BLOCKS.len() - 1) as f64) as usize;
-                    BAR_BLOCKS[idx.min(BAR_BLOCKS.len() - 1)]
-                } else {
-                    " "
-                };
+            for (i, &level) in bands.iter().enumerate() {
+                let block = if level > row_bottom { HBAR_GLYPH } else { " " };
 
-                segments.push(SpectrumSegment {
-                    text: block.repeat(BW),
-                    row_bottom,
-                });
+                let mut text = block.repeat(BAND_FILL_WIDTH);
+                if i + 1 < NUM_BANDS {
+                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                }
+
+                segments.push(SpectrumSegment { text, row_bottom });
             }
 
             lines.push(SpectrumLine { segments });
@@ -327,7 +367,6 @@ impl Visualizer {
 
     fn render_bricks(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         const HEIGHT: usize = 5;
-        const BW: usize = 6;
 
         let mut lines = Vec::with_capacity(HEIGHT);
 
@@ -335,17 +374,54 @@ impl Visualizer {
             let row_threshold = (HEIGHT - 1 - row) as f64 / HEIGHT as f64;
 
             let mut segments = Vec::with_capacity(NUM_BANDS);
-            for &level in bands.iter() {
-                let text = if level > row_threshold {
-                    "▄".repeat(BW)
+            for (i, &level) in bands.iter().enumerate() {
+                let mut text = if level > row_threshold {
+                    "▄".repeat(BAND_FILL_WIDTH)
                 } else {
-                    " ".repeat(BW)
+                    " ".repeat(BAND_FILL_WIDTH)
                 };
+                if i + 1 < NUM_BANDS {
+                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                }
 
                 segments.push(SpectrumSegment {
                     text,
                     row_bottom: row_threshold,
                 });
+            }
+
+            lines.push(SpectrumLine { segments });
+        }
+
+        lines
+    }
+
+    fn render_vertical_bars_gapped(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
+        const HEIGHT: usize = 5;
+
+        let mut lines = Vec::with_capacity(HEIGHT);
+
+        for row in 0..HEIGHT {
+            let row_bottom = (HEIGHT - 1 - row) as f64 / HEIGHT as f64;
+            let row_top = (HEIGHT - row) as f64 / HEIGHT as f64;
+
+            let mut segments = Vec::with_capacity(NUM_BANDS);
+            for (i, &level) in bands.iter().enumerate() {
+                let block = if level >= row_top {
+                    "█"
+                } else if level > row_bottom {
+                    let frac = (level - row_bottom) / (row_top - row_bottom);
+                    let idx = (frac * (VBAR_BLOCKS.len() - 1) as f64) as usize;
+                    VBAR_BLOCKS[idx.min(VBAR_BLOCKS.len() - 1)]
+                } else {
+                    " "
+                };
+                let mut text = block.repeat(BAND_FILL_WIDTH);
+                if i + 1 < NUM_BANDS {
+                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                }
+
+                segments.push(SpectrumSegment { text, row_bottom });
             }
 
             lines.push(SpectrumLine { segments });
@@ -364,6 +440,29 @@ pub struct SpectrumLine {
 pub struct SpectrumSegment {
     pub text: String,
     pub row_bottom: f64,
+}
+
+fn horizontal_row_fill_width(
+    bands: &[f64; NUM_BANDS],
+    row_bottom: f64,
+    row_top: f64,
+    total_width: usize,
+) -> usize {
+    if total_width == 0 {
+        return 0;
+    }
+
+    let mut filled_units = 0.0;
+    for (i, &level) in bands.iter().enumerate() {
+        if level >= row_top {
+            filled_units = (i + 1) as f64;
+        } else if level > row_bottom {
+            let frac = (level - row_bottom) / (row_top - row_bottom);
+            filled_units = i as f64 + frac.clamp(0.0, 1.0);
+        }
+    }
+
+    ((filled_units / bands.len() as f64) * total_width as f64).round() as usize
 }
 
 #[cfg(test)]
@@ -414,15 +513,111 @@ mod tests {
     }
 
     #[test]
+    fn test_render_bars_have_inter_band_gaps() {
+        let vis = Visualizer::new(44100.0);
+        let bands = [1.0; NUM_BANDS];
+        let lines = vis.render(&bands);
+        let top_row = &lines[0];
+        let combined: String = top_row
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>();
+        let gap_count = combined.chars().filter(|&c| c == ' ').count();
+        assert!(
+            gap_count >= NUM_BANDS - 1,
+            "expected at least {} inter-band spaces, got {gap_count}",
+            NUM_BANDS - 1
+        );
+    }
+
+    #[test]
+    fn test_render_bars_are_stacked_columns() {
+        let vis = Visualizer::new(44100.0);
+        let bands = [1.0; NUM_BANDS];
+        let lines = vis.render(&bands);
+
+        let filled_rows = lines
+            .iter()
+            .filter(|line| {
+                line.segments
+                    .iter()
+                    .any(|seg| seg.text.chars().any(|c| c != ' '))
+            })
+            .count();
+        assert!(filled_rows >= 3, "expected stacked vertical columns");
+    }
+
+    #[test]
+    fn test_render_bars_use_4_plus_1_band_ratio() {
+        let vis = Visualizer::new(44100.0);
+        let bands = [1.0; NUM_BANDS];
+        let lines = vis.render(&bands);
+        let top_row = &lines[0];
+
+        for (i, seg) in top_row.segments.iter().enumerate() {
+            let expected = BAND_FILL_WIDTH + usize::from(i + 1 < NUM_BANDS) * BAND_GAP_WIDTH;
+            assert_eq!(
+                seg.text.chars().count(),
+                expected,
+                "unexpected width for segment {i}"
+            );
+        }
+    }
+
+    #[test]
     fn test_cycle_mode() {
         let mut vis = Visualizer::new(44100.0);
         assert_eq!(vis.mode, VisMode::Bars);
+        vis.cycle_mode();
+        assert_eq!(vis.mode, VisMode::BarsGap);
+        vis.cycle_mode();
+        assert_eq!(vis.mode, VisMode::VBars);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bricks);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Scope);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bars);
+    }
+
+    #[test]
+    fn test_render_vertical_bars_are_stacked_columns_with_inter_column_gaps() {
+        let mut vis = Visualizer::new(44100.0);
+        vis.mode = VisMode::VBars;
+        let bands = [1.0; NUM_BANDS];
+        let lines = vis.render(&bands);
+
+        // Loud input should stack fill across multiple rows (columns, not horizontal slabs).
+        let filled_rows = lines
+            .iter()
+            .filter(|line| {
+                line.segments
+                    .iter()
+                    .any(|seg| seg.text.chars().any(|c| c != ' '))
+            })
+            .count();
+        assert!(filled_rows >= 3, "expected stacked vertical columns");
+
+        // Still preserve inter-column spacing.
+        let combined_top: String = lines[0]
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>();
+        let gap_count = combined_top.chars().filter(|&c| c == ' ').count();
+        assert!(gap_count >= NUM_BANDS - 1);
+    }
+
+    #[test]
+    fn test_render_solid_bars_are_contiguous_without_internal_gaps() {
+        let mut vis = Visualizer::new(44100.0);
+        vis.mode = VisMode::BarsGap;
+        let bands = [1.0, 0.9, 0.8, 0.7, 0.6, 0.45, 0.3, 0.2, 0.1, 0.0];
+        let lines = vis.render(&bands);
+        let mid_row = &lines[2].segments[0].text;
+        let filled = mid_row.trim_end_matches(' ');
+        assert!(!filled.contains(' '), "solid bars should not contain gaps");
     }
 
     #[test]

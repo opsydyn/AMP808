@@ -31,10 +31,10 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 - Navidrome/Subsonic server integration (browse and play remote playlists)
 - Gapless playback with preloaded next track
 - 10-band parametric EQ with 10 built-in presets
-- FFT spectrum visualizer (bars and bricks modes)
+- FFT/time-domain visualizer (bars, bricks, oscilloscope modes)
 - Album art display from embedded cover art (sixel/kitty/iTerm2/halfblocks, auto-detected)
 - 17 built-in themes + custom user themes
-- Roland TR-808 alternate UI mode
+- Roland TR-808 alternate UI mode with animated tachyonfx chrome
 - Playlist: shuffle (Fisher-Yates), repeat (off/all/one), queue
 - Volume control (dB) with mono downmix
 - Search within playlist

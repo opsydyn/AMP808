@@ -67,3 +67,4 @@ ctrlc = "3"
 
 # Hashing (Subsonic API auth)
 md5 = "0.7"
+tui-big-text = "0.8.2"

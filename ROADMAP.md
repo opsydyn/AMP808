@@ -86,9 +86,9 @@
 
 ### Quality
 
-- [x] 113 unit tests across all modules
+- [x] 130 unit tests across all modules
 - [x] Zero warnings, zero clippy issues
-- [x] 8 Architecture Decision Records (ADRs)
+- [x] 10 Architecture Decision Records (ADRs)
 
 ---
 
@@ -102,7 +102,7 @@
 - [ ] **`install.sh`** — Curl-pipe installer from GitHub releases
 - [ ] **CI release workflow** — GitHub Actions for cross-platform binaries (linux/darwin amd64/arm64, windows amd64)
 - [ ] **`config.toml.example`** — Sample config file with all fields documented
-- [ ] **tachyonfx effects** — Post-render visual effects for 808 mode (unblocked: ratatui 0.30 + tachyonfx 0.25)
+- [x] **tachyonfx effects** — Post-render visual effects for 808 mode (outer/header/focus animated chrome)
 - [x] ~~**Album art display** — Embedded cover art via `ratatui-image` (sixel/kitty/iTerm2/halfblocks, auto-detected)~~ (done)
 
 ### Ideas / Future
