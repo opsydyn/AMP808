@@ -30,3 +30,6 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0009: Oscilloscope visualizer mode](0009-oscilloscope-visualizer-mode.md) (proposed, 2026-03-01)
 - [ADR-0010: Tachyonfx animated 808 chrome and visualizer parity](0010-tachyonfx-animated-808-chrome-and-visualizer-parity.md) (accepted, 2026-03-02)
 - [ADR-0011: Add inline browser-backed runtime playlist loading](0011-in-app-command-mode-for-runtime-playlist-loading.md) (proposed, 2026-03-02)
+- [ADR-0012: Add a macOS Music.app playback backend](0012-add-macos-music-app-playback-backend.md) (accepted, 2026-03-07)
+- [ADR-0013: Use the Apple Music API as a metadata-only integration](0013-use-apple-music-api-as-a-metadata-only-integration.md) (superseded, 2026-03-07)
+- [ADR-0014: Pause Apple Music API rollout and use synthetic visualizers for Music.app parity](0014-pause-apple-music-api-rollout-and-use-synthetic-visualizers.md) (accepted, 2026-03-07)

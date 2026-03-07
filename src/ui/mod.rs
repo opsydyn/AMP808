@@ -28,26 +28,47 @@ use self::keys::Focus;
 use self::styles::Palette;
 use self::theme::Theme;
 use self::visualizer::Visualizer;
-use crate::player::Player;
+use crate::external::apple_music_api::{AppleMusicClient, LibraryTrack};
+use crate::playback_backend::PlaybackBackend;
 use crate::playlist::{self, Playlist, PlaylistInfo, Provider, Track};
 use crate::resolve;
 use crate::resolve::ytdl::YtdlTempTracker;
 
 /// Messages sent from async tasks to the main event loop.
 pub enum AppMsg {
-    YtdlResolved { index: usize, track: Track },
-    YtdlError { error: anyhow::Error },
+    YtdlResolved {
+        index: usize,
+        track: Track,
+    },
+    YtdlError {
+        error: anyhow::Error,
+    },
     FeedsLoaded(Vec<Track>),
     FeedError(anyhow::Error),
-    StreamPlayed { error: Option<String> },
+    StreamPlayed {
+        error: Option<String>,
+    },
     ProviderPlaylists(Vec<PlaylistInfo>),
     ProviderTracks(Vec<Track>),
     ProviderError(String),
+    AppleMusicPlaylists(Vec<PlaylistInfo>),
+    AppleMusicTracks {
+        playlist_id: String,
+        playlist_name: String,
+        tracks: Vec<LibraryTrack>,
+    },
+    AppleMusicError(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppleMusicTrackContext {
+    pub playlist_id: String,
+    pub playlist_name: String,
 }
 
 /// The main application state.
 pub struct App {
-    pub player: Player,
+    pub player: PlaybackBackend,
     pub playlist: Playlist,
     pub vis: Visualizer,
     pub focus: Focus,
@@ -85,10 +106,15 @@ pub struct App {
     pub provider_lists: Vec<PlaylistInfo>,
     pub prov_cursor: usize,
     pub prov_loading: bool,
+    pub apple_music_client: Option<std::sync::Arc<AppleMusicClient>>,
+    pub apple_music_tracks: Vec<LibraryTrack>,
+    pub apple_music_track_context: Option<AppleMusicTrackContext>,
+    pub apple_music_error: Option<String>,
     pub fx_808_border: Option<tachyonfx::Effect>,
     pub fx_808_header: Option<tachyonfx::Effect>,
     pub fx_808_focus: Option<tachyonfx::Effect>,
     pub fx_last_frame: Instant,
+    last_backend_refresh: Instant,
     tracker: YtdlTempTracker,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
     last_playlist_file: Option<PathBuf>,
@@ -96,7 +122,7 @@ pub struct App {
 
 impl App {
     pub fn new(
-        player: Player,
+        player: PlaybackBackend,
         playlist: Playlist,
         tracker: YtdlTempTracker,
         msg_tx: mpsc::UnboundedSender<AppMsg>,
@@ -151,10 +177,15 @@ impl App {
             provider_lists: Vec::new(),
             prov_cursor: 0,
             prov_loading: has_provider,
+            apple_music_client: None,
+            apple_music_tracks: Vec::new(),
+            apple_music_track_context: None,
+            apple_music_error: None,
             fx_808_border: None,
             fx_808_header: None,
             fx_808_focus: None,
             fx_last_frame: Instant::now(),
+            last_backend_refresh: Instant::now(),
             tracker,
             msg_tx,
             last_playlist_file: None,
@@ -195,45 +226,52 @@ impl App {
             }
         }
 
-        // Check gapless transition
-        if self.player.gapless_advanced() {
-            self.playlist.next();
-            self.pl_cursor = self.playlist.index().unwrap_or(0);
-            self.adjust_scroll();
-            self.title_off = 0;
-            self.preload_next();
-        }
-
-        // Poll ICY stream title
-        let title = self.player.stream_title();
-        if !title.is_empty() {
-            self.stream_title = title;
-        }
-
-        // Poll cover art (once per track)
-        if !self.cover_art_loaded
-            && let Some(art) = self.player.cover_art()
-        {
-            if let Ok(img) = image::load_from_memory(&art.data)
-                && let Some(ref picker) = self.image_picker
-                && let Ok(proto) = picker.new_protocol(
-                    img,
-                    ratatui::layout::Rect::new(0, 0, 24, 5),
-                    ratatui_image::Resize::Fit(None),
-                )
-            {
-                self.cover_art_proto = Some(proto);
+        if self.player.is_music_app() {
+            let refresh_every = Duration::from_millis(self.player.refresh_interval_ms());
+            if self.last_backend_refresh.elapsed() >= refresh_every {
+                self.sync_remote_backend();
             }
-            self.cover_art_loaded = true;
-        }
+        } else {
+            // Check gapless transition
+            if self.player.gapless_advanced() {
+                self.playlist.next();
+                self.pl_cursor = self.playlist.index().unwrap_or(0);
+                self.adjust_scroll();
+                self.title_off = 0;
+                self.preload_next();
+            }
 
-        // Check if drained (end of current, no next)
-        if self.player.is_playing()
-            && !self.player.is_paused()
-            && self.player.drained()
-            && !self.buffering
-        {
-            self.next_track();
+            // Poll ICY stream title
+            let title = self.player.stream_title();
+            if !title.is_empty() {
+                self.stream_title = title;
+            }
+
+            // Poll cover art (once per track)
+            if !self.cover_art_loaded
+                && let Some(art) = self.player.cover_art()
+            {
+                if let Ok(img) = image::load_from_memory(&art.data)
+                    && let Some(ref picker) = self.image_picker
+                    && let Ok(proto) = picker.new_protocol(
+                        img,
+                        ratatui::layout::Rect::new(0, 0, 24, 5),
+                        ratatui_image::Resize::Fit(None),
+                    )
+                {
+                    self.cover_art_proto = Some(proto);
+                }
+                self.cover_art_loaded = true;
+            }
+
+            // Check if drained (end of current, no next)
+            if self.player.is_playing()
+                && !self.player.is_paused()
+                && self.player.drained()
+                && !self.buffering
+            {
+                self.next_track();
+            }
         }
 
         self.title_off += 1;
@@ -285,20 +323,61 @@ impl App {
                 self.prov_loading = false;
                 self.err = Some(e);
             }
+            AppMsg::AppleMusicPlaylists(lists) => {
+                self.prov_loading = false;
+                self.provider_lists = lists;
+                self.prov_cursor = 0;
+                self.apple_music_tracks.clear();
+                self.apple_music_track_context = None;
+                self.apple_music_error = None;
+            }
+            AppMsg::AppleMusicTracks {
+                playlist_id,
+                playlist_name,
+                tracks,
+            } => {
+                self.prov_loading = false;
+                self.prov_cursor = 0;
+                self.apple_music_tracks = tracks;
+                self.apple_music_track_context = Some(AppleMusicTrackContext {
+                    playlist_id,
+                    playlist_name,
+                });
+                self.apple_music_error = None;
+            }
+            AppMsg::AppleMusicError(e) => {
+                self.prov_loading = false;
+                self.apple_music_error = Some(e.clone());
+                self.err = Some(e);
+            }
         }
     }
 
     // --- Playback control ---
 
     pub fn toggle_play_pause(&mut self) {
-        if !self.player.is_playing() {
+        if !self.player.is_playing() && !self.player.is_music_app() {
             self.play_current_track();
-        } else {
-            self.player.toggle_pause();
+            return;
+        }
+
+        if let Err(e) = self.player.toggle_pause() {
+            self.err = Some(e.to_string());
+        } else if self.player.is_music_app() {
+            self.sync_remote_backend();
         }
     }
 
     pub fn next_track(&mut self) {
+        if self.player.is_music_app() {
+            if let Err(e) = self.player.skip_next() {
+                self.err = Some(e.to_string());
+            } else {
+                self.sync_remote_backend();
+            }
+            return;
+        }
+
         // next() returns Option<(&Track, bool)> — clone the track to avoid borrow
         let track = self.playlist.next().map(|(t, _)| t.clone());
         if let Some(track) = track {
@@ -306,11 +385,22 @@ impl App {
             self.adjust_scroll();
             self.play_track_owned(track);
         } else {
-            self.player.stop();
+            if let Err(e) = self.player.stop() {
+                self.err = Some(e.to_string());
+            }
         }
     }
 
     pub fn prev_track(&mut self) {
+        if self.player.is_music_app() {
+            if let Err(e) = self.player.skip_previous() {
+                self.err = Some(e.to_string());
+            } else {
+                self.sync_remote_backend();
+            }
+            return;
+        }
+
         // If >3s into track, restart instead of going back
         let (pos, _) = self.track_position();
         if pos > 3 {
@@ -336,6 +426,11 @@ impl App {
 
     /// Play a track (takes ownership to avoid borrow conflicts).
     pub fn play_track_owned(&mut self, track: Track) {
+        if self.player.is_music_app() {
+            self.err = Some("music-app backend cannot play local files or URLs".to_string());
+            return;
+        }
+
         self.stream_title.clear();
         self.cover_art_proto = None;
         self.cover_art_loaded = false;
@@ -414,6 +509,22 @@ impl App {
         self.player.track_position()
     }
 
+    pub fn sync_remote_backend(&mut self) {
+        if !self.player.is_music_app() {
+            return;
+        }
+
+        match self.player.refresh_remote_state() {
+            Ok(()) => {
+                self.last_backend_refresh = Instant::now();
+                self.stream_title = self.player.now_playing_title().unwrap_or_default();
+            }
+            Err(e) => {
+                self.err = Some(e.to_string());
+            }
+        }
+    }
+
     // --- EQ ---
 
     pub fn eq_preset_name(&self) -> String {
@@ -429,7 +540,10 @@ impl App {
         {
             let bands = EQ_PRESETS[idx].bands;
             for (i, &gain) in bands.iter().enumerate() {
-                self.player.set_eq_band(i, gain);
+                if let Err(e) = self.player.set_eq_band(i, gain) {
+                    self.err = Some(e.to_string());
+                    break;
+                }
             }
         }
     }
@@ -466,6 +580,11 @@ impl App {
     }
 
     pub fn load_playlist_from_path(&mut self, path_buf: PathBuf) {
+        if !self.player.supports_local_playlist() {
+            self.err = Some("music-app backend does not support local playlist loading".into());
+            return;
+        }
+
         let tracks = match resolve::load_local_playlist_file(&path_buf) {
             Ok(tracks) => tracks,
             Err(err) => {
@@ -481,7 +600,10 @@ impl App {
             next.toggle_shuffle();
         }
 
-        self.player.stop();
+        if let Err(e) = self.player.stop() {
+            self.err = Some(e.to_string());
+            return;
+        }
         self.playlist = next;
         self.focus = Focus::Playlist;
         self.pl_cursor = 0;
@@ -534,6 +656,102 @@ impl App {
         }
     }
 
+    pub fn configure_apple_music_browser(
+        &mut self,
+        client: Option<AppleMusicClient>,
+        setup_error: Option<String>,
+    ) {
+        self.apple_music_client = client.map(std::sync::Arc::new);
+        self.apple_music_error = setup_error;
+        self.apple_music_tracks.clear();
+        self.apple_music_track_context = None;
+        self.provider_lists.clear();
+        self.prov_cursor = 0;
+
+        if self.apple_music_client.is_some() {
+            self.prov_loading = true;
+            if self.playlist.is_empty() {
+                self.focus = Focus::Provider;
+            }
+            self.fetch_apple_music_playlists();
+        } else {
+            self.prov_loading = false;
+            if let Some(err) = self.apple_music_error.as_ref() {
+                self.save_msg = format!("Apple Music metadata unavailable: {err}");
+                self.save_msg_ttl = 80;
+            }
+        }
+    }
+
+    pub fn has_provider_pane(&self) -> bool {
+        self.provider.is_some() || self.apple_music_client.is_some()
+    }
+
+    pub fn browsing_apple_music(&self) -> bool {
+        self.player.is_music_app() && self.apple_music_client.is_some()
+    }
+
+    pub fn apple_music_showing_tracks(&self) -> bool {
+        self.browsing_apple_music() && self.apple_music_track_context.is_some()
+    }
+
+    pub fn provider_item_count(&self) -> usize {
+        if self.apple_music_showing_tracks() {
+            self.apple_music_tracks.len()
+        } else {
+            self.provider_lists.len()
+        }
+    }
+
+    pub fn fetch_apple_music_playlists(&self) {
+        if let Some(ref client) = self.apple_music_client {
+            let client = std::sync::Arc::clone(client);
+            let tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                match client.library_playlists().await {
+                    Ok(playlists) => {
+                        let lists = playlists
+                            .into_iter()
+                            .map(|playlist| PlaylistInfo {
+                                id: playlist.id,
+                                name: playlist.name,
+                                track_count: playlist.track_count.unwrap_or(0),
+                            })
+                            .collect();
+                        let _ = tx.send(AppMsg::AppleMusicPlaylists(lists));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(AppMsg::AppleMusicError(err.to_string()));
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn fetch_apple_music_tracks(&mut self, playlist_id: &str, playlist_name: &str) {
+        if let Some(ref client) = self.apple_music_client {
+            self.prov_loading = true;
+            let client = std::sync::Arc::clone(client);
+            let tx = self.msg_tx.clone();
+            let playlist_id = playlist_id.to_string();
+            let playlist_name = playlist_name.to_string();
+            tokio::spawn(async move {
+                match client.library_playlist_tracks(&playlist_id).await {
+                    Ok(tracks) => {
+                        let _ = tx.send(AppMsg::AppleMusicTracks {
+                            playlist_id,
+                            playlist_name,
+                            tracks,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = tx.send(AppMsg::AppleMusicError(err.to_string()));
+                    }
+                }
+            });
+        }
+    }
+
     pub fn fetch_provider_tracks(&mut self, playlist_id: &str) {
         if let Some(ref prov) = self.provider {
             self.prov_loading = true;
@@ -558,12 +776,30 @@ impl App {
     }
 
     pub fn provider_name(&self) -> &str {
-        self.provider.as_ref().map_or("Provider", |p| p.name())
+        if self.browsing_apple_music() {
+            "Apple Music"
+        } else {
+            self.provider.as_ref().map_or("Provider", |p| p.name())
+        }
+    }
+
+    pub fn provider_header_text(&self) -> String {
+        if let Some(ctx) = self.apple_music_track_context.as_ref() {
+            format!("── {}: {} ──", self.provider_name(), ctx.playlist_name)
+        } else {
+            format!("── {} Playlists ──", self.provider_name())
+        }
     }
 
     // --- Save ---
 
     pub fn save_track(&mut self) {
+        if !self.player.supports_local_playlist() {
+            self.save_msg = "Music.app backend does not support saving local tracks".to_string();
+            self.save_msg_ttl = 40;
+            return;
+        }
+
         let track = match self.playlist.current() {
             Some((t, _)) => t.clone(),
             None => {
@@ -698,10 +934,88 @@ pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> a
 #[cfg(test)]
 mod tests {
     use super::eq_presets::*;
+    use super::{App, AppMsg, AppleMusicTrackContext};
+    use crate::external::apple_music_api::LibraryTrack;
+    use crate::external::music_app::{MusicAppPlayerState, MusicAppSnapshot};
+    use crate::playback_backend::PlaybackBackend;
+    use crate::playlist::{Playlist, PlaylistInfo};
+    use crate::resolve::ytdl::YtdlTempTracker;
+    use tokio::sync::mpsc;
 
     #[test]
     fn test_eq_preset_lookup() {
         assert_eq!(EQ_PRESETS[0].name, "Flat");
         assert_eq!(EQ_PRESETS[1].name, "Rock");
+    }
+
+    fn build_music_app_test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(
+            PlaybackBackend::music_app_for_test(MusicAppSnapshot {
+                state: MusicAppPlayerState::Stopped,
+                volume: 50,
+                title: String::new(),
+                artist: String::new(),
+                album: String::new(),
+                position_secs: 0.0,
+                duration_secs: 0.0,
+            }),
+            Playlist::new(),
+            YtdlTempTracker::new(),
+            tx,
+            None,
+        )
+    }
+
+    #[test]
+    fn apple_music_tracks_message_enters_track_browser() {
+        let mut app = build_music_app_test_app();
+
+        app.on_msg(AppMsg::AppleMusicTracks {
+            playlist_id: "playlist-1".into(),
+            playlist_name: "Favorites".into(),
+            tracks: vec![LibraryTrack {
+                id: "track-1".into(),
+                title: "Alive".into(),
+                artist: "Daft Punk".into(),
+                album: "Homework".into(),
+            }],
+        });
+
+        assert_eq!(
+            app.apple_music_track_context,
+            Some(AppleMusicTrackContext {
+                playlist_id: "playlist-1".into(),
+                playlist_name: "Favorites".into(),
+            })
+        );
+        assert_eq!(app.apple_music_tracks.len(), 1);
+        assert_eq!(app.prov_cursor, 0);
+    }
+
+    #[test]
+    fn apple_music_playlists_message_resets_track_browser() {
+        let mut app = build_music_app_test_app();
+        app.apple_music_track_context = Some(AppleMusicTrackContext {
+            playlist_id: "playlist-1".into(),
+            playlist_name: "Favorites".into(),
+        });
+        app.apple_music_tracks = vec![LibraryTrack {
+            id: "track-1".into(),
+            title: "Alive".into(),
+            artist: "Daft Punk".into(),
+            album: "Homework".into(),
+        }];
+
+        app.on_msg(AppMsg::AppleMusicPlaylists(vec![PlaylistInfo {
+            id: "playlist-1".into(),
+            name: "Favorites".into(),
+            track_count: 1,
+        }]));
+
+        assert!(app.apple_music_track_context.is_none());
+        assert!(app.apple_music_tracks.is_empty());
+        assert_eq!(app.provider_lists.len(), 1);
+        assert_eq!(app.prov_cursor, 0);
     }
 }

@@ -74,6 +74,15 @@ impl Visualizer {
         };
     }
 
+    pub fn cycle_music_app_mode(&mut self) {
+        self.mode = match self.mode {
+            VisMode::Bars => VisMode::BarsGap,
+            VisMode::BarsGap => VisMode::VBars,
+            VisMode::VBars => VisMode::Bricks,
+            VisMode::Bricks | VisMode::Scope => VisMode::Bars,
+        };
+    }
+
     /// Run FFT on raw audio samples and return 10 normalized band levels (0-1).
     pub fn analyze(&mut self, samples: &[f64]) -> [f64; NUM_BANDS] {
         let mut bands = [0.0f64; NUM_BANDS];
@@ -137,6 +146,47 @@ impl Visualizer {
         bands
     }
 
+    pub fn synthetic_bands(
+        &mut self,
+        phase_secs: f64,
+        is_playing: bool,
+        is_paused: bool,
+    ) -> [f64; NUM_BANDS] {
+        if !is_playing {
+            let mut bands = [0.0; NUM_BANDS];
+            for (band, prev) in bands.iter_mut().zip(self.prev.iter_mut()) {
+                *band = *prev * 0.72;
+                *prev = *band;
+            }
+            return bands;
+        }
+
+        if is_paused && self.prev.iter().any(|&band| band > 0.0) {
+            return self.prev;
+        }
+
+        let mut bands = [0.0; NUM_BANDS];
+        for (idx, band) in bands.iter_mut().enumerate() {
+            let idxf = idx as f64;
+            let primary = ((phase_secs * 1.15) + idxf * 0.72).sin() * 0.5 + 0.5;
+            let secondary = ((phase_secs * 0.63) + idxf * 1.11).cos() * 0.5 + 0.5;
+            let accent = ((phase_secs * 1.87) + idxf * 0.41).sin() * 0.5 + 0.5;
+            let tilt = 1.0 - (idxf / (NUM_BANDS.saturating_sub(1)) as f64) * 0.22;
+            let target = ((0.18 + primary * 0.42 + secondary * 0.18 + accent * 0.12) * tilt)
+                .clamp(0.08, 0.95);
+
+            let prev = self.prev[idx];
+            *band = if target > prev {
+                target * 0.7 + prev * 0.3
+            } else {
+                target * 0.35 + prev * 0.65
+            };
+            self.prev[idx] = *band;
+        }
+
+        bands
+    }
+
     /// Render spectrum bands as styled text lines.
     /// Returns a Vec of (line_string, Vec<(start_col, width, row_bottom)>) for styling.
     pub fn render(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
@@ -146,6 +196,13 @@ impl Visualizer {
             VisMode::VBars => self.render_vertical_bars_gapped(bands),
             VisMode::Bricks => self.render_bricks(bands),
             VisMode::Scope => self.render_vertical_bars_gapped(&[0.0; NUM_BANDS]),
+        }
+    }
+
+    pub fn render_synthetic(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
+        match self.mode {
+            VisMode::Scope => self.render_vertical_bars_gapped(bands),
+            _ => self.render(bands),
         }
     }
 
@@ -630,6 +687,57 @@ mod tests {
         assert_eq!(vis.mode, VisMode::Scope);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bars);
+    }
+
+    #[test]
+    fn test_cycle_music_app_mode_skips_scope() {
+        let mut vis = Visualizer::new(44100.0);
+        assert_eq!(vis.mode, VisMode::Bars);
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::BarsGap);
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::VBars);
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Bricks);
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Bars);
+    }
+
+    #[test]
+    fn test_synthetic_bands_move_when_playing() {
+        let mut vis = Visualizer::new(44100.0);
+        let first = vis.synthetic_bands(12.0, true, false);
+        let second = vis.synthetic_bands(13.0, true, false);
+
+        assert!(first.iter().all(|&band| (0.0..=1.0).contains(&band)));
+        assert!(second.iter().all(|&band| (0.0..=1.0).contains(&band)));
+        assert!(first.iter().any(|&band| band > 0.1));
+        assert_ne!(first, second, "playing synthetic bands should animate");
+    }
+
+    #[test]
+    fn test_synthetic_bands_freeze_when_paused() {
+        let mut vis = Visualizer::new(44100.0);
+        let playing = vis.synthetic_bands(12.0, true, false);
+        let paused = vis.synthetic_bands(13.0, true, true);
+        let paused_later = vis.synthetic_bands(40.0, true, true);
+
+        assert_eq!(paused, paused_later);
+        assert_eq!(paused, playing);
+    }
+
+    #[test]
+    fn test_synthetic_bands_decay_when_stopped() {
+        let mut vis = Visualizer::new(44100.0);
+        let playing = vis.synthetic_bands(12.0, true, false);
+        let stopped = vis.synthetic_bands(13.0, false, false);
+
+        let playing_sum: f64 = playing.iter().sum();
+        let stopped_sum: f64 = stopped.iter().sum();
+        assert!(
+            stopped_sum < playing_sum,
+            "stopped synthetic bands should decay"
+        );
     }
 
     #[test]

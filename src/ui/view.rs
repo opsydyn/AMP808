@@ -190,7 +190,7 @@ impl App {
             ("◌ Buffering...".to_string(), self.palette.status_style())
         } else if self.player.is_playing() && self.player.is_paused() {
             ("⏸ Paused".to_string(), self.palette.status_style())
-        } else if self.player.is_playing() && !self.player.seekable() {
+        } else if self.player.is_playing() && self.player.is_streaming() {
             ("● Streaming".to_string(), self.palette.status_style())
         } else if self.player.is_playing() {
             ("▶ Playing".to_string(), self.palette.status_style())
@@ -227,13 +227,23 @@ impl App {
     }
 
     fn render_spectrum(&mut self, frame: &mut Frame, area: Rect) {
-        let samples = self.player.samples();
-        let spec_lines = if self.vis.mode == VisMode::Scope {
-            self.vis
-                .render_scope(&samples, area.width as usize, area.height as usize)
+        let spec_lines = if self.player.is_music_app() {
+            let (pos_secs, _) = self.track_position();
+            let bands = self.vis.synthetic_bands(
+                pos_secs as f64,
+                self.player.is_playing(),
+                self.player.is_paused(),
+            );
+            self.vis.render_synthetic(&bands)
         } else {
-            let bands = self.vis.analyze(&samples);
-            self.vis.render(&bands)
+            let samples = self.player.samples();
+            if self.vis.mode == VisMode::Scope {
+                self.vis
+                    .render_scope(&samples, area.width as usize, area.height as usize)
+            } else {
+                let bands = self.vis.analyze(&samples);
+                self.vis.render(&bands)
+            }
         };
 
         for (row, spec_line) in spec_lines.iter().enumerate() {
@@ -268,7 +278,7 @@ impl App {
         let w = area.width as usize;
 
         // Non-seekable streams: static streaming bar
-        if !self.player.seekable() && self.player.is_playing() {
+        if self.player.is_streaming() {
             let label = "━━━ STREAMING ━━━";
             let pad = w.saturating_sub(label.len()) / 2;
             let bar = format!(
@@ -410,7 +420,12 @@ impl App {
     fn render_playlist(&self, frame: &mut Frame, area: Rect) {
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
-            let line = Line::from(Span::styled("  No tracks loaded", self.palette.dim_style()));
+            let text = if self.player.is_music_app() {
+                "  Music.app backend active"
+            } else {
+                "  No tracks loaded"
+            };
+            let line = Line::from(Span::styled(text, self.palette.dim_style()));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -536,9 +551,8 @@ impl App {
     }
 
     fn render_provider_header(&self, frame: &mut Frame, area: Rect) {
-        let name = self.provider_name();
         let line = Line::from(Span::styled(
-            format!("── {name} Playlists ──"),
+            self.provider_header_text(),
             self.palette.dim_style(),
         ));
         frame.render_widget(Paragraph::new(line), area);
@@ -547,11 +561,51 @@ impl App {
     fn render_provider_list(&self, frame: &mut Frame, area: Rect) {
         if self.prov_loading {
             let name = self.provider_name();
+            let target = if self.apple_music_showing_tracks() {
+                "tracks"
+            } else {
+                "playlists"
+            };
             let line = Line::from(Span::styled(
-                format!("  Loading {name}..."),
+                format!("  Loading {name} {target}..."),
                 self.palette.dim_style(),
             ));
             frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        if self.apple_music_showing_tracks() {
+            if self.apple_music_tracks.is_empty() {
+                let line = Line::from(Span::styled("  No tracks found", self.palette.dim_style()));
+                frame.render_widget(Paragraph::new(line), area);
+                return;
+            }
+
+            let visible = (area.height as usize).min(self.apple_music_tracks.len());
+            let scroll = if self.prov_cursor >= visible {
+                self.prov_cursor - visible + 1
+            } else {
+                0
+            };
+
+            let mut lines = Vec::with_capacity(visible);
+            for i in scroll..self.apple_music_tracks.len().min(scroll + visible) {
+                let track = &self.apple_music_tracks[i];
+                let style = if i == self.prov_cursor {
+                    self.palette.playlist_selected_style()
+                } else {
+                    self.palette.playlist_item_style()
+                };
+                let prefix = if i == self.prov_cursor { "> " } else { "  " };
+                let name = if track.artist.is_empty() {
+                    track.title.clone()
+                } else {
+                    format!("{} - {}", track.artist, track.title)
+                };
+                lines.push(Line::from(Span::styled(format!("{prefix}{name}"), style)));
+            }
+
+            frame.render_widget(Paragraph::new(lines), area);
             return;
         }
 
@@ -620,14 +674,23 @@ impl App {
         } else if self.focus == Focus::Browser {
             "[↑↓/jk]Select [←/Backspace/h]Parent [→/Enter/l]Open/Load [Esc]Player [Ctrl+H]Hidden [L]Close [Tab]Focus [Q]Quit".to_string()
         } else if self.focus == Focus::Provider {
-            "[↑↓]Navigate [Enter]Load Playlist [L]Browse [:]Cmd [Tab]Focus [Q]Quit".to_string()
+            if self.apple_music_showing_tracks() {
+                "[↑↓]Navigate [Enter]Select Track [Esc]Playlists [:]Cmd [Tab]Focus [Q]Quit"
+                    .to_string()
+            } else if self.browsing_apple_music() {
+                "[↑↓]Navigate [Enter]Open Playlist [:]Cmd [Tab]Focus [Q]Quit".to_string()
+            } else {
+                "[↑↓]Navigate [Enter]Load Playlist [L]Browse [:]Cmd [Tab]Focus [Q]Quit".to_string()
+            }
         } else if self.searching {
             let count = self.search_results.len();
             format!(
                 "/ {}  ({count} found)  [↑↓]Navigate [Enter]Play [Esc]Cancel",
                 self.search_query
             )
-        } else if self.player.seekable() {
+        } else if self.player.is_music_app() {
+            "[Spc]⏯ [<>]Track [s]Stop [+-]Vol [t]Theme [v]Vis [8]808 [:]Cmd [Q]Quit".to_string()
+        } else if self.player.supports_seek() {
             "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [L]Load [:]Cmd [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         } else {
             "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [L]Load [:]Cmd [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()

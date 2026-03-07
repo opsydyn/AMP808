@@ -1,5 +1,7 @@
+mod cli;
 mod config;
 mod external;
+mod playback_backend;
 mod player;
 mod playlist;
 mod resolve;
@@ -8,7 +10,10 @@ mod ui;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::cli::{BackendKind, parse_args};
 use crate::config::Config;
+use crate::external::apple_music_api::AppleMusicClient;
+use crate::playback_backend::PlaybackBackend;
 use crate::player::Player;
 use crate::playlist::Playlist;
 use crate::resolve::ytdl::YtdlTempTracker;
@@ -16,16 +21,30 @@ use crate::ui::{App, AppMsg};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cli = parse_args(std::env::args().skip(1))?;
+    let backend_kind = cli.backend;
+    let args = cli.inputs;
 
     // Check for Navidrome provider from env
-    let provider: Option<Box<dyn playlist::Provider>> =
+    let provider: Option<Box<dyn playlist::Provider>> = if backend_kind == BackendKind::Local {
         external::navidrome::NavidromeClient::from_env()
-            .map(|c| Box::new(c) as Box<dyn playlist::Provider>);
+            .map(|c| Box::new(c) as Box<dyn playlist::Provider>)
+    } else {
+        None
+    };
 
-    if args.is_empty() && provider.is_none() {
+    let (apple_music_client, apple_music_error) = if backend_kind == BackendKind::MusicApp {
+        match AppleMusicClient::from_env() {
+            Ok(client) => (Some(client), None),
+            Err(err) => (None, Some(err.to_string())),
+        }
+    } else {
+        (None, None)
+    };
+
+    if args.is_empty() && provider.is_none() && backend_kind == BackendKind::Local {
         eprintln!(
-            "usage: cliamp <file|folder|url> [...]
+            "usage: cliamp [--backend <local|music-app>] <file|folder|url> [...]
 
   Local files     cliamp track.mp3 song.flac ~/Music
   HTTP stream     cliamp https://example.com/song.mp3
@@ -35,6 +54,7 @@ async fn main() -> Result<()> {
   YouTube         cliamp https://www.youtube.com/watch?v=...
   Bandcamp        cliamp https://artist.bandcamp.com/album/...
   Navidrome       NAVIDROME_URL=... NAVIDROME_USER=... NAVIDROME_PASS=... cliamp
+  Music.app       cliamp --backend music-app
 
 Formats: mp3, wav, flac, ogg, m4a, aac, opus, wma (aac/opus/wma need ffmpeg)
 SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
@@ -57,7 +77,7 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     .ok();
 
     // Resolve args into tracks + pending URLs
-    let resolved = if !args.is_empty() {
+    let resolved = if backend_kind == BackendKind::Local && !args.is_empty() {
         resolve::args(&args)?
     } else {
         resolve::ResolveResult {
@@ -77,21 +97,26 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     pl.set_repeat(cfg.repeat_mode());
 
     // Build player
-    let player = Player::new()?;
-    player.set_volume(cfg.volume);
-    if cfg.mono {
-        player.toggle_mono();
-    }
-    // Apply EQ bands from config
-    for (i, &gain) in cfg.eq.iter().enumerate() {
-        player.set_eq_band(i, gain);
-    }
+    let player = match backend_kind {
+        BackendKind::Local => {
+            let player = Player::new()?;
+            player.set_volume(cfg.volume);
+            if cfg.mono {
+                player.toggle_mono();
+            }
+            for (i, &gain) in cfg.eq.iter().enumerate() {
+                player.set_eq_band(i, gain);
+            }
+            PlaybackBackend::local(player)
+        }
+        BackendKind::MusicApp => PlaybackBackend::music_app()?,
+    };
 
     // Message channel for async tasks
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<AppMsg>();
 
     // Resolve pending URLs (feeds, M3U) in background
-    if !resolved.pending.is_empty() {
+    if backend_kind == BackendKind::Local && !resolved.pending.is_empty() {
         let urls = resolved.pending.clone();
         let tx = msg_tx.clone();
         tokio::spawn(async move {
@@ -108,9 +133,16 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
 
     // Build app
     let mut app = App::new(player, pl, tracker.clone(), msg_tx, provider);
+    if backend_kind == BackendKind::MusicApp {
+        app.configure_apple_music_browser(apple_music_client, apple_music_error);
+    }
+
+    if app.player.is_music_app() {
+        app.sync_remote_backend();
+    }
 
     // Apply EQ preset from config
-    if !cfg.eq_preset.is_empty() && cfg.eq_preset != "Custom" {
+    if app.player.supports_eq() && !cfg.eq_preset.is_empty() && cfg.eq_preset != "Custom" {
         for (i, preset) in ui::eq_presets::EQ_PRESETS.iter().enumerate() {
             if preset.name.eq_ignore_ascii_case(&cfg.eq_preset) {
                 app.eq_preset_idx = Some(i);
@@ -142,27 +174,43 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
 
     // Save config on exit — persist current player/playlist state
     let save_cfg = Config {
-        volume: app.player.volume(),
+        volume: if app.player.is_music_app() {
+            cfg.volume
+        } else {
+            app.player.volume()
+        },
         repeat: match app.playlist.repeat() {
             playlist::RepeatMode::Off => "off".to_string(),
             playlist::RepeatMode::All => "all".to_string(),
             playlist::RepeatMode::One => "one".to_string(),
         },
         shuffle: app.playlist.shuffled(),
-        mono: app.player.mono(),
-        eq_preset: app.eq_preset_idx.map_or_else(
-            || "Custom".to_string(),
-            |idx| {
-                ui::eq_presets::EQ_PRESETS
-                    .get(idx)
-                    .map_or("Custom".to_string(), |p| p.name.to_string())
-            },
-        ),
+        mono: if app.player.is_music_app() {
+            cfg.mono
+        } else {
+            app.player.mono()
+        },
+        eq_preset: if app.player.is_music_app() {
+            cfg.eq_preset.clone()
+        } else {
+            app.eq_preset_idx.map_or_else(
+                || "Custom".to_string(),
+                |idx| {
+                    ui::eq_presets::EQ_PRESETS
+                        .get(idx)
+                        .map_or("Custom".to_string(), |p| p.name.to_string())
+                },
+            )
+        },
         theme: app
             .theme_idx
             .and_then(|i| app.themes.get(i))
             .map_or_else(String::new, |t| t.name.clone()),
-        eq: app.player.eq_bands().to_vec(),
+        eq: if app.player.is_music_app() {
+            cfg.eq.clone()
+        } else {
+            app.player.eq_bands().to_vec()
+        },
         mode_808: app.mode_808,
     };
     if let Err(e) = save_cfg.save() {

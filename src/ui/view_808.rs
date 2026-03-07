@@ -316,7 +316,7 @@ impl App {
             "◌"
         } else if self.player.is_playing() && self.player.is_paused() {
             "⏸"
-        } else if self.player.is_playing() && !self.player.seekable() {
+        } else if self.player.is_playing() && self.player.is_streaming() {
             "●"
         } else if self.player.is_playing() {
             "▶"
@@ -356,7 +356,7 @@ impl App {
 
         // Seek bar
         let w = area.width as usize;
-        let seek_line = if !self.player.seekable() && self.player.is_playing() {
+        let seek_line = if self.player.is_streaming() {
             let label = "━━━ STREAMING ━━━";
             let pad = w.saturating_sub(label.len() + 1) / 2;
             let bar = format!(
@@ -459,6 +459,27 @@ impl App {
     }
 
     fn render_808_spectrum(&mut self, frame: &mut Frame, area: Rect) {
+        if self.player.is_music_app() {
+            let (pos_secs, _) = self.track_position();
+            let bands = self.vis.synthetic_bands(
+                pos_secs as f64,
+                self.player.is_playing(),
+                self.player.is_paused(),
+            );
+
+            match render_mode_808(self.vis.mode) {
+                RenderMode808::HorizontalBars => {
+                    let solid = matches!(self.vis.mode, VisMode::BarsGap);
+                    let lines = self.vis.render_808_horizontal(&bands, solid);
+                    self.render_808_visual_lines(frame, area, lines);
+                }
+                RenderMode808::LedColumns | RenderMode808::Oscilloscope => {
+                    self.render_808_led_columns(frame, area, &bands);
+                }
+            }
+            return;
+        }
+
         let samples = self.player.samples();
         match render_mode_808(self.vis.mode) {
             RenderMode808::HorizontalBars => {
@@ -550,10 +571,12 @@ impl App {
     fn render_808_playlist(&self, frame: &mut Frame, area: Rect) {
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
-            let line = Line::from(Span::styled(
-                "  No tracks loaded",
-                Style::default().fg(C808_DIM),
-            ));
+            let text = if self.player.is_music_app() {
+                "  Music.app backend active"
+            } else {
+                "  No tracks loaded"
+            };
+            let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -628,11 +651,60 @@ impl App {
     fn render_808_provider(&self, frame: &mut Frame, area: Rect) {
         if self.prov_loading {
             let name = self.provider_name();
+            let target = if self.apple_music_showing_tracks() {
+                "tracks"
+            } else {
+                "playlists"
+            };
             let line = Line::from(Span::styled(
-                format!("  Loading {name}..."),
+                format!("  Loading {name} {target}..."),
                 Style::default().fg(C808_DIM),
             ));
             frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        if self.apple_music_showing_tracks() {
+            if self.apple_music_tracks.is_empty() {
+                let line = Line::from(Span::styled(
+                    "  No tracks found",
+                    Style::default().fg(C808_DIM),
+                ));
+                frame.render_widget(Paragraph::new(line), area);
+                return;
+            }
+
+            let visible = (area.height as usize).min(self.apple_music_tracks.len());
+            let scroll = if self.prov_cursor >= visible {
+                self.prov_cursor - visible + 1
+            } else {
+                0
+            };
+
+            let mut lines = Vec::with_capacity(visible);
+            for i in scroll..self.apple_music_tracks.len().min(scroll + visible) {
+                let track = &self.apple_music_tracks[i];
+                let style = if i == self.prov_cursor {
+                    Style::default()
+                        .fg(C808_YELLOW)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(C808_GREY)
+                };
+                let prefix = if i == self.prov_cursor {
+                    " ► "
+                } else {
+                    "   "
+                };
+                let name = if track.artist.is_empty() {
+                    track.title.clone()
+                } else {
+                    format!("{} - {}", track.artist, track.title)
+                };
+                lines.push(Line::from(Span::styled(format!("{prefix}{name}"), style)));
+            }
+
+            frame.render_widget(Paragraph::new(lines), area);
             return;
         }
 
@@ -764,7 +836,15 @@ impl App {
             return;
         }
 
-        let controls = controls_808(self.focus, self.player.seekable());
+        let controls = controls_808(
+            self.focus,
+            self.player.supports_seek(),
+            self.player.supports_eq(),
+            self.player.supports_visualizer(),
+            self.player.supports_cover_art(),
+            self.player.supports_local_playlist(),
+            self.apple_music_showing_tracks(),
+        );
         if controls.is_empty() {
             return;
         }
@@ -991,12 +1071,29 @@ fn tachyon_should_animate(is_playing: bool, is_paused: bool) -> bool {
     is_playing && !is_paused
 }
 
-fn controls_808(focus: Focus, seekable: bool) -> Vec<(&'static str, &'static str)> {
+fn controls_808(
+    focus: Focus,
+    supports_seek: bool,
+    supports_eq: bool,
+    supports_visualizer: bool,
+    supports_cover_art: bool,
+    supports_local_playlist: bool,
+    apple_music_tracks: bool,
+) -> Vec<(&'static str, &'static str)> {
     if focus == Focus::Provider {
+        if apple_music_tracks {
+            return vec![
+                ("↑↓", "NAV"),
+                ("Enter", "INFO"),
+                ("Esc", "BACK"),
+                ("Tab", "FOCS"),
+                ("Q", "QUIT"),
+            ];
+        }
+
         return vec![
             ("↑↓", "NAV"),
-            ("Enter", "LOAD"),
-            ("L", "BROWSE"),
+            ("Enter", "OPEN"),
             ("Tab", "FOCS"),
             ("Q", "QUIT"),
         ];
@@ -1013,25 +1110,36 @@ fn controls_808(focus: Focus, seekable: bool) -> Vec<(&'static str, &'static str
         ];
     }
 
-    let mut controls = vec![
-        ("Spc", "PLAY"),
-        ("<>", "TRK"),
-        ("S", "SAVE"),
-        ("+-", "VOL"),
-        ("e", "EQ"),
-        ("v", "VIS"),
-        ("c", "ART"),
-        ("L", "LOAD"),
-        (":", "CMD"),
-        ("8", "808"),
-        ("/", "FIND"),
-        ("Tab", "FOCS"),
-        ("Q", "QUIT"),
-    ];
+    let mut controls = vec![("Spc", "PLAY"), ("<>", "TRK"), ("+-", "VOL")];
 
-    if seekable {
+    if supports_seek {
         controls.insert(2, ("←→", "SEEK"));
     }
+
+    if supports_eq {
+        controls.push(("e", "EQ"));
+    }
+    if supports_visualizer {
+        controls.push(("v", "VIS"));
+    }
+    if supports_cover_art {
+        controls.push(("c", "ART"));
+    }
+    if supports_local_playlist {
+        controls.extend([
+            ("S", "SAVE"),
+            ("L", "LOAD"),
+            (":", "CMD"),
+            ("/", "FIND"),
+            ("Tab", "FOCS"),
+        ]);
+    } else {
+        controls.push(("s", "STOP"));
+        controls.push((":", "CMD"));
+    }
+
+    controls.push(("8", "808"));
+    controls.push(("Q", "QUIT"));
 
     controls
 }
@@ -1043,7 +1151,7 @@ mod tests {
 
     #[test]
     fn controls_playlist_seekable_has_seek() {
-        let controls = controls_808(Focus::Playlist, true);
+        let controls = controls_808(Focus::Playlist, true, true, true, true, true, false);
         assert!(
             controls
                 .iter()
@@ -1053,13 +1161,13 @@ mod tests {
 
     #[test]
     fn controls_playlist_stream_hides_seek() {
-        let controls = controls_808(Focus::Playlist, false);
+        let controls = controls_808(Focus::Playlist, false, true, true, true, true, false);
         assert!(!controls.iter().any(|(key, _)| *key == "←→"));
     }
 
     #[test]
     fn controls_playlist_has_visualizer_toggle() {
-        let controls = controls_808(Focus::Playlist, true);
+        let controls = controls_808(Focus::Playlist, true, true, true, true, true, false);
         assert!(
             controls
                 .iter()
@@ -1069,7 +1177,7 @@ mod tests {
 
     #[test]
     fn controls_playlist_has_load_browser() {
-        let controls = controls_808(Focus::Playlist, true);
+        let controls = controls_808(Focus::Playlist, true, true, true, true, true, false);
         assert!(
             controls
                 .iter()
@@ -1079,7 +1187,7 @@ mod tests {
 
     #[test]
     fn controls_browser_mode_exposes_navigation() {
-        let controls = controls_808(Focus::Browser, true);
+        let controls = controls_808(Focus::Browser, true, true, true, true, true, false);
         assert!(
             controls
                 .iter()
@@ -1094,16 +1202,43 @@ mod tests {
 
     #[test]
     fn controls_provider_mode_is_compact() {
-        let controls = controls_808(Focus::Provider, true);
+        let controls = controls_808(Focus::Provider, true, true, true, true, true, false);
         assert_eq!(
             controls,
             vec![
                 ("↑↓", "NAV"),
-                ("Enter", "LOAD"),
-                ("L", "BROWSE"),
+                ("Enter", "OPEN"),
                 ("Tab", "FOCS"),
                 ("Q", "QUIT")
             ]
+        );
+    }
+
+    #[test]
+    fn controls_provider_track_view_includes_back_action() {
+        let controls = controls_808(Focus::Provider, true, true, true, true, true, true);
+        assert_eq!(
+            controls,
+            vec![
+                ("↑↓", "NAV"),
+                ("Enter", "INFO"),
+                ("Esc", "BACK"),
+                ("Tab", "FOCS"),
+                ("Q", "QUIT")
+            ]
+        );
+    }
+
+    #[test]
+    fn music_app_controls_hide_local_only_actions() {
+        let controls = controls_808(Focus::Playlist, false, false, false, false, false, false);
+        assert!(!controls.iter().any(|(key, _)| *key == "L"));
+        assert!(!controls.iter().any(|(key, _)| *key == "v"));
+        assert!(!controls.iter().any(|(key, _)| *key == "c"));
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "s" && *action == "STOP")
         );
     }
 

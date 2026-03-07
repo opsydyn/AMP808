@@ -93,6 +93,11 @@ impl PlaylistExplorer {
 
 impl App {
     pub fn toggle_playlist_browser(&mut self) {
+        if !self.player.supports_local_playlist() {
+            self.err = Some("music-app backend does not support local playlist browsing".into());
+            return;
+        }
+
         if self.focus == Focus::Browser {
             self.focus = Focus::Playlist;
             return;

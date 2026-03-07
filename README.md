@@ -29,6 +29,7 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 - YouTube/SoundCloud/Bandcamp via yt-dlp (two-phase: fast enumerate, lazy download)
 - Podcast RSS feeds and M3U/M3U8 playlists
 - Navidrome/Subsonic server integration (browse and play remote playlists)
+- macOS `Music.app` remote-control backend (`--backend music-app`)
 - Gapless playback with preloaded next track
 - 10-band parametric EQ with 10 built-in presets
 - FFT/time-domain visualizer (bars, bricks, oscilloscope modes)
@@ -81,6 +82,13 @@ cargo run -- "http://ice1.somafm.com/groovesalad-256-mp3"
 
 # Run with Navidrome (browse server playlists)
 NAVIDROME_URL=https://music.example.com NAVIDROME_USER=alice NAVIDROME_PASS=secret cargo run
+
+# Run in macOS Music.app remote-control mode
+cargo run -- --backend music-app
+
+# Release binary examples
+./target/release/cliamp "Alive.mp3"
+./target/release/cliamp --backend music-app
 ```
 
 ### Navidrome / Subsonic
@@ -94,6 +102,51 @@ Set these environment variables to connect to a [Navidrome](https://www.navidrom
 | `NAVIDROME_PASS` | Password |
 
 When all three are set, cliamp starts in provider mode showing your server's playlists. Use `↑↓` to navigate, `Enter` to load a playlist, and `Esc` to return to the playlist browser. You can also pass local files alongside Navidrome — they'll be in the playlist while the provider browser is available via `Tab`.
+
+### Music.app Backend
+
+On macOS, cliamp can control the system `Music.app` instead of its local audio engine:
+
+```bash
+./target/release/cliamp --backend music-app
+```
+
+Phase 1 scope:
+
+- Reads current `Music.app` title, artist, play state, position, duration, and volume
+- Controls `play/pause`, `next`, `previous`, `stop`, and volume
+- Exposes synthetic visualizers in both standard and 808 views
+- Does not accept local file or URL arguments in this mode
+- Does not expose local playlist loading, EQ, or album art controls in this mode
+
+The first run may prompt for macOS Automation permission to control `Music.app`.
+
+### Manual Test: Music.app Phase 1
+
+1. Open `Music.app`
+2. Start a track in `Music.app`
+3. Run:
+
+```bash
+./target/release/cliamp --backend music-app
+```
+
+4. Verify in the TUI:
+   - current title/artist appears in the player
+   - `Space` toggles play/pause
+   - `>` and `<` move to next/previous track
+   - `s` stops playback
+   - `+` and `-` change volume
+   - `v` cycles synthetic visualizer variants
+   - `8` switches between standard and 808 layouts
+
+Invalid usage:
+
+```bash
+./target/release/cliamp --backend music-app "Alive.mp3"
+```
+
+That fails by design because `music-app` mode is a remote-control backend, not a local file player.
 
 ## Development
 
@@ -119,7 +172,10 @@ src/
 ├── config.rs             # ~/.config/cliamp/config.toml (serde + toml)
 ├── external/
 │   ├── mod.rs            # External service providers
+│   ├── music_app.rs      # macOS Music.app AppleScript controller
+│   ├── apple_music_api.rs# Apple Music metadata client (internal, phase 1)
 │   └── navidrome.rs      # Navidrome/Subsonic client (MD5 token auth)
+├── playback_backend.rs   # Local player vs Music.app backend wrapper
 ├── playlist/
 │   └── mod.rs            # Track, Playlist, Provider trait, shuffle, repeat, queue
 ├── resolve/
@@ -188,6 +244,8 @@ Key architectural decisions are documented in [adr/](adr/):
 | `Esc` | Back to provider (when in playlist with provider) |
 | `Ctrl+K` | Keymap overlay |
 | `q` | Quit |
+
+Music.app backend uses a reduced control surface: `Space`, `s`, `>`, `<`, `+`, `-`, `t`, `v`, `8`, `:`, and `q`.
 
 ## EQ Presets
 

@@ -1,0 +1,35 @@
+{
+  "data": [
+    {
+      "id": "p.playlist-1",
+      "type": "library-playlists",
+      "attributes": {
+        "name": "Chill Mix"
+      },
+      "relationships": {
+        "tracks": {
+          "data": [
+            {
+              "id": "t.track-1",
+              "type": "library-songs",
+              "attributes": {
+                "name": "Around the World",
+                "artistName": "Daft Punk",
+                "albumName": "Homework"
+              }
+            },
+            {
+              "id": "t.track-2",
+              "type": "library-songs",
+              "attributes": {
+                "name": "Digital Love",
+                "artistName": "Daft Punk",
+                "albumName": "Discovery"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
