@@ -1,4 +1,6 @@
+pub mod command;
 pub mod eq_presets;
+pub mod explorer;
 pub mod keys;
 pub mod styles;
 pub mod theme;
@@ -7,6 +9,7 @@ pub mod view_808;
 pub mod visualizer;
 
 use std::io;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
@@ -18,7 +21,9 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+use self::command::{UiCommand, parse_command};
 use self::eq_presets::EQ_PRESETS;
+use self::explorer::PlaylistExplorer;
 use self::keys::Focus;
 use self::styles::Palette;
 use self::theme::Theme;
@@ -57,6 +62,9 @@ pub struct App {
     pub save_msg: String,
     pub save_msg_ttl: usize,
     pub show_keymap: bool,
+    pub explorer: Option<PlaylistExplorer>,
+    pub command_mode: bool,
+    pub command_input: String,
     pub searching: bool,
     pub search_query: String,
     pub search_results: Vec<usize>,
@@ -83,6 +91,7 @@ pub struct App {
     pub fx_last_frame: Instant,
     tracker: YtdlTempTracker,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
+    last_playlist_file: Option<PathBuf>,
 }
 
 impl App {
@@ -119,6 +128,9 @@ impl App {
             save_msg: String::new(),
             save_msg_ttl: 0,
             show_keymap: false,
+            explorer: None,
+            command_mode: false,
+            command_input: String::new(),
             searching: false,
             search_query: String::new(),
             search_results: Vec::new(),
@@ -145,6 +157,7 @@ impl App {
             fx_last_frame: Instant::now(),
             tracker,
             msg_tx,
+            last_playlist_file: None,
         };
 
         // Fetch playlists in background if provider exists
@@ -437,6 +450,54 @@ impl App {
         }
     }
 
+    // --- Command mode ---
+
+    pub fn execute_command_line(&mut self, line: &str) {
+        match parse_command(line) {
+            Ok(UiCommand::Load { path }) => self.load_playlist_from_file(&path),
+            Err(err) => {
+                self.err = Some(err);
+            }
+        }
+    }
+
+    fn load_playlist_from_file(&mut self, path: &str) {
+        self.load_playlist_from_path(expand_tilde(path));
+    }
+
+    pub fn load_playlist_from_path(&mut self, path_buf: PathBuf) {
+        let tracks = match resolve::load_local_playlist_file(&path_buf) {
+            Ok(tracks) => tracks,
+            Err(err) => {
+                self.err = Some(format!("load failed: {err}"));
+                return;
+            }
+        };
+
+        let mut next = Playlist::new();
+        next.add(&tracks);
+        next.set_repeat(self.playlist.repeat());
+        if self.playlist.shuffled() {
+            next.toggle_shuffle();
+        }
+
+        self.player.stop();
+        self.playlist = next;
+        self.focus = Focus::Playlist;
+        self.pl_cursor = 0;
+        self.pl_scroll = 0;
+        self.searching = false;
+        self.search_query.clear();
+        self.search_results.clear();
+        self.search_cursor = 0;
+        self.last_playlist_file = Some(path_buf.clone());
+        self.err = None;
+        self.save_msg = format!("Loaded {} tracks from {}", tracks.len(), path_buf.display());
+        self.save_msg_ttl = 60;
+        self.playlist.set_index(0);
+        self.play_current_track();
+    }
+
     // --- Scroll ---
 
     pub fn adjust_scroll(&mut self) {
@@ -572,6 +633,15 @@ impl App {
             }
         }
     }
+}
+
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Run the TUI event loop. Returns the App so callers can extract state (e.g. for config save).

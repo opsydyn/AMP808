@@ -128,15 +128,13 @@ mod tests {
             if audio_pos <= audio.len() {
                 // Write metadata block
                 let meta_bytes = metadata.as_bytes();
-                let meta_len = (meta_bytes.len() + 15) / 16; // ceil division
+                let meta_len = meta_bytes.len().div_ceil(16);
                 let padded_len = meta_len * 16;
 
                 out.push(meta_len as u8);
                 out.extend_from_slice(meta_bytes);
                 // Null-pad to multiple of 16
-                for _ in meta_bytes.len()..padded_len {
-                    out.push(0);
-                }
+                out.extend(std::iter::repeat_n(0, padded_len - meta_bytes.len()));
             }
         }
 

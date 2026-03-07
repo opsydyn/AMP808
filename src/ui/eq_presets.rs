@@ -70,7 +70,7 @@ mod tests {
         for preset in EQ_PRESETS {
             for &band in &preset.bands {
                 assert!(
-                    band >= -12.0 && band <= 12.0,
+                    (-12.0..=12.0).contains(&band),
                     "{}: band {band} out of range",
                     preset.name
                 );

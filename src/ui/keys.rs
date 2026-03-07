@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::App;
+use super::command::{CommandInputResult, handle_command_input_key};
 use super::eq_presets::EQ_PRESETS;
 use super::styles::Palette;
 
@@ -16,6 +17,12 @@ impl App {
         // Theme picker mode
         if self.show_themes {
             self.handle_theme_key(key);
+            return false;
+        }
+
+        // Command mode
+        if self.command_mode {
+            self.handle_command_key(key);
             return false;
         }
 
@@ -52,7 +59,9 @@ impl App {
             }
 
             (_, KeyCode::Left) => {
-                if self.focus == Focus::EQ {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::EQ {
                     if self.eq_cursor > 0 {
                         self.eq_cursor -= 1;
                     }
@@ -62,7 +71,9 @@ impl App {
             }
 
             (_, KeyCode::Right) => {
-                if self.focus == Focus::EQ {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::EQ {
                     if self.eq_cursor < 9 {
                         self.eq_cursor += 1;
                     }
@@ -72,7 +83,9 @@ impl App {
             }
 
             (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                if self.focus == Focus::Provider {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::Provider {
                     if self.prov_cursor > 0 {
                         self.prov_cursor -= 1;
                     }
@@ -88,7 +101,9 @@ impl App {
             }
 
             (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                if self.focus == Focus::Provider {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::Provider {
                     if self.prov_cursor < self.provider_lists.len().saturating_sub(1) {
                         self.prov_cursor += 1;
                     }
@@ -104,7 +119,9 @@ impl App {
             }
 
             (_, KeyCode::Enter) => {
-                if self.focus == Focus::Provider && !self.provider_lists.is_empty() {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::Provider && !self.provider_lists.is_empty() {
                     let id = self.provider_lists[self.prov_cursor].id.clone();
                     self.fetch_provider_tracks(&id);
                 } else if self.focus == Focus::Playlist {
@@ -114,7 +131,13 @@ impl App {
             }
 
             (_, KeyCode::Esc) | (_, KeyCode::Backspace) => {
-                if self.focus == Focus::Playlist && self.provider.is_some() {
+                if self.focus == Focus::Browser {
+                    if key.code == KeyCode::Esc {
+                        self.focus = Focus::Playlist;
+                    } else {
+                        self.handle_browser_key(key);
+                    }
+                } else if self.focus == Focus::Playlist && self.provider.is_some() {
                     self.focus = Focus::Provider;
                 }
             }
@@ -140,27 +163,28 @@ impl App {
             }
 
             (_, KeyCode::Tab) => {
-                self.focus = match self.focus {
-                    Focus::Playlist => Focus::EQ,
-                    Focus::EQ => {
-                        if self.provider.is_some() {
-                            Focus::Provider
-                        } else {
-                            Focus::Playlist
-                        }
-                    }
-                    Focus::Provider => Focus::Playlist,
-                };
+                self.focus =
+                    next_focus(self.focus, self.provider.is_some(), self.explorer.is_some());
+            }
+
+            (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                }
             }
 
             (_, KeyCode::Char('h')) => {
-                if self.focus == Focus::EQ && self.eq_cursor > 0 {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::EQ && self.eq_cursor > 0 {
                     self.eq_cursor -= 1;
                 }
             }
 
             (_, KeyCode::Char('l')) => {
-                if self.focus == Focus::EQ && self.eq_cursor < 9 {
+                if self.focus == Focus::Browser {
+                    self.handle_browser_key(key);
+                } else if self.focus == Focus::EQ && self.eq_cursor < 9 {
                     self.eq_cursor += 1;
                 }
             }
@@ -201,6 +225,15 @@ impl App {
                 self.search_query.clear();
                 self.search_results.clear();
                 self.search_cursor = 0;
+            }
+
+            (_, KeyCode::Char('L')) => {
+                self.toggle_playlist_browser();
+            }
+
+            (_, KeyCode::Char(':')) => {
+                self.command_mode = true;
+                self.command_input.clear();
             }
 
             (_, KeyCode::Char('v')) => {
@@ -314,11 +347,71 @@ impl App {
             _ => {}
         }
     }
+
+    fn handle_command_key(&mut self, key: KeyEvent) {
+        match handle_command_input_key(&mut self.command_input, key) {
+            CommandInputResult::Continue => {}
+            CommandInputResult::Cancel => {
+                self.command_mode = false;
+            }
+            CommandInputResult::Submit(line) => {
+                self.command_mode = false;
+                if line.trim().is_empty() {
+                    return;
+                }
+                self.execute_command_line(&line);
+            }
+        }
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Playlist,
+    Browser,
     EQ,
     Provider,
+}
+
+fn next_focus(current: Focus, has_provider: bool, has_browser: bool) -> Focus {
+    match current {
+        Focus::Playlist => {
+            if has_browser {
+                Focus::Browser
+            } else {
+                Focus::EQ
+            }
+        }
+        Focus::Browser => Focus::EQ,
+        Focus::EQ => {
+            if has_provider {
+                Focus::Provider
+            } else {
+                Focus::Playlist
+            }
+        }
+        Focus::Provider => Focus::Playlist,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Focus, next_focus};
+
+    #[test]
+    fn tab_cycle_includes_browser_when_available() {
+        assert_eq!(next_focus(Focus::Playlist, false, true), Focus::Browser);
+        assert_eq!(next_focus(Focus::Browser, false, true), Focus::EQ);
+    }
+
+    #[test]
+    fn tab_cycle_skips_browser_when_unavailable() {
+        assert_eq!(next_focus(Focus::Playlist, false, false), Focus::EQ);
+    }
+
+    #[test]
+    fn tab_cycle_includes_provider_when_available() {
+        assert_eq!(next_focus(Focus::EQ, true, true), Focus::Provider);
+        assert_eq!(next_focus(Focus::Provider, true, true), Focus::Playlist);
+    }
 }

@@ -80,6 +80,52 @@ pub async fn remote(urls: &[String]) -> anyhow::Result<Vec<Track>> {
     Ok(tracks)
 }
 
+/// Load a local M3U/M3U8 playlist file and resolve entries to tracks.
+pub fn load_local_playlist_file(path: &Path) -> anyhow::Result<Vec<Track>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if !matches!(ext.as_str(), "m3u" | "m3u8") {
+        anyhow::bail!("playlist file must end with .m3u or .m3u8");
+    }
+
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut tracks = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let entry = line.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+
+        let resolved = if playlist::is_url(entry) {
+            entry.to_string()
+        } else {
+            let p = Path::new(entry);
+            let full = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                base_dir.join(p)
+            };
+            full.to_string_lossy().to_string()
+        };
+
+        tracks.push(playlist::track_from_path(&resolved));
+    }
+
+    if tracks.is_empty() {
+        anyhow::bail!("playlist has no entries");
+    }
+
+    Ok(tracks)
+}
+
 /// Recursively collect audio files from a path.
 /// If path is a file with supported extension, returns it.
 /// If path is a directory, walks recursively collecting supported files.
@@ -190,6 +236,7 @@ async fn resolve_m3u(m3u_url: &str) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_is_supported_ext() {
@@ -311,5 +358,59 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0], "https://stream1.example.com");
         assert_eq!(urls[1], "https://stream2.example.com");
+    }
+
+    #[test]
+    fn test_load_local_playlist_file_resolves_relative_entries() {
+        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u");
+        let music = tmp.join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let song = music.join("Track One.mp3");
+        std::fs::write(&song, "fake").unwrap();
+
+        let playlist = tmp.join("playlist.m3u");
+        std::fs::write(&playlist, "music/Track One.mp3\n").unwrap();
+
+        let tracks = load_local_playlist_file(&playlist).unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, PathBuf::from(&song).to_string_lossy());
+        assert_eq!(tracks[0].title, "Track One");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_load_local_playlist_file_ignores_comments_and_blank_lines() {
+        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u-comments");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let song = tmp.join("Track Two.mp3");
+        std::fs::write(&song, "fake").unwrap();
+
+        let playlist = tmp.join("playlist.m3u8");
+        std::fs::write(
+            &playlist,
+            "#EXTM3U\n\n# comment\nTrack Two.mp3\nhttps://example.com/stream.mp3\n",
+        )
+        .unwrap();
+
+        let tracks = load_local_playlist_file(&playlist).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].path, PathBuf::from(&song).to_string_lossy());
+        assert_eq!(tracks[1].path, "https://example.com/stream.mp3");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_load_local_playlist_file_rejects_non_m3u_extension() {
+        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u-bad-ext");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let playlist = tmp.join("playlist.txt");
+        std::fs::write(&playlist, "song.mp3\n").unwrap();
+
+        let err = load_local_playlist_file(&playlist).unwrap_err();
+        assert!(err.to_string().contains(".m3u"));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

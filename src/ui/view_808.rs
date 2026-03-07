@@ -3,7 +3,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Paragraph,
+    Block, Borders, FrameExt as _, Paragraph,
     canvas::{Canvas, Line as CanvasLine},
 };
 use tachyonfx::{CellFilter, EffectRenderer, Interpolation, fx};
@@ -35,14 +35,24 @@ enum RenderMode808 {
     Oscilloscope,
 }
 
+fn content_height_808(browser_focus: bool, terminal_height: u16) -> u16 {
+    let target = if browser_focus { 31 } else { 28 };
+    target.min(terminal_height)
+}
+
+fn browser_panel_min_height_808(browser_focus: bool) -> u16 {
+    if browser_focus { 6 } else { 3 }
+}
+
 impl App {
     /// Render the 808 layout (called when mode_808 == true).
     pub fn render_808(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let browser_focus = self.focus == Focus::Browser;
 
         // Content sizing — centre both horizontally and vertically
         let content_width = 80u16.min(area.width);
-        let content_height = 28u16.min(area.height);
+        let content_height = content_height_808(browser_focus, area.height);
         let x = area.width.saturating_sub(content_width) / 2;
         let y = area.height.saturating_sub(content_height) / 2;
         let inner = Rect::new(x, y, content_width, content_height);
@@ -59,7 +69,7 @@ impl App {
                 Constraint::Length(1), // spacer
                 Constraint::Length(5), // spectrum LED
                 Constraint::Length(0), // spacer
-                Constraint::Min(3),    // playlist
+                Constraint::Min(browser_panel_min_height_808(browser_focus)), // playlist/browser
                 Constraint::Length(2), // help controls
                 Constraint::Length(1), // error/save
             ])
@@ -84,6 +94,8 @@ impl App {
         }
         if self.focus == Focus::Provider {
             self.render_808_provider(frame, chunks[9]);
+        } else if self.focus == Focus::Browser {
+            self.render_808_browser(frame, chunks[9]);
         } else {
             self.render_808_playlist(frame, chunks[9]);
         }
@@ -664,6 +676,37 @@ impl App {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    fn render_808_browser(&self, frame: &mut Frame, area: Rect) {
+        let Some(explorer) = self.explorer.as_ref() else {
+            let line = Line::from(Span::styled(
+                "  Press [L] to browse local playlists",
+                Style::default().fg(C808_DIM),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        };
+
+        if area.height < 2 {
+            let line = Line::from(Span::styled(
+                explorer.header_text(),
+                Style::default().fg(C808_GREY),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        let header = Line::from(Span::styled(
+            explorer.header_text(),
+            Style::default().fg(C808_GREY),
+        ));
+        frame.render_widget(Paragraph::new(header), chunks[0]);
+        frame.render_widget_ref(explorer.widget(), chunks[1]);
+    }
+
     fn render_808_search(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(vec![
             Span::styled(" / ", Style::default().fg(C808_YELLOW)),
@@ -712,6 +755,15 @@ impl App {
     }
 
     fn render_808_help(&self, frame: &mut Frame, area: Rect) {
+        if self.command_mode {
+            let line = Line::from(Span::styled(
+                format!(" : {}  [Enter]RUN [Esc]CANCEL", self.command_input),
+                Style::default().fg(C808_GREY),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
         let controls = controls_808(self.focus, self.player.seekable());
         if controls.is_empty() {
             return;
@@ -767,7 +819,13 @@ impl App {
     }
 
     fn render_808_status_line(&self, frame: &mut Frame, area: Rect) {
-        if let Some(ref err) = self.err {
+        if self.command_mode {
+            let line = Line::from(Span::styled(
+                format!(" :{}_", self.command_input),
+                Style::default().fg(C808_YELLOW),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+        } else if let Some(ref err) = self.err {
             let line = Line::from(Span::styled(
                 format!(" ERR: {err}"),
                 Style::default().fg(C808_RED),
@@ -938,8 +996,20 @@ fn controls_808(focus: Focus, seekable: bool) -> Vec<(&'static str, &'static str
         return vec![
             ("↑↓", "NAV"),
             ("Enter", "LOAD"),
+            ("L", "BROWSE"),
             ("Tab", "FOCS"),
             ("Q", "QUIT"),
+        ];
+    }
+
+    if focus == Focus::Browser {
+        return vec![
+            ("↑↓", "NAV"),
+            ("←", "UP"),
+            ("→", "OPEN"),
+            ("Esc", "PLAY"),
+            ("L", "CLOSE"),
+            ("Tab", "FOCS"),
         ];
     }
 
@@ -951,6 +1021,8 @@ fn controls_808(focus: Focus, seekable: bool) -> Vec<(&'static str, &'static str
         ("e", "EQ"),
         ("v", "VIS"),
         ("c", "ART"),
+        ("L", "LOAD"),
+        (":", "CMD"),
         ("8", "808"),
         ("/", "FIND"),
         ("Tab", "FOCS"),
@@ -996,6 +1068,31 @@ mod tests {
     }
 
     #[test]
+    fn controls_playlist_has_load_browser() {
+        let controls = controls_808(Focus::Playlist, true);
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "L" && *action == "LOAD")
+        );
+    }
+
+    #[test]
+    fn controls_browser_mode_exposes_navigation() {
+        let controls = controls_808(Focus::Browser, true);
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "←" && *action == "UP")
+        );
+        assert!(
+            controls
+                .iter()
+                .any(|(key, action)| *key == "Esc" && *action == "PLAY")
+        );
+    }
+
+    #[test]
     fn controls_provider_mode_is_compact() {
         let controls = controls_808(Focus::Provider, true);
         assert_eq!(
@@ -1003,10 +1100,23 @@ mod tests {
             vec![
                 ("↑↓", "NAV"),
                 ("Enter", "LOAD"),
+                ("L", "BROWSE"),
                 ("Tab", "FOCS"),
                 ("Q", "QUIT")
             ]
         );
+    }
+
+    #[test]
+    fn browser_focus_reserves_base_view_browser_height() {
+        assert_eq!(content_height_808(true, 40), 31);
+        assert_eq!(browser_panel_min_height_808(true), 6);
+    }
+
+    #[test]
+    fn non_browser_focus_keeps_standard_808_height() {
+        assert_eq!(content_height_808(false, 40), 28);
+        assert_eq!(browser_panel_min_height_808(false), 3);
     }
 
     #[test]

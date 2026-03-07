@@ -192,8 +192,8 @@ impl Visualizer {
         if view.is_empty() {
             // Draw a center reference line when there's no signal.
             let mid = px_h / 2;
-            for x in 0..px_w {
-                pixels[mid][x] = true;
+            for cell in pixels[mid].iter_mut().take(px_w) {
+                *cell = true;
             }
         } else {
             let mut prev: Option<(i32, i32)> = None;
@@ -353,7 +353,7 @@ impl Visualizer {
 
                 let mut text = block.repeat(BAND_FILL_WIDTH);
                 if i + 1 < NUM_BANDS {
-                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                    push_band_gap(&mut text);
                 }
 
                 segments.push(SpectrumSegment { text, row_bottom });
@@ -381,7 +381,7 @@ impl Visualizer {
                     " ".repeat(BAND_FILL_WIDTH)
                 };
                 if i + 1 < NUM_BANDS {
-                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                    push_band_gap(&mut text);
                 }
 
                 segments.push(SpectrumSegment {
@@ -418,7 +418,7 @@ impl Visualizer {
                 };
                 let mut text = block.repeat(BAND_FILL_WIDTH);
                 if i + 1 < NUM_BANDS {
-                    text.push_str(&" ".repeat(BAND_GAP_WIDTH));
+                    push_band_gap(&mut text);
                 }
 
                 segments.push(SpectrumSegment { text, row_bottom });
@@ -465,6 +465,61 @@ fn horizontal_row_fill_width(
     ((filled_units / bands.len() as f64) * total_width as f64).round() as usize
 }
 
+fn sample_linear(samples: &[f64], t: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    if samples.len() == 1 {
+        return samples[0];
+    }
+    let pos = t.clamp(0.0, 1.0) * (samples.len() - 1) as f64;
+    let idx = pos.floor() as usize;
+    let next = (idx + 1).min(samples.len() - 1);
+    let frac = pos - idx as f64;
+    samples[idx] * (1.0 - frac) + samples[next] * frac
+}
+
+fn set_pixel(pixels: &mut [Vec<bool>], x: i32, y: i32) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let x = x as usize;
+    let y = y as usize;
+    if y < pixels.len() && x < pixels[y].len() {
+        pixels[y][x] = true;
+    }
+}
+
+fn plot_line(pixels: &mut [Vec<bool>], from: (i32, i32), to: (i32, i32)) {
+    let (mut x0, mut y0) = from;
+    let (x1, y1) = to;
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        set_pixel(pixels, x0, y0);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = err * 2;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn push_band_gap(text: &mut String) {
+    text.extend(std::iter::repeat_n(' ', BAND_GAP_WIDTH));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,30 +529,26 @@ mod tests {
         let mut vis = Visualizer::new(44100.0);
         let bands = vis.analyze(&[]);
         assert_eq!(bands.len(), 10);
-        assert!(bands.iter().all(|&b| b >= 0.0 && b <= 1.0));
+        assert!(bands.iter().all(|&b| (0.0..=1.0).contains(&b)));
     }
 
     #[test]
     fn test_analyze_sine_wave() {
         let mut vis = Visualizer::new(44100.0);
-        // Generate 1kHz sine wave
         let samples: Vec<f64> = (0..FFT_SIZE)
             .map(|i| (2.0 * PI * 1000.0 * i as f64 / 44100.0).sin())
             .collect();
         let bands = vis.analyze(&samples);
-        assert!(bands.iter().all(|&b| b >= 0.0 && b <= 1.0));
-        // The 1kHz band (index ~4-5) should have significant energy
+        assert!(bands.iter().all(|&b| (0.0..=1.0).contains(&b)));
     }
 
     #[test]
     fn test_decay() {
         let mut vis = Visualizer::new(44100.0);
-        // Feed a loud signal
         let samples: Vec<f64> = (0..FFT_SIZE)
             .map(|i| (2.0 * PI * 440.0 * i as f64 / 44100.0).sin())
             .collect();
         let bands1 = vis.analyze(&samples);
-        // Now feed silence — should decay
         let bands2 = vis.analyze(&[]);
         let sum1: f64 = bands1.iter().sum();
         let sum2: f64 = bands2.iter().sum();
@@ -509,7 +560,7 @@ mod tests {
         let vis = Visualizer::new(44100.0);
         let bands = [0.5; NUM_BANDS];
         let lines = vis.render(&bands);
-        assert_eq!(lines.len(), 5); // HEIGHT = 5
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
@@ -588,7 +639,6 @@ mod tests {
         let bands = [1.0; NUM_BANDS];
         let lines = vis.render(&bands);
 
-        // Loud input should stack fill across multiple rows (columns, not horizontal slabs).
         let filled_rows = lines
             .iter()
             .filter(|line| {
@@ -599,7 +649,6 @@ mod tests {
             .count();
         assert!(filled_rows >= 3, "expected stacked vertical columns");
 
-        // Still preserve inter-column spacing.
         let combined_top: String = lines[0]
             .segments
             .iter()
@@ -716,58 +765,6 @@ mod tests {
             .iter()
             .map(|line| line.segments[0].text.chars().next().unwrap_or(' '))
             .collect();
-        // Trigger starts at sample=0.2, which maps near row 2 for height=5.
         assert_ne!(first_col[2], ' ');
-    }
-}
-
-fn sample_linear(samples: &[f64], t: f64) -> f64 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    if samples.len() == 1 {
-        return samples[0];
-    }
-    let pos = t.clamp(0.0, 1.0) * (samples.len() - 1) as f64;
-    let idx = pos.floor() as usize;
-    let next = (idx + 1).min(samples.len() - 1);
-    let frac = pos - idx as f64;
-    samples[idx] * (1.0 - frac) + samples[next] * frac
-}
-
-fn set_pixel(pixels: &mut [Vec<bool>], x: i32, y: i32) {
-    if x < 0 || y < 0 {
-        return;
-    }
-    let x = x as usize;
-    let y = y as usize;
-    if y < pixels.len() && x < pixels[y].len() {
-        pixels[y][x] = true;
-    }
-}
-
-fn plot_line(pixels: &mut [Vec<bool>], from: (i32, i32), to: (i32, i32)) {
-    let (mut x0, mut y0) = from;
-    let (x1, y1) = to;
-    let dx = (x1 - x0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 - y0).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-
-    loop {
-        set_pixel(pixels, x0, y0);
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-        let e2 = err * 2;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
-        }
     }
 }

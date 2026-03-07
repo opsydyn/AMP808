@@ -321,7 +321,7 @@ mod tests {
         // Check sorted order
         let names: Vec<&str> = themes.iter().map(|t| t.name.as_str()).collect();
         let mut sorted = names.clone();
-        sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        sorted.sort_by_key(|a| a.to_lowercase());
         assert_eq!(names, sorted);
     }
 

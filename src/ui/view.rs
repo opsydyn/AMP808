@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, FrameExt as _, Paragraph};
 
 use super::App;
 use super::keys::Focus;
@@ -116,6 +116,9 @@ impl App {
         if self.focus == Focus::Provider {
             self.render_provider_header(frame, chunks[10]);
             self.render_provider_list(frame, chunks[11]);
+        } else if self.focus == Focus::Browser {
+            self.render_browser_header(frame, chunks[10]);
+            self.render_browser(frame, chunks[11]);
         } else {
             self.render_playlist_header(frame, chunks[10]);
             self.render_playlist(frame, chunks[11]);
@@ -586,9 +589,38 @@ impl App {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    fn render_browser_header(&self, frame: &mut Frame, area: Rect) {
+        let text = self
+            .explorer
+            .as_ref()
+            .map(|explorer| explorer.header_text())
+            .unwrap_or_else(|| {
+                "── Browse Playlists ── Press [L] to open local playlist browser".to_string()
+            });
+        let line = Line::from(Span::styled(text, self.palette.dim_style()));
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    fn render_browser(&self, frame: &mut Frame, area: Rect) {
+        let Some(explorer) = self.explorer.as_ref() else {
+            let line = Line::from(Span::styled(
+                "  Press [L] to browse .m3u/.m3u8 playlists",
+                self.palette.dim_style(),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        };
+
+        frame.render_widget_ref(explorer.widget(), area);
+    }
+
     fn render_help(&self, frame: &mut Frame, area: Rect) {
-        let text = if self.focus == Focus::Provider {
-            "[↑↓]Navigate [Enter]Load Playlist [Tab]Focus [Q]Quit".to_string()
+        let text = if self.command_mode {
+            format!(": {}  [Enter]Run [Esc]Cancel", self.command_input)
+        } else if self.focus == Focus::Browser {
+            "[↑↓/jk]Select [←/Backspace/h]Parent [→/Enter/l]Open/Load [Esc]Player [Ctrl+H]Hidden [L]Close [Tab]Focus [Q]Quit".to_string()
+        } else if self.focus == Focus::Provider {
+            "[↑↓]Navigate [Enter]Load Playlist [L]Browse [:]Cmd [Tab]Focus [Q]Quit".to_string()
         } else if self.searching {
             let count = self.search_results.len();
             format!(
@@ -596,9 +628,9 @@ impl App {
                 self.search_query
             )
         } else if self.player.seekable() {
-            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [←→]Seek [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [L]Load [:]Cmd [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         } else {
-            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
+            "[Spc]⏯ [<>]Trk [S]Save [+-]Vol [m]Mono [e]EQ [t]Theme [v]Vis [c]Art [L]Load [:]Cmd [8]808 [a]Queue [/]Search [Tab]Focus [Q]Quit".to_string()
         };
 
         let line = Line::from(Span::styled(text, self.palette.help_style()));
@@ -606,7 +638,13 @@ impl App {
     }
 
     fn render_status_line(&self, frame: &mut Frame, area: Rect) {
-        if let Some(ref err) = self.err {
+        if self.command_mode {
+            let line = Line::from(Span::styled(
+                format!(":{}_", self.command_input),
+                self.palette.help_style(),
+            ));
+            frame.render_widget(Paragraph::new(line), area);
+        } else if let Some(ref err) = self.err {
             let line = Line::from(Span::styled(
                 format!("ERR: {err}"),
                 self.palette.error_style(),
@@ -631,6 +669,7 @@ impl App {
             ("t", "Choose theme"),
             ("v", "Cycle visualizer"),
             ("c", "Toggle album art"),
+            ("L", "Browse playlists"),
             ("↑ ↓", "Playlist scroll / EQ adjust"),
             ("h l", "EQ cursor left/right"),
             ("Enter", "Play selected track"),
@@ -639,6 +678,7 @@ impl App {
             ("r", "Cycle repeat"),
             ("z", "Toggle shuffle"),
             ("8", "Toggle 808 mode"),
+            (":", "Command mode"),
             ("/", "Search playlist"),
             ("Tab", "Toggle focus"),
             ("Ctrl+K", "This keymap"),

@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 # TUI
-ratatui = { version = "0.30", features = ["crossterm"] }
+ratatui = { version = "0.30", features = ["crossterm", "unstable-widget-ref"] }
 crossterm = "0.29"
+ratatui-explorer = "0.3"
 
 # Effects
 tachyonfx = "0.25"
