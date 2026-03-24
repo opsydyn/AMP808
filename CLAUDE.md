@@ -1,4 +1,4 @@
-# CLIAMP-RS
+# amp808
 
 Rust port of [cliamp](https://github.com/bjarneo/cliamp) — a Winamp 2.x-inspired terminal music player.
 
@@ -31,8 +31,8 @@ Run `/adr` to create or update records.
 
 - Error handling: `anyhow` for application errors, `thiserror` for library errors
 - Async: tokio for I/O tasks only; audio thread runs on cpal (not tokio)
-- Config: `~/.config/cliamp/config.toml` (serde + toml)
-- Temp files: `/tmp/cliamp-ytdl-*` cleaned on exit via RAII + signal handler
+- Config: `~/.config/amp808/config.toml` (serde + toml)
+- Temp files: `/tmp/amp808-ytdl-*` cleaned on exit via RAII + signal handler
 
 ### Go Reference Codebase
 

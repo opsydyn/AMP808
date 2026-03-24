@@ -57,6 +57,12 @@ render performance, and makes backend limitations explicit.
 9. Tagged BPM metadata lookup is not part of phase 1 unless it already exists in the current decode
    path at negligible cost.
    - the default source of truth in phase 1 is live estimation from samples
+10. Phase 2 BPM estimation uses a custom onset-envelope autocorrelation algorithm in
+    `src/ui/bpm.rs`.
+    - derive a short onset-strength envelope from existing sample windows
+    - maintain a rolling envelope history in the UI/analysis layer
+    - estimate tempo from bounded-lag autocorrelation
+    - only transition to `locked` after repeated near-agreement across updates
 
 ## Non-goals
 
@@ -129,6 +135,24 @@ render performance, and makes backend limitations explicit.
    - view rendering of `estimating`, `locked`, and `unavailable`
 6. Update docs after implementation.
 
+### Phase 2 algorithm plan
+
+1. Extend `src/ui/bpm.rs` from state-only to incremental estimation.
+   - derive onset strength from short fixed-size frames within each incoming sample window
+   - append onset values to a rolling buffer covering several seconds of history
+2. Compute tempo candidates using autocorrelation on the rolling onset buffer.
+   - search only a bounded tempo range suitable for popular music, e.g. `70..190 BPM`
+   - convert best lag to BPM using frame-hop duration
+3. Add stability gating before exposing a locked BPM.
+   - require repeated candidates within a narrow tolerance window before switching from
+     `Estimating` to `Locked`
+4. Keep the estimator dependency-free in phase 2.
+   - no `aubio`
+   - no `bpm-analyzer`
+   - no `beat-detector`
+   - no `timestretch`
+5. Revisit external crates only if the custom estimator proves too unstable or too expensive.
+
 ### Verification
 
 - [ ] Standard view shows BPM state during local playback.
@@ -150,6 +174,14 @@ render performance, and makes backend limitations explicit.
 - **Show synthetic BPM for unsupported backends**: rejected because it would be misleading.
 - **Rely only on metadata tags for BPM**: rejected for phase 1 because it would be incomplete and
   backend-dependent, and current architecture already has sample access for controlled playback.
+- **Use `aubio`**: rejected for phase 2 because it adds C/FFI build complexity that is not
+  justified until the custom estimator fails to meet quality needs.
+- **Use `bpm-analyzer`**: rejected for phase 2 because its API is oriented around its own real-time
+  audio capture pipeline rather than the existing `Tap -> App::on_tick()` sample flow in this app.
+- **Use `beat-detector`**: rejected for phase 2 because it is older, narrower, and a weaker fit
+  for the current incremental sample-window architecture.
+- **Use `timestretch` BPM helpers**: rejected for phase 2 because the crate is broader than needed
+  and more aligned with offline/preanalysis workflows than a lightweight live TUI readout.
 
 ## More Information
 
@@ -167,3 +199,13 @@ Revisit this decision if:
 - a future metadata path provides trusted BPM values at low complexity
 - the feature begins to require caching, persistence, or backend-specific heuristics beyond this
   scope
+
+Implementation note, March 17, 2026:
+
+- Phase 1 state wiring is complete:
+  - `src/ui/bpm.rs` defines `Estimating`, `Locked`, and `Unavailable`
+  - `src/ui/mod.rs` initializes BPM state by backend capability and resets it on track changes
+  - `src/ui/view.rs` and `src/ui/view_808.rs` now render BPM status
+- Phase 2 algorithm choice is now fixed:
+  - custom onset-envelope autocorrelation
+  - no external BPM dependency in the current product phase

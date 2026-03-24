@@ -1,4 +1,4 @@
-# CLIAMP-RS Roadmap
+# amp808 Roadmap
 
 ## Done
 
@@ -29,7 +29,7 @@
 - [x] yt-dlp Phase 1: flat-playlist enumerate (fast)
 - [x] yt-dlp Phase 2: lazy per-track download (on select)
 - [x] yt-dlp temp directory cleanup (RAII + ctrlc signal handler)
-- [x] Save downloaded tracks to `~/Music/cliamp/` (`S` key)
+- [x] Save downloaded tracks to `~/Music/amp808/` (`S` key)
 
 ### TUI
 
@@ -40,6 +40,7 @@
 - [x] Volume bar with dB readout
 - [x] 10-band EQ row with cursor and preset display
 - [x] FFT spectrum visualizer (Bars + Bricks modes)
+- [x] Incremental BPM display with explicit unavailable state for unsupported backends
 - [x] Playlist view with active track, cursor, queue badges
 - [x] Search mode (`/`) with live filtering
 - [x] Keymap overlay (`Ctrl+K`)
@@ -50,7 +51,7 @@
 
 - [x] 17 built-in color themes (catppuccin, gruvbox, nord, tokyo-night, etc.)
 - [x] Theme picker overlay (`t` key) with live preview
-- [x] Custom user themes from `~/.config/cliamp/themes/*.toml`
+- [x] Custom user themes from `~/.config/amp808/themes/*.toml`
 - [x] Theme name persisted in config
 
 ### Roland TR-808 Mode
@@ -60,11 +61,12 @@
 - [x] Canvas-based rotary knobs for volume + 10 EQ bands (Braille markers)
 - [x] LED-style spectrum with 808 color gradient
 - [x] TR-808 header branding
+- [x] TR-808 tempo readout (`TMP`) using shared BPM state
 - [x] Mode persisted in config
 
 ### Config & Persistence
 
-- [x] `~/.config/cliamp/config.toml` with serde
+- [x] `~/.config/amp808/config.toml` with serde
 - [x] All state saved on exit (volume, repeat, shuffle, mono, EQ, theme, 808 mode)
 - [x] Validation and clamping on load
 
@@ -95,6 +97,7 @@
 ## Todo
 
 ### Medium Priority — Major Features
+
 - [ ] **MPRIS2 D-Bus** (Linux) — Media key control, desktop widget integration, metadata push (`org.mpris.MediaPlayer2.Player`), volume sync, ICY title in metadata
 
 ### Low Priority — Distribution & Polish

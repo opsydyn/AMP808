@@ -64,6 +64,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "amp808"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cpal",
+ "crossterm",
+ "ctrlc",
+ "dirs",
+ "glob",
+ "image",
+ "md5",
+ "quick-xml",
+ "rand 0.9.2",
+ "ratatui",
+ "ratatui-explorer",
+ "ratatui-image",
+ "reqwest",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "tachyonfx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tui-big-text",
+ "url",
+]
+
+[[package]]
 name = "anpa"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -500,40 +534,6 @@ name = "clap_lex"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
-
-[[package]]
-name = "cliamp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "cpal",
- "crossterm",
- "ctrlc",
- "dirs",
- "glob",
- "image",
- "md5",
- "quick-xml",
- "rand 0.9.2",
- "ratatui",
- "ratatui-explorer",
- "ratatui-image",
- "reqwest",
- "rustfft",
- "serde",
- "serde_json",
- "symphonia",
- "tachyonfx",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tui-big-text",
- "url",
-]
 
 [[package]]
 name = "color_quant"

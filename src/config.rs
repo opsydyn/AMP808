@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::app_paths;
 use crate::playlist::RepeatMode;
 
-/// User preferences persisted to ~/.config/cliamp/config.toml.
+/// User preferences persisted to ~/.config/amp808/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Volume in dB, range [-30, +6].
@@ -66,25 +67,31 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Path to the config file: ~/.config/cliamp/config.toml
+    /// Path to the config file: ~/.config/amp808/config.toml
     fn path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".config").join("cliamp").join("config.toml"))
+        app_paths::config_file()
     }
 
-    /// Load config from disk. Returns defaults if file doesn't exist.
+    /// Load config from disk. Returns defaults if neither the new nor legacy file exists.
     pub fn load() -> anyhow::Result<Self> {
-        let Some(path) = Self::path() else {
+        let paths = app_paths::config_search_paths();
+        if paths.is_empty() {
             return Ok(Self::default());
-        };
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                let mut cfg: Config = toml::from_str(&content)?;
-                cfg.clamp();
-                Ok(cfg)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
         }
+
+        for path in paths {
+            match fs::read_to_string(&path) {
+                Ok(content) => {
+                    let mut cfg: Config = toml::from_str(&content)?;
+                    cfg.clamp();
+                    return Ok(cfg);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(Self::default())
     }
 
     /// Save config to disk, creating directories as needed.

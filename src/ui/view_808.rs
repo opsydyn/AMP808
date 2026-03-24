@@ -443,6 +443,12 @@ impl App {
             Style::default().fg(C808_GREY),
         ));
 
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            self.bpm.machine_text(),
+            Style::default().fg(C808_GREY),
+        ));
+
         // Queue count
         let q_len = self.playlist.queue_len();
         if q_len > 0 {

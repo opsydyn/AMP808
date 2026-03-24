@@ -1,3 +1,4 @@
+pub mod bpm;
 pub mod command;
 pub mod eq_presets;
 pub mod explorer;
@@ -21,6 +22,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+use self::bpm::BpmState;
 use self::command::{UiCommand, parse_command};
 use self::eq_presets::EQ_PRESETS;
 use self::explorer::PlaylistExplorer;
@@ -28,6 +30,7 @@ use self::keys::Focus;
 use self::styles::Palette;
 use self::theme::Theme;
 use self::visualizer::Visualizer;
+use crate::app_paths;
 use crate::external::apple_music_api::{AppleMusicClient, LibraryTrack};
 use crate::playback_backend::PlaybackBackend;
 use crate::playlist::{self, Playlist, PlaylistInfo, Provider, Track};
@@ -83,6 +86,7 @@ pub struct App {
     pub save_msg: String,
     pub save_msg_ttl: usize,
     pub show_keymap: bool,
+    pub bpm: BpmState,
     pub explorer: Option<PlaylistExplorer>,
     pub command_mode: bool,
     pub command_input: String,
@@ -129,6 +133,7 @@ impl App {
         provider: Option<Box<dyn Provider>>,
     ) -> Self {
         let sr = player.sample_rate() as f64;
+        let is_music_app = player.is_music_app();
         let themes = theme::load_all();
         let has_provider = provider.is_some();
         let provider: Option<std::sync::Arc<dyn Provider>> = provider.map(std::sync::Arc::from);
@@ -154,6 +159,7 @@ impl App {
             save_msg: String::new(),
             save_msg_ttl: 0,
             show_keymap: false,
+            bpm: BpmState::for_music_app(is_music_app),
             explorer: None,
             command_mode: false,
             command_input: String::new(),
@@ -274,7 +280,21 @@ impl App {
             }
         }
 
+        if !self.player.is_music_app() {
+            let samples = self.player.samples();
+            self.bpm.update(
+                &samples,
+                self.player.sample_rate(),
+                self.player.is_playing(),
+                self.player.is_paused(),
+            );
+        }
+
         self.title_off += 1;
+    }
+
+    fn reset_bpm_state(&mut self) {
+        self.bpm.reset_for_backend(self.player.is_music_app());
     }
 
     /// Handle an async message from a spawned task.
@@ -431,6 +451,7 @@ impl App {
             return;
         }
 
+        self.reset_bpm_state();
         self.stream_title.clear();
         self.cover_art_proto = None;
         self.cover_art_loaded = false;
@@ -826,7 +847,8 @@ impl App {
             }
         };
 
-        let save_dir = home.join("Music").join("cliamp");
+        let save_dir = app_paths::preferred_music_save_dir()
+            .unwrap_or_else(|| home.join("Music").join(app_paths::APP_NAME));
         if let Err(e) = std::fs::create_dir_all(&save_dir) {
             self.save_msg = format!("Save failed: {e}");
             self.save_msg_ttl = 40;
@@ -860,7 +882,11 @@ impl App {
 
         match std::fs::copy(&track.path, &dest) {
             Ok(_) => {
-                self.save_msg = format!("Saved to ~/Music/cliamp/{filename}");
+                self.save_msg = format!(
+                    "Saved to {}/{}",
+                    app_paths::display_path(&save_dir),
+                    filename
+                );
                 self.save_msg_ttl = 60;
             }
             Err(e) => {
@@ -933,6 +959,7 @@ pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> a
 
 #[cfg(test)]
 mod tests {
+    use super::bpm::{BpmDisplayState, BpmState};
     use super::eq_presets::*;
     use super::{App, AppMsg, AppleMusicTrackContext};
     use crate::external::apple_music_api::LibraryTrack;
@@ -1017,5 +1044,22 @@ mod tests {
         assert!(app.apple_music_tracks.is_empty());
         assert_eq!(app.provider_lists.len(), 1);
         assert_eq!(app.prov_cursor, 0);
+    }
+
+    #[test]
+    fn bpm_is_unavailable_for_music_app_backend() {
+        let app = build_music_app_test_app();
+        assert_eq!(app.bpm.display, BpmDisplayState::Unavailable);
+    }
+
+    #[test]
+    fn bpm_reset_helper_respects_backend_capability() {
+        let mut app = build_music_app_test_app();
+        app.bpm = BpmState::locked(128);
+        app.reset_bpm_state();
+        assert_eq!(app.bpm.display, BpmDisplayState::Unavailable);
+
+        app.bpm.reset_for_backend(false);
+        assert_eq!(app.bpm.display, BpmDisplayState::Estimating);
     }
 }

@@ -4,7 +4,21 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::app_paths;
 use crate::playlist::Track;
+
+struct YtdlTempTrackerInner {
+    dirs: Mutex<Vec<PathBuf>>,
+}
+
+impl Drop for YtdlTempTrackerInner {
+    fn drop(&mut self) {
+        let dirs = std::mem::take(self.dirs.get_mut().unwrap());
+        for dir in dirs {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
 
 /// JSON fields from `yt-dlp --flat-playlist -j` output (one per line).
 #[derive(Deserialize, Debug)]
@@ -72,9 +86,19 @@ pub enum YtdlError {
 }
 
 /// Tracks temp directories created by yt-dlp downloads for cleanup.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct YtdlTempTracker {
-    dirs: Arc<Mutex<Vec<PathBuf>>>,
+    inner: Arc<YtdlTempTrackerInner>,
+}
+
+impl Default for YtdlTempTracker {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(YtdlTempTrackerInner {
+                dirs: Mutex::new(Vec::new()),
+            }),
+        }
+    }
 }
 
 impl YtdlTempTracker {
@@ -84,24 +108,18 @@ impl YtdlTempTracker {
 
     /// Register a temp directory for cleanup tracking.
     fn register(&self, dir: PathBuf) {
-        self.dirs.lock().unwrap().push(dir);
+        self.inner.dirs.lock().unwrap().push(dir);
     }
 
     /// Remove all tracked temp directories.
     pub fn cleanup(&self) {
         let dirs = {
-            let mut guard = self.dirs.lock().unwrap();
+            let mut guard = self.inner.dirs.lock().unwrap();
             std::mem::take(&mut *guard)
         };
         for dir in dirs {
             let _ = std::fs::remove_dir_all(&dir);
         }
-    }
-}
-
-impl Drop for YtdlTempTracker {
-    fn drop(&mut self) {
-        self.cleanup();
     }
 }
 
@@ -195,7 +213,8 @@ pub async fn resolve_ytdl_track(
 ) -> Result<Track, YtdlError> {
     // Create temp directory
     let tmp_dir = std::env::temp_dir().join(format!(
-        "cliamp-ytdl-{}",
+        "{}-{}",
+        app_paths::YTDL_TEMP_PREFIX,
         std::process::id() as u64
             ^ (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -312,13 +331,13 @@ mod tests {
 
     #[test]
     fn test_parse_full_entry() {
-        let json = r#"{"title":"Song Title","uploader":"Channel","_filename":"/tmp/cliamp-ytdl-123/abc.webm"}"#;
+        let json = r#"{"title":"Song Title","uploader":"Channel","_filename":"/tmp/amp808-ytdl-123/abc.webm"}"#;
         let entry: YtdlFullEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.title.as_deref(), Some("Song Title"));
         assert_eq!(entry.uploader.as_deref(), Some("Channel"));
         assert_eq!(
             entry.filename.as_deref(),
-            Some("/tmp/cliamp-ytdl-123/abc.webm")
+            Some("/tmp/amp808-ytdl-123/abc.webm")
         );
     }
 
@@ -332,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_extract_download_output_prefers_after_move_filepath() {
-        let tmp = std::env::temp_dir().join("cliamp-test-ytdlp-after-move.opus");
+        let tmp = std::env::temp_dir().join("amp808-test-ytdlp-after-move.opus");
         std::fs::write(&tmp, b"fake audio").unwrap();
 
         let stdout = format!(
@@ -349,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_extract_download_output_falls_back_to_json_filename() {
-        let tmp = std::env::temp_dir().join("cliamp-test-ytdlp-json-filename.opus");
+        let tmp = std::env::temp_dir().join("amp808-test-ytdlp-json-filename.opus");
         std::fs::write(&tmp, b"fake audio").unwrap();
 
         let stdout = format!(
@@ -369,7 +388,7 @@ mod tests {
         let tracker = YtdlTempTracker::new();
 
         // Create an actual temp dir
-        let tmp = std::env::temp_dir().join("cliamp-test-ytdl-tracker");
+        let tmp = std::env::temp_dir().join("amp808-test-ytdl-tracker");
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("test.txt"), "data").unwrap();
 
@@ -388,8 +407,43 @@ mod tests {
     }
 
     #[test]
+    fn test_temp_tracker_clone_drop_does_not_cleanup() {
+        let tracker = YtdlTempTracker::new();
+
+        let tmp = std::env::temp_dir().join("amp808-test-ytdl-clone-drop");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("test.txt"), "data").unwrap();
+
+        tracker.register(tmp.clone());
+        {
+            let clone = tracker.clone();
+            drop(clone);
+        }
+
+        assert!(tmp.exists());
+
+        tracker.cleanup();
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn test_temp_tracker_last_drop_cleans_up() {
+        let tmp = std::env::temp_dir().join("amp808-test-ytdl-last-drop");
+
+        {
+            let tracker = YtdlTempTracker::new();
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(tmp.join("test.txt"), "data").unwrap();
+            tracker.register(tmp.clone());
+            assert!(tmp.exists());
+        }
+
+        assert!(!tmp.exists());
+    }
+
+    #[test]
     fn test_find_first_file() {
-        let tmp = std::env::temp_dir().join("cliamp-test-find-first");
+        let tmp = std::env::temp_dir().join("amp808-test-find-first");
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("audio.webm"), "fake audio").unwrap();
 
@@ -402,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_find_first_file_empty_dir() {
-        let tmp = std::env::temp_dir().join("cliamp-test-find-empty");
+        let tmp = std::env::temp_dir().join("amp808-test-find-empty");
         std::fs::create_dir_all(&tmp).unwrap();
 
         let found = find_first_file(&tmp);

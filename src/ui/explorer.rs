@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn filters_to_directories_and_playlist_files() {
-        let tmp = std::env::temp_dir().join("cliamp-test-explorer-filter");
+        let tmp = std::env::temp_dir().join("amp808-test-explorer-filter");
         let playlists = tmp.join("playlists");
         std::fs::create_dir_all(&playlists).unwrap();
         std::fs::write(tmp.join("set.m3u"), "").unwrap();
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn explorer_lists_only_directories_and_playlists() {
-        let tmp = std::env::temp_dir().join("cliamp-test-explorer-list");
+        let tmp = std::env::temp_dir().join("amp808-test-explorer-list");
         let playlists = tmp.join("playlists");
         std::fs::create_dir_all(&playlists).unwrap();
         std::fs::write(tmp.join("set.m3u"), "").unwrap();
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn escape_cancels_browser() {
-        let tmp = std::env::temp_dir().join("cliamp-test-explorer-cancel");
+        let tmp = std::env::temp_dir().join("amp808-test-explorer-cancel");
         std::fs::create_dir_all(&tmp).unwrap();
 
         let mut explorer = PlaylistExplorer::from_paths(Some(&tmp), None).unwrap();
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn enter_on_playlist_file_selects_it() {
-        let tmp = std::env::temp_dir().join("cliamp-test-explorer-select");
+        let tmp = std::env::temp_dir().join("amp808-test-explorer-select");
         std::fs::create_dir_all(&tmp).unwrap();
         let playlist = tmp.join("set.m3u");
         std::fs::write(&playlist, "").unwrap();

@@ -1,11 +1,13 @@
-# CLIAMP-RS
+# amp808
+
+![amp808 logo](AMP808-TUI-logo.png)
 
 A Winamp 2.x-inspired terminal music player, written in Rust with Ratatui. Port of [cliamp](https://github.com/bjarneo/cliamp) (Go/Bubbletea).
 
 <https://en.wikipedia.org/wiki/Winamp>
 
-```
-C L I A M P
+```text
+A M P 8 0 8
 ♫ Artist - Song Title
 01:23 / 04:56                    ▶ Playing
 
@@ -33,14 +35,15 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 - Gapless playback with preloaded next track
 - 10-band parametric EQ with 10 built-in presets
 - FFT/time-domain visualizer (bars, bricks, oscilloscope modes)
+- Incremental BPM readout for sampled playback
 - Album art display from embedded cover art (sixel/kitty/iTerm2/halfblocks, auto-detected)
 - 17 built-in themes + custom user themes
 - Roland TR-808 alternate UI mode with animated tachyonfx chrome
 - Playlist: shuffle (Fisher-Yates), repeat (off/all/one), queue
 - Volume control (dB) with mono downmix
 - Search within playlist
-- Save downloaded yt-dlp tracks to `~/Music/cliamp/`
-- Config persistence (`~/.config/cliamp/config.toml`)
+- Save downloaded yt-dlp tracks to `~/Music/amp808/`
+- Config persistence (`~/.config/amp808/config.toml`)
 
 ## Requirements
 
@@ -60,24 +63,39 @@ pip install yt-dlp
 
 ## Build & Run
 
+`amp808` accepts local files, folders, direct stream URLs, podcast feeds, remote playlists,
+and yt-dlp-supported pages. When running through Cargo, put app arguments after `--` so Cargo
+doesn't try to parse them itself.
+
+### Quick start
+
 ```bash
 # Build
 cargo build
 
-# Build (release, optimized)
-cargo build --release
+# Show CLI usage (no media arguments)
+cargo run
 
-# Run with local files
-cargo run -- track.mp3 song.flac ~/Music/
+# Run with local files / folders
+cargo run -- track.mp3 song.flac ~/Music
+
+# Run an HTTP stream / internet radio
+cargo run -- "https://example.com/stream.mp3"
+
+# Run a podcast feed
+cargo run -- "https://example.com/podcast/feed.xml"
 
 # Run with a YouTube playlist
 cargo run -- "https://www.youtube.com/playlist?list=..."
+```
 
-# Run with a podcast feed
-cargo run -- "https://example.com/podcast/feed.xml"
+### More examples
 
-# Run with an HTTP stream / internet radio
-cargo run -- "https://example.com/stream.mp3"
+```bash
+# Build (release, optimized)
+cargo build --release
+
+# Another HTTP stream / internet radio example
 cargo run -- "http://ice1.somafm.com/groovesalad-256-mp3"
 
 # Run with Navidrome (browse server playlists)
@@ -87,28 +105,39 @@ NAVIDROME_URL=https://music.example.com NAVIDROME_USER=alice NAVIDROME_PASS=secr
 cargo run -- --backend music-app
 
 # Release binary examples
-./target/release/cliamp "Alive.mp3"
-./target/release/cliamp --backend music-app
+./target/release/amp808 "Alive.mp3"
+./target/release/amp808 --backend music-app
 ```
+
+### Special cases
+
+Running `cargo run` with no media arguments prints the startup usage summary and exits.
+
+- Use `cargo run -- <file|folder|url>...` when passing tracks, folders, or URLs to `amp808`.
+- Use `cargo run -- --backend music-app` when the app argument itself starts with `-`.
+- The Navidrome example does **not** need `--` because it passes environment variables only, not
+  positional app arguments.
+- If you want Navidrome **and** local inputs together, add `--` before the local paths, for
+  example: `NAVIDROME_URL=... NAVIDROME_USER=... NAVIDROME_PASS=... cargo run -- ~/Music`.
 
 ### Navidrome / Subsonic
 
 Set these environment variables to connect to a [Navidrome](https://www.navidrome.org/) (or any Subsonic-compatible) server:
 
 | Variable | Description |
-|----------|-------------|
+| -------- | ----------- |
 | `NAVIDROME_URL` | Server base URL (e.g. `https://music.example.com`) |
 | `NAVIDROME_USER` | Username |
 | `NAVIDROME_PASS` | Password |
 
-When all three are set, cliamp starts in provider mode showing your server's playlists. Use `↑↓` to navigate, `Enter` to load a playlist, and `Esc` to return to the playlist browser. You can also pass local files alongside Navidrome — they'll be in the playlist while the provider browser is available via `Tab`.
+When all three are set, amp808 starts in provider mode showing your server's playlists. Use `↑↓` to navigate, `Enter` to load a playlist, and `Esc` to return to the playlist browser. You can also pass local files alongside Navidrome — they'll be in the playlist while the provider browser is available via `Tab`.
 
 ### Music.app Backend
 
-On macOS, cliamp can control the system `Music.app` instead of its local audio engine:
+On macOS, amp808 can control the system `Music.app` instead of its local audio engine:
 
 ```bash
-./target/release/cliamp --backend music-app
+./target/release/amp808 --backend music-app
 ```
 
 Phase 1 scope:
@@ -116,6 +145,7 @@ Phase 1 scope:
 - Reads current `Music.app` title, artist, play state, position, duration, and volume
 - Controls `play/pause`, `next`, `previous`, `stop`, and volume
 - Exposes synthetic visualizers in both standard and 808 views
+- Shows BPM as unavailable (`[BPM --]` / `TMP:--`) because `Music.app` mode has no true sample-derived tempo path
 - Does not accept local file or URL arguments in this mode
 - Does not expose local playlist loading, EQ, or album art controls in this mode
 
@@ -128,7 +158,7 @@ The first run may prompt for macOS Automation permission to control `Music.app`.
 3. Run:
 
 ```bash
-./target/release/cliamp --backend music-app
+./target/release/amp808 --backend music-app
 ```
 
 1. Verify in the TUI:
@@ -143,7 +173,7 @@ The first run may prompt for macOS Automation permission to control `Music.app`.
 Invalid usage:
 
 ```bash
-./target/release/cliamp --backend music-app "Alive.mp3"
+./target/release/amp808 --backend music-app "Alive.mp3"
 ```
 
 That fails by design because `music-app` mode is a remote-control backend, not a local file player.
@@ -166,10 +196,10 @@ cargo run -- <args>
 
 ### Project Structure
 
-```
+```text
 src/
 ├── main.rs               # CLI entry point, tokio runtime, signal handling
-├── config.rs             # ~/.config/cliamp/config.toml (serde + toml)
+├── config.rs             # ~/.config/amp808/config.toml (serde + toml)
 ├── external/
 │   ├── mod.rs            # External service providers
 │   ├── music_app.rs      # macOS Music.app AppleScript controller
@@ -200,6 +230,7 @@ src/
     ├── keys.rs           # Key event handlers (Playlist/EQ/Provider focus)
     ├── styles.rs         # Color/style constants (ANSI palette)
     ├── theme.rs          # Theme loading (17 built-in + custom TOML)
+    ├── bpm.rs            # Incremental BPM estimation + display state
     ├── visualizer.rs     # FFT spectrum analyzer (rustfft)
     └── eq_presets.rs     # 10 built-in EQ presets
 ```
@@ -219,7 +250,7 @@ Key architectural decisions are documented in [adr/](adr/):
 ## Keyboard Shortcuts
 
 | Key | Action |
-|-----|--------|
+| --- | ------ |
 | `Space` | Play / Pause |
 | `s` | Stop |
 | `> .` | Next track |

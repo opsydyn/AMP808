@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_collect_audio_files_single_file() {
-        let tmp = std::env::temp_dir().join("cliamp-test-collect-single");
+        let tmp = std::env::temp_dir().join("amp808-test-collect-single");
         std::fs::create_dir_all(&tmp).unwrap();
         let mp3 = tmp.join("test.mp3");
         std::fs::write(&mp3, "fake").unwrap();
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_collect_audio_files_directory() {
-        let tmp = std::env::temp_dir().join("cliamp-test-collect-dir");
+        let tmp = std::env::temp_dir().join("amp808-test-collect-dir");
         let sub = tmp.join("subdir");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(tmp.join("b.mp3"), "fake").unwrap();
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_args_local_files() {
-        let tmp = std::env::temp_dir().join("cliamp-test-args");
+        let tmp = std::env::temp_dir().join("amp808-test-args");
         std::fs::create_dir_all(&tmp).unwrap();
         let mp3 = tmp.join("song.mp3");
         std::fs::write(&mp3, "fake").unwrap();
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_load_local_playlist_file_resolves_relative_entries() {
-        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u");
+        let tmp = std::env::temp_dir().join("amp808-test-local-m3u");
         let music = tmp.join("music");
         std::fs::create_dir_all(&music).unwrap();
         let song = music.join("Track One.mp3");
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_load_local_playlist_file_ignores_comments_and_blank_lines() {
-        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u-comments");
+        let tmp = std::env::temp_dir().join("amp808-test-local-m3u-comments");
         std::fs::create_dir_all(&tmp).unwrap();
         let song = tmp.join("Track Two.mp3");
         std::fs::write(&song, "fake").unwrap();
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_load_local_playlist_file_rejects_non_m3u_extension() {
-        let tmp = std::env::temp_dir().join("cliamp-test-local-m3u-bad-ext");
+        let tmp = std::env::temp_dir().join("amp808-test-local-m3u-bad-ext");
         std::fs::create_dir_all(&tmp).unwrap();
         let playlist = tmp.join("playlist.txt");
         std::fs::write(&playlist, "song.mp3\n").unwrap();

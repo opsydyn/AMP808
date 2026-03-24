@@ -3,6 +3,8 @@ use std::fs;
 use ratatui::style::Color;
 use serde::Deserialize;
 
+use crate::app_paths;
+
 /// A named color theme with hex color values.
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -231,7 +233,7 @@ red = "#a4a4a4""##,
 ];
 
 /// Load all available themes: built-in + user custom themes from
-/// `~/.config/cliamp/themes/*.toml`. Sorted by name.
+/// `~/.config/amp808/themes/*.toml`, with legacy `amp808-tui` and `cliamp` themes still supported.
 pub fn load_all() -> Vec<Theme> {
     let mut themes = Vec::with_capacity(BUILTIN_THEMES.len() + 4);
 
@@ -244,9 +246,8 @@ pub fn load_all() -> Vec<Theme> {
         }
     }
 
-    // Load user custom themes from ~/.config/cliamp/themes/
-    if let Some(home) = dirs::home_dir() {
-        let user_dir = home.join(".config").join("cliamp").join("themes");
+    // Load legacy themes first, then new themes so renamed paths win on conflicts.
+    for user_dir in app_paths::theme_search_dirs() {
         if let Ok(entries) = fs::read_dir(&user_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

@@ -132,7 +132,7 @@ impl App {
     }
 
     fn render_title(&self, frame: &mut Frame, area: Rect) {
-        let line = Line::from(Span::styled("🦀 T U I A M P", self.palette.title_style()));
+        let line = Line::from(Span::styled("A M P 8 0 8", self.palette.title_style()));
         frame.render_widget(Paragraph::new(line).alignment(Alignment::Left), area);
     }
 
@@ -206,7 +206,10 @@ impl App {
 
     fn render_status_only(&self, frame: &mut Frame, area: Rect) {
         let (status_text, status_style) = self.playback_status();
-        let status_span = Span::styled(status_text, status_style);
+        let status_span = Span::styled(
+            format!("{status_text} {}", self.bpm.standard_text()),
+            status_style,
+        );
         frame.render_widget(
             Paragraph::new(Line::from(status_span)).alignment(Alignment::Center),
             area,
@@ -216,7 +219,10 @@ impl App {
     fn render_time_status(&self, frame: &mut Frame, area: Rect) {
         let time_span = Span::styled(self.time_string(), self.palette.time_style());
         let (status_text, status_style) = self.playback_status();
-        let status_span = Span::styled(status_text, status_style);
+        let status_span = Span::styled(
+            format!("{status_text} {}", self.bpm.standard_text()),
+            status_style,
+        );
         let gap = area
             .width
             .saturating_sub(time_span.width() as u16 + status_span.width() as u16);

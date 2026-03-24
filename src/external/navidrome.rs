@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use crate::app_paths;
 use crate::playlist::{PlaylistInfo, Provider, Track};
 
 /// Navidrome/Subsonic API client.
@@ -46,7 +47,7 @@ impl NavidromeClient {
             ("t", &token),
             ("s", &salt),
             ("v", "1.0.0"),
-            ("c", "cliamp"),
+            ("c", app_paths::NAVIDROME_CLIENT_NAME),
             ("f", "json"),
         ];
         params.extend_from_slice(extra_params);
@@ -145,7 +146,7 @@ mod tests {
         assert!(url.starts_with("https://music.example.com/rest/getPlaylists?"));
         assert!(url.contains("u=testuser"));
         assert!(url.contains("v=1.0.0"));
-        assert!(url.contains("c=cliamp"));
+        assert!(url.contains("c=amp808"));
         assert!(url.contains("f=json"));
         assert!(url.contains("t=")); // token
         assert!(url.contains("s=")); // salt
