@@ -312,16 +312,20 @@ impl App {
             "No track loaded".to_string()
         };
 
-        let status_icon = if self.buffering {
-            "◌"
-        } else if self.player.is_playing() && self.player.is_paused() {
-            "⏸"
-        } else if self.player.is_playing() && self.player.is_streaming() {
-            "●"
-        } else if self.player.is_playing() {
-            "▶"
-        } else {
-            "■"
+        let status_label = playback_state_label(
+            self.buffering,
+            self.err.is_some(),
+            self.player.is_playing(),
+            self.player.is_paused(),
+        );
+
+        let status_prefix = match status_label {
+            "BUFFERING" => "◌ BUFFERING",
+            "ERROR" => "! ERROR",
+            "PAUSED" => "⏸ PAUSED",
+            "PLAYING" if self.player.is_streaming() => "● PLAYING",
+            "PLAYING" => "▶ PLAYING",
+            _ => "■ STOPPED",
         };
 
         let time_str = if is_stream && dur_secs == 0 {
@@ -341,7 +345,7 @@ impl App {
         };
 
         let name_span = Span::styled(
-            format!(" {status_icon} {display_name}"),
+            format!(" {status_prefix} {display_name}"),
             Style::default()
                 .fg(C808_ORANGE)
                 .add_modifier(Modifier::BOLD),
@@ -1071,6 +1075,25 @@ fn tachyon_should_animate(is_playing: bool, is_paused: bool) -> bool {
     is_playing && !is_paused
 }
 
+fn playback_state_label(
+    buffering: bool,
+    has_error: bool,
+    is_playing: bool,
+    is_paused: bool,
+) -> &'static str {
+    if buffering {
+        "BUFFERING"
+    } else if has_error {
+        "ERROR"
+    } else if is_playing && is_paused {
+        "PAUSED"
+    } else if is_playing {
+        "PLAYING"
+    } else {
+        "STOPPED"
+    }
+}
+
 fn controls_808(
     focus: Focus,
     supports_seek: bool,
@@ -1173,6 +1196,15 @@ mod tests {
                 .iter()
                 .any(|(key, action)| *key == "v" && *action == "VIS")
         );
+    }
+
+    #[test]
+    fn playback_state_label_prioritizes_buffering_and_error() {
+        assert_eq!(playback_state_label(true, false, true, false), "BUFFERING");
+        assert_eq!(playback_state_label(false, true, false, false), "ERROR");
+        assert_eq!(playback_state_label(false, false, true, true), "PAUSED");
+        assert_eq!(playback_state_label(false, false, true, false), "PLAYING");
+        assert_eq!(playback_state_label(false, false, false, false), "STOPPED");
     }
 
     #[test]

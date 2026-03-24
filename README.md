@@ -131,7 +131,7 @@ The first run may prompt for macOS Automation permission to control `Music.app`.
 ./target/release/cliamp --backend music-app
 ```
 
-4. Verify in the TUI:
+1. Verify in the TUI:
    - current title/artist appears in the player
    - `Space` toggles play/pause
    - `>` and `<` move to next/previous track

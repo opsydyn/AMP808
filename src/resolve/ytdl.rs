@@ -26,6 +26,36 @@ struct YtdlFullEntry {
     filename: Option<String>,
 }
 
+fn parse_download_output(stdout: &str) -> (Option<YtdlFullEntry>, Option<PathBuf>) {
+    let mut entry = None;
+    let mut printed_path = None;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Ok(parsed) = serde_json::from_str::<YtdlFullEntry>(line) {
+            entry = Some(parsed);
+            continue;
+        }
+
+        let candidate = PathBuf::from(line);
+        if candidate.exists() {
+            printed_path = Some(candidate);
+        }
+    }
+
+    let json_path = entry
+        .as_ref()
+        .and_then(|e| e.filename.as_deref())
+        .map(PathBuf::from)
+        .filter(|p| p.exists());
+
+    (entry, printed_path.or(json_path))
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum YtdlError {
     #[error("yt-dlp not found in PATH — see https://github.com/yt-dlp/yt-dlp#installation")]
@@ -183,6 +213,8 @@ pub async fn resolve_ytdl_track(
             "bestaudio[protocol=https]/bestaudio[protocol=http]/bestaudio",
             "--no-playlist",
             "--print-json",
+            "--print",
+            "after_move:filepath",
             "-o",
             &out_template.to_string_lossy(),
             page_url,
@@ -202,16 +234,9 @@ pub async fn resolve_ytdl_track(
         )));
     }
 
-    // Parse JSON output for metadata + filename
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let entry: Option<YtdlFullEntry> = serde_json::from_str(&stdout).ok();
-
-    let file_path = entry
-        .as_ref()
-        .and_then(|e| e.filename.as_deref())
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| find_first_file(&tmp_dir));
+    let (entry, file_path) = parse_download_output(&stdout);
+    let file_path = file_path.or_else(|| find_first_file(&tmp_dir));
 
     let Some(file_path) = file_path else {
         return Err(YtdlError::NoFileDownloaded(page_url.to_string()));
@@ -303,6 +328,40 @@ mod tests {
         let entry: YtdlFullEntry = serde_json::from_str(json).unwrap();
         assert!(entry.title.is_none());
         assert!(entry.filename.is_none());
+    }
+
+    #[test]
+    fn test_extract_download_output_prefers_after_move_filepath() {
+        let tmp = std::env::temp_dir().join("cliamp-test-ytdlp-after-move.opus");
+        std::fs::write(&tmp, b"fake audio").unwrap();
+
+        let stdout = format!(
+            "{{\"title\":\"Twin Peaks Theme\",\"uploader\":\"DJ Dado\",\"_filename\":\"/tmp/placeholder.opus\"}}\n{}\n",
+            tmp.display()
+        );
+
+        let (entry, file_path) = parse_download_output(&stdout);
+        assert_eq!(entry.and_then(|e| e.title), Some("Twin Peaks Theme".into()));
+        assert_eq!(file_path.as_deref(), Some(tmp.as_path()));
+
+        std::fs::remove_file(tmp).unwrap();
+    }
+
+    #[test]
+    fn test_extract_download_output_falls_back_to_json_filename() {
+        let tmp = std::env::temp_dir().join("cliamp-test-ytdlp-json-filename.opus");
+        std::fs::write(&tmp, b"fake audio").unwrap();
+
+        let stdout = format!(
+            "{{\"title\":\"Twin Peaks Theme\",\"uploader\":\"DJ Dado\",\"_filename\":\"{}\"}}\n",
+            tmp.display()
+        );
+
+        let (entry, file_path) = parse_download_output(&stdout);
+        assert_eq!(entry.and_then(|e| e.uploader), Some("DJ Dado".into()));
+        assert_eq!(file_path.as_deref(), Some(tmp.as_path()));
+
+        std::fs::remove_file(tmp).unwrap();
     }
 
     #[test]

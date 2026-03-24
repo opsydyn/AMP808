@@ -33,3 +33,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0012: Add a macOS Music.app playback backend](0012-add-macos-music-app-playback-backend.md) (accepted, 2026-03-07)
 - [ADR-0013: Use the Apple Music API as a metadata-only integration](0013-use-apple-music-api-as-a-metadata-only-integration.md) (superseded, 2026-03-07)
 - [ADR-0014: Pause Apple Music API rollout and use synthetic visualizers for Music.app parity](0014-pause-apple-music-api-rollout-and-use-synthetic-visualizers.md) (accepted, 2026-03-07)
+- [ADR-0015: Add BPM analysis and display](0015-add-bpm-analysis-and-display.md) (proposed, 2026-03-16)
