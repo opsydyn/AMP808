@@ -23,6 +23,32 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
   3. Third Track
 ```
 
+## Demo
+
+### Classic TR-808
+
+![Classic TR-808 view with bars visualizer](demo-images/demo1.png)
+
+Classic 808 layout with the standard bar visualizer and default hardware-inspired palette.
+
+### TR-808 Retro Visualizer
+
+![TR-808 view with retro synthwave visualizer](demo-images/demo2.png)
+
+Retro synthwave mode in the 808 layout, with the sun/grid scene centered in the player.
+
+### Themed 808 Variant
+
+![Themed TR-808 variant with lavender accents](demo-images/demo3.png)
+
+The classic 808 renderer using one of the main theme selections instead of the default yellow/orange scheme.
+
+### TR-808 Solid Bars
+
+![TR-808 view with solid bars visualizer](demo-images/demo4..png)
+
+Solid bar mode in the 808 layout for a denser, more meter-like playback display.
+
 ## Features
 
 - Local file playback: MP3, FLAC, WAV, OGG (native via Symphonia)
