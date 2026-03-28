@@ -898,7 +898,7 @@ impl App {
             self.focus,
             self.searching,
             self.player.is_music_app(),
-            &self.provider_name(),
+            self.provider_name(),
             self.apple_music_showing_tracks(),
         );
         let max_label_chars = area.width.saturating_sub(6) as usize;
