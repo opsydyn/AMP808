@@ -39,7 +39,7 @@ pub struct Config {
     pub eq: Vec<f64>,
 
     /// Whether 808 mode (Roland TR-808 layout) is active.
-    #[serde(default)]
+    #[serde(default = "default_mode_808")]
     pub mode_808: bool,
 }
 
@@ -49,6 +49,10 @@ fn default_repeat() -> String {
 
 fn default_eq() -> Vec<f64> {
     vec![0.0; 10]
+}
+
+fn default_mode_808() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -61,7 +65,7 @@ impl Default for Config {
             theme: String::new(),
             eq_preset: String::new(),
             eq: vec![0.0; 10],
-            mode_808: false,
+            mode_808: true,
         }
     }
 }
@@ -153,6 +157,7 @@ mod tests {
         assert!(!cfg.mono);
         assert_eq!(cfg.eq.len(), 10);
         assert!(cfg.eq.iter().all(|&v| v == 0.0));
+        assert!(cfg.mode_808);
     }
 
     #[test]
@@ -183,6 +188,13 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
         assert_eq!(cfg.volume, 0.0);
         assert_eq!(cfg.repeat, "off");
         assert!(!cfg.shuffle);
+        assert!(cfg.mode_808);
+    }
+
+    #[test]
+    fn test_explicit_mode_808_false_is_respected() {
+        let cfg = Config::from_str("mode_808 = false").unwrap();
+        assert!(!cfg.mode_808);
     }
 
     #[test]
@@ -236,7 +248,7 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
             theme: "dracula".to_string(),
             eq_preset: "Jazz".to_string(),
             eq: vec![1.0, 2.0, 3.0, 4.0, 5.0, -1.0, -2.0, -3.0, -4.0, -5.0],
-            mode_808: false,
+            mode_808: true,
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();

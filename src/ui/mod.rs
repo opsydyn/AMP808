@@ -208,10 +208,20 @@ impl App {
     /// Apply a theme by index (None = default ANSI theme).
     pub fn apply_theme(&mut self, idx: Option<usize>) {
         self.theme_idx = idx;
-        self.palette = match idx {
+        self.refresh_palette();
+    }
+
+    /// Refresh the active palette based on the selected theme and current mode.
+    pub fn refresh_palette(&mut self) {
+        self.palette = match self.theme_idx {
             Some(i) if i < self.themes.len() => Palette::from_theme(&self.themes[i]),
+            _ if self.mode_808 => Palette::tr808(),
             _ => Palette::default(),
         };
+
+        self.fx_808_border = None;
+        self.fx_808_header = None;
+        self.fx_808_focus = None;
     }
 
     /// Get the current theme name.
@@ -967,6 +977,8 @@ mod tests {
     use crate::playback_backend::PlaybackBackend;
     use crate::playlist::{Playlist, PlaylistInfo};
     use crate::resolve::ytdl::YtdlTempTracker;
+    use crate::ui::styles::Palette;
+    use crate::ui::theme;
     use tokio::sync::mpsc;
 
     #[test]
@@ -1061,5 +1073,31 @@ mod tests {
 
         app.bpm.reset_for_backend(false);
         assert_eq!(app.bpm.display, BpmDisplayState::Estimating);
+    }
+
+    #[test]
+    fn refresh_palette_uses_classic_808_when_no_theme_selected() {
+        let mut app = build_music_app_test_app();
+        app.mode_808 = true;
+        app.refresh_palette();
+
+        let classic = Palette::tr808();
+        assert_eq!(app.palette.title, classic.title);
+        assert_eq!(app.palette.text, classic.text);
+        assert_eq!(app.palette.spectrum_high, classic.spectrum_high);
+    }
+
+    #[test]
+    fn refresh_palette_uses_selected_theme_in_808_mode() {
+        let mut app = build_music_app_test_app();
+        let idx = theme::find_by_name(&app.themes, "catppuccin").expect("theme exists");
+
+        app.mode_808 = true;
+        app.apply_theme(Some(idx));
+
+        let themed = Palette::from_theme(&app.themes[idx]);
+        assert_eq!(app.palette.title, themed.title);
+        assert_eq!(app.palette.text, themed.text);
+        assert_eq!(app.palette.spectrum_high, themed.spectrum_high);
     }
 }

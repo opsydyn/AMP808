@@ -157,14 +157,15 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
     // Apply theme from config
     if !cfg.theme.is_empty() {
         let idx = ui::theme::find_by_name(&app.themes, &cfg.theme);
-        app.apply_theme(idx);
+        app.theme_idx = idx;
     }
 
     // Apply 808 mode from config
     if cfg.mode_808 {
         app.mode_808 = true;
-        app.palette = ui::styles::Palette::tr808();
     }
+
+    app.refresh_palette();
 
     // Auto-play first track if we have any
     if !app.playlist.is_empty() {

@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, FrameExt as _, Paragraph};
 
@@ -8,12 +8,13 @@ use super::App;
 use super::keys::Focus;
 use super::styles::PANEL_WIDTH;
 use super::theme;
-use super::visualizer::VisMode;
+use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
 
 impl App {
     /// Render the full TUI frame.
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let retro_mode = self.vis.mode == VisMode::Retro;
 
         if self.show_keymap {
             self.render_keymap(frame, area);
@@ -32,7 +33,8 @@ impl App {
 
         // Center content in terminal
         let content_width = PANEL_WIDTH + 6; // panel + padding
-        let content_height = 28u16; // approximate
+        let spectrum_height = if retro_mode { 8u16 } else { 5u16 };
+        let content_height = if retro_mode { 31u16 } else { 28u16 };
         let x = area.width.saturating_sub(content_width) / 2;
         let y = area.height.saturating_sub(content_height) / 2;
         let inner = Rect::new(
@@ -45,21 +47,21 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // title
-                Constraint::Length(1), // track info
-                Constraint::Length(1), // time + status
-                Constraint::Length(1), // spacer
-                Constraint::Length(5), // spectrum
-                Constraint::Length(1), // seek bar
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // volume
-                Constraint::Length(1), // EQ
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // playlist header
-                Constraint::Length(5), // playlist
-                Constraint::Length(1), // spacer
-                Constraint::Length(1), // help
-                Constraint::Min(0),    // error/status + remainder
+                Constraint::Length(1),               // title
+                Constraint::Length(1),               // track info
+                Constraint::Length(1),               // time + status
+                Constraint::Length(1),               // spacer
+                Constraint::Length(spectrum_height), // spectrum
+                Constraint::Length(1),               // seek bar
+                Constraint::Length(1),               // spacer
+                Constraint::Length(1),               // volume
+                Constraint::Length(1),               // EQ
+                Constraint::Length(1),               // spacer
+                Constraint::Length(1),               // playlist header
+                Constraint::Length(5),               // playlist
+                Constraint::Length(1),               // spacer
+                Constraint::Length(1),               // help
+                Constraint::Min(0),                  // error/status + remainder
             ])
             .split(inner);
 
@@ -235,15 +237,26 @@ impl App {
     fn render_spectrum(&mut self, frame: &mut Frame, area: Rect) {
         let spec_lines = if self.player.is_music_app() {
             let (pos_secs, _) = self.track_position();
+            let animate = self.player.is_playing() && !self.player.is_paused();
             let bands = self.vis.synthetic_bands(
                 pos_secs as f64,
                 self.player.is_playing(),
                 self.player.is_paused(),
             );
-            self.vis.render_synthetic(&bands)
+            if self.vis.mode == VisMode::Retro {
+                self.vis
+                    .render_retro(&bands, area.width as usize, area.height as usize, animate)
+            } else {
+                self.vis.render_synthetic(&bands)
+            }
         } else {
             let samples = self.player.samples();
-            if self.vis.mode == VisMode::Scope {
+            if self.vis.mode == VisMode::Retro {
+                let bands = self.vis.analyze(&samples);
+                let animate = self.player.is_playing() && !self.player.is_paused();
+                self.vis
+                    .render_retro(&bands, area.width as usize, area.height as usize, animate)
+            } else if self.vis.mode == VisMode::Scope {
                 self.vis
                     .render_scope(&samples, area.width as usize, area.height as usize)
             } else {
@@ -259,12 +272,7 @@ impl App {
             let spans: Vec<Span> = spec_line
                 .segments
                 .iter()
-                .flat_map(|seg| {
-                    vec![Span::styled(
-                        &seg.text,
-                        self.palette.spectrum_style(seg.row_bottom),
-                    )]
-                })
+                .flat_map(|seg| vec![Span::styled(&seg.text, self.spectrum_segment_style(seg))])
                 .collect();
 
             let y = area.y + row as u16;
@@ -277,6 +285,19 @@ impl App {
         if let Some(ref proto) = self.cover_art_proto {
             let image = ratatui_image::Image::new(proto);
             frame.render_widget(image, area);
+        }
+    }
+
+    fn spectrum_segment_style(&self, seg: &SpectrumSegment) -> Style {
+        match seg.kind {
+            SpectrumSegmentKind::Gradient => self.palette.spectrum_style(seg.row_bottom),
+            SpectrumSegmentKind::RetroGrid => Style::default().fg(self.palette.spectrum_low),
+            SpectrumSegmentKind::RetroSun => Style::default()
+                .fg(self.palette.spectrum_mid)
+                .add_modifier(Modifier::BOLD),
+            SpectrumSegmentKind::RetroWave => Style::default()
+                .fg(self.palette.spectrum_high)
+                .add_modifier(Modifier::BOLD),
         }
     }
 
@@ -802,7 +823,11 @@ impl App {
 
         for i in scroll..count.min(scroll + max_visible) {
             let name = if i == 0 {
-                theme::DEFAULT_NAME.to_string()
+                if self.mode_808 {
+                    "Classic 808 (default)".to_string()
+                } else {
+                    theme::DEFAULT_NAME.to_string()
+                }
             } else {
                 self.themes[i - 1].name.clone()
             };

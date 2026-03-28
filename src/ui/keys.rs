@@ -3,7 +3,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::App;
 use super::command::{CommandInputResult, handle_command_input_key};
 use super::eq_presets::EQ_PRESETS;
-use super::styles::Palette;
 
 impl App {
     /// Process a key event and return whether the app should quit.
@@ -298,11 +297,7 @@ impl App {
 
             (_, KeyCode::Char('8')) => {
                 self.mode_808 = !self.mode_808;
-                if self.mode_808 {
-                    self.palette = Palette::tr808();
-                } else {
-                    self.apply_theme(self.theme_idx);
-                }
+                self.refresh_palette();
             }
 
             _ => {}
@@ -477,6 +472,7 @@ mod tests {
     use super::{Focus, next_focus};
     use crate::external::apple_music_api::{AppleMusicClient, AppleMusicConfig, LibraryTrack};
     use crate::external::music_app::{MusicAppPlayerState, MusicAppSnapshot};
+    use crate::ui::{styles::Palette, theme};
     use crate::{
         playback_backend::PlaybackBackend,
         playlist::{Playlist, PlaylistInfo},
@@ -617,6 +613,21 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
 
         assert_eq!(app.vis.mode, VisMode::BarsGap);
+    }
+
+    #[test]
+    fn toggle_808_keeps_selected_theme_palette() {
+        let mut app = build_test_music_app();
+        let idx = theme::find_by_name(&app.themes, "catppuccin").expect("theme exists");
+        let themed = Palette::from_theme(&app.themes[idx]);
+
+        app.apply_theme(Some(idx));
+        app.handle_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+
+        assert!(app.mode_808);
+        assert_eq!(app.palette.title, themed.title);
+        assert_eq!(app.palette.text, themed.text);
+        assert_eq!(app.palette.spectrum_high, themed.spectrum_high);
     }
 
     #[cfg(target_os = "macos")]

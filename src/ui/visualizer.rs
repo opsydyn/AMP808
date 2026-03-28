@@ -26,6 +26,7 @@ pub enum VisMode {
     BarsGap,
     VBars,
     Bricks,
+    Retro,
     Scope,
 }
 
@@ -42,6 +43,7 @@ pub struct Visualizer {
     sr: f64,
     buf: Vec<Complex<f64>>,
     pub mode: VisMode,
+    frame: u64,
     scope_trigger_enabled: bool,
     scope_trigger_edge: ScopeTriggerEdge,
     scope_trigger_level: f64,
@@ -56,6 +58,7 @@ impl Visualizer {
             sr: sample_rate,
             buf: vec![Complex::new(0.0, 0.0); FFT_SIZE],
             mode: VisMode::Bars,
+            frame: 0,
             scope_trigger_enabled: true,
             scope_trigger_edge: ScopeTriggerEdge::Rising,
             scope_trigger_level: 0.0,
@@ -69,7 +72,8 @@ impl Visualizer {
             VisMode::Bars => VisMode::BarsGap,
             VisMode::BarsGap => VisMode::VBars,
             VisMode::VBars => VisMode::Bricks,
-            VisMode::Bricks => VisMode::Scope,
+            VisMode::Bricks => VisMode::Retro,
+            VisMode::Retro => VisMode::Scope,
             VisMode::Scope => VisMode::Bars,
         };
     }
@@ -79,7 +83,7 @@ impl Visualizer {
             VisMode::Bars => VisMode::BarsGap,
             VisMode::BarsGap => VisMode::VBars,
             VisMode::VBars => VisMode::Bricks,
-            VisMode::Bricks | VisMode::Scope => VisMode::Bars,
+            VisMode::Bricks | VisMode::Retro | VisMode::Scope => VisMode::Bars,
         };
     }
 
@@ -195,13 +199,13 @@ impl Visualizer {
             VisMode::BarsGap => self.render_bars_solid(bands),
             VisMode::VBars => self.render_vertical_bars_gapped(bands),
             VisMode::Bricks => self.render_bricks(bands),
-            VisMode::Scope => self.render_vertical_bars_gapped(&[0.0; NUM_BANDS]),
+            VisMode::Retro | VisMode::Scope => self.render_vertical_bars_gapped(&[0.0; NUM_BANDS]),
         }
     }
 
     pub fn render_synthetic(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         match self.mode {
-            VisMode::Scope => self.render_vertical_bars_gapped(bands),
+            VisMode::Retro | VisMode::Scope => self.render_vertical_bars_gapped(bands),
             _ => self.render(bands),
         }
     }
@@ -217,6 +221,189 @@ impl Visualizer {
         } else {
             self.render_bars_gapped(bands)
         }
+    }
+
+    /// Render a retro synthwave scene using spectrum bands for the horizon wave.
+    pub fn render_retro(
+        &mut self,
+        bands: &[f64; NUM_BANDS],
+        width: usize,
+        height: usize,
+        animate: bool,
+    ) -> Vec<SpectrumLine> {
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+
+        let dot_rows = height * 4;
+        let dot_cols = width * 2;
+        if dot_rows == 0 || dot_cols == 0 {
+            return Vec::new();
+        }
+
+        let mut horizon_dot = (dot_rows * 2) / 5;
+        if horizon_dot < 2 {
+            horizon_dot = 2;
+        }
+        horizon_dot = horizon_dot.min(dot_rows.saturating_sub(1));
+
+        let floor_rows = dot_rows.saturating_sub(horizon_dot);
+        let center_x = dot_cols.saturating_sub(1) as f64 / 2.0;
+        let mut grid = vec![0u8; dot_rows * dot_cols];
+
+        let sun_radius = horizon_dot as f64 * 0.85;
+        for dy in 0..horizon_dot {
+            let row_dist = (horizon_dot - dy) as f64;
+            if row_dist > sun_radius {
+                continue;
+            }
+
+            let half_width = (sun_radius * sun_radius - row_dist * row_dist).sqrt();
+            if row_dist < sun_radius * 0.5 {
+                let stripe_width = ((sun_radius * 0.15) as usize).max(1);
+                if ((row_dist as usize) / stripe_width) % 2 == 1 {
+                    continue;
+                }
+            }
+
+            let left = (center_x - half_width).max(0.0) as usize;
+            let right = (center_x + half_width).min(dot_cols.saturating_sub(1) as f64) as usize;
+            let offset = dy * dot_cols;
+            for dx in left..=right {
+                grid[offset + dx] = 3;
+            }
+        }
+
+        if horizon_dot < dot_rows {
+            let offset = horizon_dot * dot_cols;
+            grid[offset..offset + dot_cols].fill(1);
+        }
+
+        const NUM_VERTICAL_LINES: usize = 18;
+        for i in 0..=NUM_VERTICAL_LINES {
+            let bottom_x = i as f64 * dot_cols.saturating_sub(1) as f64 / NUM_VERTICAL_LINES as f64;
+            for dy in (horizon_dot + 1)..dot_rows {
+                let t = (dy - horizon_dot) as f64 / floor_rows.saturating_sub(1).max(1) as f64;
+                let screen_x = center_x + (bottom_x - center_x) * t;
+                let ix = screen_x.round() as usize;
+                if ix < dot_cols {
+                    grid[dy * dot_cols + ix] = 1;
+                }
+            }
+        }
+
+        let scroll = (self.frame as f64 * 0.08).fract();
+        const NUM_HORIZONTAL_LINES: usize = 10;
+        for i in 0..NUM_HORIZONTAL_LINES {
+            let mut z = (i as f64 + scroll) / NUM_HORIZONTAL_LINES as f64;
+            if z > 1.0 {
+                z -= 1.0;
+            }
+            let dy =
+                horizon_dot + 1 + (z * z * floor_rows.saturating_sub(2).max(1) as f64) as usize;
+            if dy > horizon_dot && dy < dot_rows {
+                let offset = dy * dot_cols;
+                grid[offset..offset + dot_cols].fill(1);
+            }
+        }
+
+        let max_wave = horizon_dot as f64 * 0.85;
+        let mut wave_y = vec![horizon_dot.min(dot_rows.saturating_sub(1)); dot_cols];
+        for (dx, y_slot) in wave_y.iter_mut().enumerate() {
+            let band_f =
+                dx as f64 / dot_cols.saturating_sub(1).max(1) as f64 * (NUM_BANDS - 1) as f64;
+            let band_idx = band_f.floor() as usize;
+            let frac = band_f - band_idx as f64;
+            let interp = (1.0 - (frac * PI).cos()) / 2.0;
+
+            let level = if band_idx >= NUM_BANDS - 1 {
+                bands[NUM_BANDS - 1]
+            } else {
+                bands[band_idx] * (1.0 - interp) + bands[band_idx + 1] * interp
+            }
+            .max(0.03);
+
+            let wave_dot = horizon_dot.saturating_sub((level * max_wave) as usize);
+            *y_slot = wave_dot.min(dot_rows.saturating_sub(1));
+        }
+
+        for (dx, &y) in wave_y.iter().enumerate() {
+            grid[y * dot_cols + dx] = 2;
+            if dx > 0 {
+                let prev = wave_y[dx - 1];
+                let y_min = prev.min(y);
+                let y_max = prev.max(y);
+                for fy in y_min..=y_max {
+                    grid[fy * dot_cols + dx] = 2;
+                }
+            }
+        }
+
+        if animate {
+            self.frame = self.frame.wrapping_add(1);
+        }
+
+        let mut lines = Vec::with_capacity(height);
+        for row in 0..height {
+            let row_bottom = (height - 1 - row) as f64 / height as f64;
+            let base = row * 4;
+            let mut segments = Vec::new();
+            let mut current_kind: Option<SpectrumSegmentKind> = None;
+            let mut run = String::with_capacity(width);
+
+            for ch in 0..width {
+                let mut bits = 0u8;
+                let mut has_wave = false;
+                let mut has_sun = false;
+                let col_base = ch * 2;
+
+                for dr in 0..4 {
+                    for dc in 0..2 {
+                        let tag = grid[(base + dr) * dot_cols + (col_base + dc)];
+                        if tag == 0 {
+                            continue;
+                        }
+                        bits |= braille_bit(dr, dc);
+                        if tag == 2 {
+                            has_wave = true;
+                        } else if tag == 3 {
+                            has_sun = true;
+                        }
+                    }
+                }
+
+                let kind = if has_wave {
+                    SpectrumSegmentKind::RetroWave
+                } else if has_sun {
+                    SpectrumSegmentKind::RetroSun
+                } else {
+                    SpectrumSegmentKind::RetroGrid
+                };
+
+                if current_kind != Some(kind) && !run.is_empty() {
+                    segments.push(SpectrumSegment {
+                        text: std::mem::take(&mut run),
+                        row_bottom,
+                        kind: current_kind.unwrap_or(SpectrumSegmentKind::RetroGrid),
+                    });
+                }
+                current_kind = Some(kind);
+
+                run.push(char::from_u32(0x2800 + bits as u32).unwrap_or(' '));
+            }
+
+            if !run.is_empty() {
+                segments.push(SpectrumSegment {
+                    text: run,
+                    row_bottom,
+                    kind: current_kind.unwrap_or(SpectrumSegmentKind::RetroGrid),
+                });
+            }
+
+            lines.push(SpectrumLine { segments });
+        }
+
+        lines
     }
 
     /// Render a basic oscilloscope trace from recent time-domain samples.
@@ -272,58 +459,7 @@ impl Visualizer {
             }
         }
 
-        let mut lines = Vec::with_capacity(height);
-        for cell_y in 0..height {
-            let mut line = String::with_capacity(width);
-            for cell_x in 0..width {
-                // Braille dot mapping in a 2x4 subcell block.
-                // Left column: dots 1,2,3,7. Right column: dots 4,5,6,8.
-                let x = cell_x * 2;
-                let y = cell_y * 4;
-
-                let mut bits = 0u8;
-                if pixels[y][x] {
-                    bits |= 0x01;
-                }
-                if pixels[y + 1][x] {
-                    bits |= 0x02;
-                }
-                if pixels[y + 2][x] {
-                    bits |= 0x04;
-                }
-                if pixels[y + 3][x] {
-                    bits |= 0x40;
-                }
-                if pixels[y][x + 1] {
-                    bits |= 0x08;
-                }
-                if pixels[y + 1][x + 1] {
-                    bits |= 0x10;
-                }
-                if pixels[y + 2][x + 1] {
-                    bits |= 0x20;
-                }
-                if pixels[y + 3][x + 1] {
-                    bits |= 0x80;
-                }
-
-                if bits == 0 {
-                    line.push(' ');
-                } else {
-                    let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
-                    line.push(ch);
-                }
-            }
-
-            let row_bottom = (height - 1 - cell_y) as f64 / height as f64;
-            lines.push(SpectrumLine {
-                segments: vec![SpectrumSegment {
-                    text: line,
-                    row_bottom,
-                }],
-            });
-        }
-        lines
+        braille_lines_from_pixels(&pixels, width, height, SpectrumSegmentKind::Gradient)
     }
 
     /// Find the first trigger crossing index for the current scope trigger settings.
@@ -389,7 +525,11 @@ impl Visualizer {
             );
 
             lines.push(SpectrumLine {
-                segments: vec![SpectrumSegment { text, row_bottom }],
+                segments: vec![SpectrumSegment {
+                    text,
+                    row_bottom,
+                    kind: SpectrumSegmentKind::Gradient,
+                }],
             });
         }
 
@@ -413,7 +553,11 @@ impl Visualizer {
                     push_band_gap(&mut text);
                 }
 
-                segments.push(SpectrumSegment { text, row_bottom });
+                segments.push(SpectrumSegment {
+                    text,
+                    row_bottom,
+                    kind: SpectrumSegmentKind::Gradient,
+                });
             }
 
             lines.push(SpectrumLine { segments });
@@ -444,6 +588,7 @@ impl Visualizer {
                 segments.push(SpectrumSegment {
                     text,
                     row_bottom: row_threshold,
+                    kind: SpectrumSegmentKind::Gradient,
                 });
             }
 
@@ -478,7 +623,11 @@ impl Visualizer {
                     push_band_gap(&mut text);
                 }
 
-                segments.push(SpectrumSegment { text, row_bottom });
+                segments.push(SpectrumSegment {
+                    text,
+                    row_bottom,
+                    kind: SpectrumSegmentKind::Gradient,
+                });
             }
 
             lines.push(SpectrumLine { segments });
@@ -493,10 +642,19 @@ pub struct SpectrumLine {
     pub segments: Vec<SpectrumSegment>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpectrumSegmentKind {
+    Gradient,
+    RetroGrid,
+    RetroSun,
+    RetroWave,
+}
+
 /// A colored segment within a spectrum line.
 pub struct SpectrumSegment {
     pub text: String,
     pub row_bottom: f64,
+    pub kind: SpectrumSegmentKind,
 }
 
 fn horizontal_row_fill_width(
@@ -571,6 +729,81 @@ fn plot_line(pixels: &mut [Vec<bool>], from: (i32, i32), to: (i32, i32)) {
             y0 += sy;
         }
     }
+}
+
+fn braille_bit(dr: usize, dc: usize) -> u8 {
+    match (dr, dc) {
+        (0, 0) => 0x01,
+        (1, 0) => 0x02,
+        (2, 0) => 0x04,
+        (3, 0) => 0x40,
+        (0, 1) => 0x08,
+        (1, 1) => 0x10,
+        (2, 1) => 0x20,
+        (3, 1) => 0x80,
+        _ => 0,
+    }
+}
+
+fn braille_lines_from_pixels(
+    pixels: &[Vec<bool>],
+    width: usize,
+    height: usize,
+    kind: SpectrumSegmentKind,
+) -> Vec<SpectrumLine> {
+    let mut lines = Vec::with_capacity(height);
+    for cell_y in 0..height {
+        let mut line = String::with_capacity(width);
+        for cell_x in 0..width {
+            // Braille dot mapping in a 2x4 subcell block.
+            // Left column: dots 1,2,3,7. Right column: dots 4,5,6,8.
+            let x = cell_x * 2;
+            let y = cell_y * 4;
+
+            let mut bits = 0u8;
+            if pixels[y][x] {
+                bits |= 0x01;
+            }
+            if pixels[y + 1][x] {
+                bits |= 0x02;
+            }
+            if pixels[y + 2][x] {
+                bits |= 0x04;
+            }
+            if pixels[y + 3][x] {
+                bits |= 0x40;
+            }
+            if pixels[y][x + 1] {
+                bits |= 0x08;
+            }
+            if pixels[y + 1][x + 1] {
+                bits |= 0x10;
+            }
+            if pixels[y + 2][x + 1] {
+                bits |= 0x20;
+            }
+            if pixels[y + 3][x + 1] {
+                bits |= 0x80;
+            }
+
+            if bits == 0 {
+                line.push(' ');
+            } else {
+                let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
+                line.push(ch);
+            }
+        }
+
+        let row_bottom = (height - 1 - cell_y) as f64 / height as f64;
+        lines.push(SpectrumLine {
+            segments: vec![SpectrumSegment {
+                text: line,
+                row_bottom,
+                kind,
+            }],
+        });
+    }
+    lines
 }
 
 fn push_band_gap(text: &mut String) {
@@ -684,6 +917,8 @@ mod tests {
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bricks);
         vis.cycle_mode();
+        assert_eq!(vis.mode, VisMode::Retro);
+        vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Scope);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bars);
@@ -699,6 +934,14 @@ mod tests {
         assert_eq!(vis.mode, VisMode::VBars);
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bricks);
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Bars);
+
+        vis.mode = VisMode::Retro;
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Bars);
+
+        vis.mode = VisMode::Scope;
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bars);
     }
@@ -805,6 +1048,100 @@ mod tests {
             .filter(|&c| c != ' ')
             .count();
         assert!(painted > 0, "scope should paint at least one trace point");
+    }
+
+    #[test]
+    fn test_render_retro_dimensions() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.5; NUM_BANDS];
+        let lines = vis.render_retro(&bands, 24, 5, true);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.iter().all(|line| {
+            line.segments
+                .iter()
+                .map(|seg| seg.text.chars().count())
+                .sum::<usize>()
+                == 24
+        }));
+    }
+
+    #[test]
+    fn test_render_retro_draws_scene() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.9, 0.8, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.2, 0.15];
+        let lines = vis.render_retro(&bands, 24, 5, true);
+        let painted = lines
+            .iter()
+            .flat_map(|line| line.segments.iter())
+            .flat_map(|seg| seg.text.chars())
+            .filter(|&c| c != ' ')
+            .count();
+        assert!(painted > 0, "retro should paint at least one scene element");
+    }
+
+    #[test]
+    fn test_render_retro_uses_braille_and_multiple_layers() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.9, 0.8, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.2, 0.15];
+        let lines = vis.render_retro(&bands, 24, 5, true);
+        let chars: Vec<char> = lines
+            .iter()
+            .flat_map(|line| line.segments.iter())
+            .flat_map(|seg| seg.text.chars())
+            .collect();
+        let kinds: Vec<SpectrumSegmentKind> = lines
+            .iter()
+            .flat_map(|line| line.segments.iter().map(|seg| seg.kind))
+            .collect();
+
+        assert!(!chars.contains(&'●'));
+        assert!(!chars.contains(&'│'));
+        assert!(
+            chars
+                .iter()
+                .any(|&c| ('\u{2801}'..='\u{28ff}').contains(&c)),
+            "retro should render with braille glyphs for finer detail"
+        );
+        assert!(kinds.contains(&SpectrumSegmentKind::RetroGrid));
+        assert!(kinds.contains(&SpectrumSegmentKind::RetroSun));
+        assert!(kinds.contains(&SpectrumSegmentKind::RetroWave));
+    }
+
+    #[test]
+    fn test_render_retro_has_striped_sun_breaks() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.9, 0.8, 0.75, 0.65, 0.55, 0.45, 0.35, 0.25, 0.2, 0.15];
+        let lines = vis.render_retro(&bands, 40, 8, true);
+
+        let striped_row_found = lines.iter().any(|line| {
+            let has_sun = line
+                .segments
+                .iter()
+                .any(|seg| seg.kind == SpectrumSegmentKind::RetroSun);
+            let has_grid_gap = line.segments.iter().any(|seg| {
+                seg.kind == SpectrumSegmentKind::RetroGrid
+                    && seg.text.chars().any(|ch| ch == '\u{2800}')
+            });
+            has_sun && has_grid_gap
+        });
+
+        assert!(
+            striped_row_found,
+            "retro sun should include striped gaps like the Go renderer"
+        );
+    }
+
+    #[test]
+    fn test_render_retro_freezes_frame_when_not_animating() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.5; NUM_BANDS];
+
+        assert_eq!(vis.frame, 0);
+        let _ = vis.render_retro(&bands, 24, 8, false);
+        assert_eq!(vis.frame, 0);
+
+        let _ = vis.render_retro(&bands, 24, 8, true);
+        assert_eq!(vis.frame, 1);
     }
 
     #[test]

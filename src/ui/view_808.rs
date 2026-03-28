@@ -11,7 +11,8 @@ use tui_big_text::{BigText, PixelSize};
 
 use super::App;
 use super::keys::Focus;
-use super::visualizer::VisMode;
+use super::styles::Palette;
+use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
 
 /// 808 color constants.
 const C808_RED: Color = Color::Rgb(0xD7, 0x26, 0x2E);
@@ -20,6 +21,9 @@ const C808_AMBER: Color = Color::Rgb(0xF6, 0xA6, 0x23);
 const C808_YELLOW: Color = Color::Rgb(0xFF, 0xD4, 0x00);
 const C808_GREY: Color = Color::Rgb(0xC9, 0xC9, 0xC9);
 const C808_DIM: Color = Color::Rgb(0x66, 0x66, 0x66);
+const C808_DEEP_AMBER: Color = Color::Rgb(0xB8, 0x6A, 0x1F);
+const C808_SUNSET_ORANGE: Color = Color::Rgb(0xFF, 0x7A, 0x45);
+const C808_HOT_PINK: Color = Color::Rgb(0xFF, 0x4D, 0xB8);
 const C808_IVORY: Color = Color::Rgb(0xEE, 0xEA, 0xD8);
 const C808_BLACK: Color = Color::Rgb(0x12, 0x12, 0x12);
 
@@ -32,11 +36,80 @@ const EQ_LABELS: [&str; 10] = [
 enum RenderMode808 {
     HorizontalBars,
     LedColumns,
+    Retro,
     Oscilloscope,
 }
 
-fn content_height_808(browser_focus: bool, terminal_height: u16) -> u16 {
-    let target = if browser_focus { 31 } else { 28 };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Classic808Colors {
+    red: Color,
+    orange: Color,
+    amber: Color,
+    yellow: Color,
+    grey: Color,
+    dim: Color,
+    deep_amber: Color,
+    sunset_orange: Color,
+    hot_pink: Color,
+    ivory: Color,
+    black: Color,
+}
+
+impl Classic808Colors {
+    fn classic() -> Self {
+        Self {
+            red: C808_RED,
+            orange: C808_ORANGE,
+            amber: C808_AMBER,
+            yellow: C808_YELLOW,
+            grey: C808_GREY,
+            dim: C808_DIM,
+            deep_amber: C808_DEEP_AMBER,
+            sunset_orange: C808_SUNSET_ORANGE,
+            hot_pink: C808_HOT_PINK,
+            ivory: C808_IVORY,
+            black: C808_BLACK,
+        }
+    }
+
+    fn themed(palette: &Palette) -> Self {
+        Self {
+            red: palette.error,
+            orange: palette.playing,
+            amber: palette.seek_bar,
+            yellow: palette.accent,
+            grey: palette.text,
+            dim: palette.dim,
+            deep_amber: mix_rgb(palette.seek_bar, palette.dim, 0.45),
+            sunset_orange: mix_rgb(palette.spectrum_mid, palette.accent, 0.35),
+            hot_pink: mix_rgb(palette.spectrum_high, palette.accent, 0.45),
+            ivory: mix_rgb(palette.text, palette.accent, 0.15),
+            black: C808_BLACK,
+        }
+    }
+}
+
+fn mix_rgb(a: Color, b: Color, ratio_to_b: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let t = ratio_to_b.clamp(0.0, 1.0);
+            let lerp = |lhs: u8, rhs: u8| -> u8 {
+                ((lhs as f32 * (1.0 - t)) + (rhs as f32 * t)).round() as u8
+            };
+            Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
+        }
+        _ => a,
+    }
+}
+
+fn content_height_808(browser_focus: bool, retro_mode: bool, terminal_height: u16) -> u16 {
+    let target = if retro_mode {
+        if browser_focus { 34 } else { 31 }
+    } else if browser_focus {
+        31
+    } else {
+        28
+    };
     target.min(terminal_height)
 }
 
@@ -45,14 +118,24 @@ fn browser_panel_min_height_808(browser_focus: bool) -> u16 {
 }
 
 impl App {
+    fn colors_808(&self) -> Classic808Colors {
+        if self.theme_idx.is_some() {
+            Classic808Colors::themed(&self.palette)
+        } else {
+            Classic808Colors::classic()
+        }
+    }
+
     /// Render the 808 layout (called when mode_808 == true).
     pub fn render_808(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let browser_focus = self.focus == Focus::Browser;
+        let retro_mode = self.vis.mode == VisMode::Retro;
 
         // Content sizing — centre both horizontally and vertically
         let content_width = 80u16.min(area.width);
-        let content_height = content_height_808(browser_focus, area.height);
+        let content_height = content_height_808(browser_focus, retro_mode, area.height);
+        let spectrum_height = if retro_mode { 8u16 } else { 5u16 };
         let x = area.width.saturating_sub(content_width) / 2;
         let y = area.height.saturating_sub(content_height) / 2;
         let inner = Rect::new(x, y, content_width, content_height);
@@ -60,18 +143,18 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6), // header (large-style title)
-                Constraint::Length(3), // knob row 1 (vol + 5 EQ)
-                Constraint::Length(3), // knob row 2 (5 EQ)
-                Constraint::Length(1), // spacer
-                Constraint::Length(2), // now playing + seek
-                Constraint::Length(1), // status line (repeat/shuffle/mono)
-                Constraint::Length(1), // spacer
-                Constraint::Length(5), // spectrum LED
-                Constraint::Length(0), // spacer
+                Constraint::Length(6),               // header (large-style title)
+                Constraint::Length(3),               // knob row 1 (vol + 5 EQ)
+                Constraint::Length(3),               // knob row 2 (5 EQ)
+                Constraint::Length(1),               // spacer
+                Constraint::Length(2),               // now playing + seek
+                Constraint::Length(1),               // status line (repeat/shuffle/mono)
+                Constraint::Length(1),               // spacer
+                Constraint::Length(spectrum_height), // spectrum LED
+                Constraint::Length(0),               // spacer
                 Constraint::Min(browser_panel_min_height_808(browser_focus)), // playlist/browser
-                Constraint::Length(2), // help controls
-                Constraint::Length(1), // error/save
+                Constraint::Length(2),               // help controls
+                Constraint::Length(1),               // error/save
             ])
             .split(inner);
 
@@ -131,9 +214,10 @@ impl App {
         header_area: Rect,
         focus_area: Rect,
     ) {
+        let colors = self.colors_808();
         self.ensure_808_effects();
 
-        let base = Style::default().fg(C808_DIM);
+        let base = Style::default().fg(colors.dim);
         if outer_area.width >= 2 && outer_area.height >= 2 {
             frame.render_widget(
                 Block::default().borders(Borders::ALL).border_style(base),
@@ -173,18 +257,20 @@ impl App {
     }
 
     fn ensure_808_effects(&mut self) {
+        let colors = self.colors_808();
         if self.fx_808_border.is_none() {
-            self.fx_808_border = Some(make_808_border_effect());
+            self.fx_808_border = Some(make_808_border_effect(colors));
         }
         if self.fx_808_header.is_none() {
-            self.fx_808_header = Some(make_808_header_effect());
+            self.fx_808_header = Some(make_808_header_effect(colors));
         }
         if self.fx_808_focus.is_none() {
-            self.fx_808_focus = Some(make_808_focus_effect());
+            self.fx_808_focus = Some(make_808_focus_effect(colors));
         }
     }
 
     fn render_808_header(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -198,7 +284,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ))),
             chunks[0],
         );
@@ -207,7 +293,7 @@ impl App {
             .pixel_size(PixelSize::ThirdHeight)
             .style(
                 Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD),
             )
             .centered()
@@ -216,10 +302,10 @@ impl App {
         frame.render_widget(logo, chunks[1]);
 
         let subtitle = Line::from(vec![
-            Span::styled("  ▬▬▬  ", Style::default().fg(C808_GREY)),
-            Span::styled("🦀 RHYTHM COMPOSER", Style::default().fg(C808_GREY)),
-            Span::styled("  ▬▬▬   ", Style::default().fg(C808_GREY)),
-            Span::styled("Computer Controlled", Style::default().fg(C808_GREY)),
+            Span::styled("  ▬▬▬  ", Style::default().fg(colors.grey)),
+            Span::styled("SOFTWARE RHYTHM COMPOSER", Style::default().fg(colors.grey)),
+            Span::styled("  ▬▬▬   ", Style::default().fg(colors.grey)),
+            Span::styled("Computer Controlled", Style::default().fg(colors.grey)),
         ]);
         frame.render_widget(
             Paragraph::new(subtitle).alignment(Alignment::Center),
@@ -229,13 +315,14 @@ impl App {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ))),
             chunks[3],
         );
     }
 
     fn render_808_knob_row1(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         // VOL knob + first 5 EQ bands
         let knob_w = area.width / 6;
         let constraints: Vec<Constraint> = (0..6).map(|_| Constraint::Length(knob_w)).collect();
@@ -249,18 +336,19 @@ impl App {
         let vol = self.player.volume();
         let vol_norm = ((vol + 30.0) / 36.0).clamp(0.0, 1.0);
         let is_focused = self.focus == Focus::EQ; // vol doesn't have its own focus
-        render_knob(frame, cols[0], vol_norm, "VOL", false);
+        render_knob(frame, cols[0], vol_norm, "VOL", false, colors);
 
         // EQ bands 0-4
         let bands = self.player.eq_bands();
         for i in 0..5 {
             let norm = ((bands[i] + 12.0) / 24.0).clamp(0.0, 1.0);
             let selected = is_focused && self.eq_cursor == i;
-            render_knob(frame, cols[i + 1], norm, EQ_LABELS[i], selected);
+            render_knob(frame, cols[i + 1], norm, EQ_LABELS[i], selected, colors);
         }
     }
 
     fn render_808_knob_row2(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         // EQ bands 5-9 + empty slot
         let knob_w = area.width / 6;
         let constraints: Vec<Constraint> = (0..6).map(|_| Constraint::Length(knob_w)).collect();
@@ -277,7 +365,7 @@ impl App {
             let band_idx = i + 5;
             let norm = ((bands[band_idx] + 12.0) / 24.0).clamp(0.0, 1.0);
             let selected = is_focused && self.eq_cursor == band_idx;
-            render_knob(frame, cols[i], norm, EQ_LABELS[band_idx], selected);
+            render_knob(frame, cols[i], norm, EQ_LABELS[band_idx], selected, colors);
         }
 
         // Preset indicator in the last slot
@@ -286,13 +374,14 @@ impl App {
             Line::from(""),
             Line::from(Span::styled(
                 format!("[{preset_name}]"),
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             )),
         ];
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), cols[5]);
     }
 
     fn render_808_now_playing(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
@@ -347,14 +436,14 @@ impl App {
         let name_span = Span::styled(
             format!(" {status_prefix} {display_name}"),
             Style::default()
-                .fg(C808_ORANGE)
+                .fg(colors.orange)
                 .add_modifier(Modifier::BOLD),
         );
         let gap = area
             .width
             .saturating_sub(name_span.width() as u16 + time_str.len() as u16 + 1);
         let spaces = Span::raw(" ".repeat(gap as usize));
-        let time_span = Span::styled(format!("{time_str} "), Style::default().fg(C808_GREY));
+        let time_span = Span::styled(format!("{time_str} "), Style::default().fg(colors.grey));
 
         let track_line = Line::from(vec![name_span, spaces, time_span]);
 
@@ -369,7 +458,7 @@ impl App {
                 label,
                 "━".repeat(w.saturating_sub(pad + label.len() + 1))
             );
-            Line::from(Span::styled(bar, Style::default().fg(C808_DIM)))
+            Line::from(Span::styled(bar, Style::default().fg(colors.dim)))
         } else {
             let progress = if dur_secs > 0 {
                 (pos_secs as f64 / dur_secs as f64).clamp(0.0, 1.0)
@@ -379,11 +468,11 @@ impl App {
             let filled = (progress * (w.saturating_sub(2)) as f64) as usize;
             Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled("━".repeat(filled), Style::default().fg(C808_AMBER)),
-                Span::styled("●", Style::default().fg(C808_YELLOW)),
+                Span::styled("━".repeat(filled), Style::default().fg(colors.amber)),
+                Span::styled("●", Style::default().fg(colors.yellow)),
                 Span::styled(
                     "━".repeat(w.saturating_sub(filled + 2)),
-                    Style::default().fg(C808_DIM),
+                    Style::default().fg(colors.dim),
                 ),
             ])
         };
@@ -392,6 +481,7 @@ impl App {
     }
 
     fn render_808_status(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let mut spans = vec![Span::styled(" ", Style::default())];
 
         // Repeat
@@ -400,11 +490,11 @@ impl App {
             spans.push(Span::styled(
                 repeat_str,
                 Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled(repeat_str, Style::default().fg(C808_DIM)));
+            spans.push(Span::styled(repeat_str, Style::default().fg(colors.dim)));
         }
 
         spans.push(Span::raw("  "));
@@ -414,11 +504,11 @@ impl App {
             spans.push(Span::styled(
                 "SHF",
                 Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled("SHF", Style::default().fg(C808_DIM)));
+            spans.push(Span::styled("SHF", Style::default().fg(colors.dim)));
         }
 
         spans.push(Span::raw("  "));
@@ -428,11 +518,11 @@ impl App {
             spans.push(Span::styled(
                 "MONO",
                 Style::default()
-                    .fg(C808_ORANGE)
+                    .fg(colors.orange)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled("MONO", Style::default().fg(C808_DIM)));
+            spans.push(Span::styled("MONO", Style::default().fg(colors.dim)));
         }
 
         spans.push(Span::raw("  "));
@@ -440,13 +530,13 @@ impl App {
         // Volume dB readout
         spans.push(Span::styled(
             format!("{:+.1}dB", self.player.volume()),
-            Style::default().fg(C808_GREY),
+            Style::default().fg(colors.grey),
         ));
 
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             self.bpm.machine_text(),
-            Style::default().fg(C808_GREY),
+            Style::default().fg(colors.grey),
         ));
 
         // Queue count
@@ -455,14 +545,16 @@ impl App {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 format!("Q:{q_len}"),
-                Style::default().fg(C808_AMBER).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(colors.amber)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("VIS:{}", vis_mode_label(self.vis.mode)),
-            Style::default().fg(C808_DIM),
+            Style::default().fg(colors.dim),
         ));
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -471,6 +563,7 @@ impl App {
     fn render_808_spectrum(&mut self, frame: &mut Frame, area: Rect) {
         if self.player.is_music_app() {
             let (pos_secs, _) = self.track_position();
+            let animate = self.player.is_playing() && !self.player.is_paused();
             let bands = self.vis.synthetic_bands(
                 pos_secs as f64,
                 self.player.is_playing(),
@@ -483,7 +576,19 @@ impl App {
                     let lines = self.vis.render_808_horizontal(&bands, solid);
                     self.render_808_visual_lines(frame, area, lines);
                 }
-                RenderMode808::LedColumns | RenderMode808::Oscilloscope => {
+                RenderMode808::LedColumns => {
+                    self.render_808_led_columns(frame, area, &bands);
+                }
+                RenderMode808::Retro => {
+                    let lines = self.vis.render_retro(
+                        &bands,
+                        area.width as usize,
+                        area.height as usize,
+                        animate,
+                    );
+                    self.render_808_visual_lines(frame, area, lines);
+                }
+                RenderMode808::Oscilloscope => {
                     self.render_808_led_columns(frame, area, &bands);
                 }
             }
@@ -502,6 +607,17 @@ impl App {
                 let bands = self.vis.analyze(&samples);
                 self.render_808_led_columns(frame, area, &bands);
             }
+            RenderMode808::Retro => {
+                let bands = self.vis.analyze(&samples);
+                let animate = self.player.is_playing() && !self.player.is_paused();
+                let lines = self.vis.render_retro(
+                    &bands,
+                    area.width as usize,
+                    area.height as usize,
+                    animate,
+                );
+                self.render_808_visual_lines(frame, area, lines);
+            }
             RenderMode808::Oscilloscope => {
                 let lines =
                     self.vis
@@ -517,6 +633,7 @@ impl App {
         area: Rect,
         lines: Vec<super::visualizer::SpectrumLine>,
     ) {
+        let colors = self.colors_808();
         for (row, spec_line) in lines.iter().enumerate() {
             if row >= area.height as usize {
                 break;
@@ -524,7 +641,7 @@ impl App {
             let spans: Vec<Span> = spec_line
                 .segments
                 .iter()
-                .map(|seg| Span::styled(&seg.text, self.palette.spectrum_style(seg.row_bottom)))
+                .map(|seg| Span::styled(&seg.text, spectrum_style_808(seg, colors)))
                 .collect();
 
             let y = area.y + row as u16;
@@ -534,6 +651,7 @@ impl App {
     }
 
     fn render_808_led_columns(&self, frame: &mut Frame, area: Rect, bands: &[f64; 10]) {
+        let colors = self.colors_808();
         const HEIGHT: usize = 5;
 
         for row in 0..HEIGHT {
@@ -548,13 +666,13 @@ impl App {
 
             for &level in bands.iter() {
                 let color = if row_bottom >= 0.8 {
-                    C808_RED
+                    colors.red
                 } else if row_bottom >= 0.6 {
-                    C808_ORANGE
+                    colors.orange
                 } else if row_bottom >= 0.3 {
-                    C808_AMBER
+                    colors.amber
                 } else {
-                    C808_YELLOW
+                    colors.yellow
                 };
 
                 let block = if level >= row_top {
@@ -579,6 +697,7 @@ impl App {
     }
 
     fn render_808_playlist(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
             let text = if self.player.is_music_app() {
@@ -586,7 +705,7 @@ impl App {
             } else {
                 "  No tracks loaded"
             };
-            let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
+            let line = Line::from(Span::styled(text, Style::default().fg(colors.dim)));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -613,18 +732,18 @@ impl App {
             }
 
             let mut prefix = "   ";
-            let mut style = Style::default().fg(C808_GREY);
+            let mut style = Style::default().fg(colors.grey);
 
             if i == current_idx && self.player.is_playing() {
                 prefix = " ► ";
                 style = Style::default()
-                    .fg(C808_ORANGE)
+                    .fg(colors.orange)
                     .add_modifier(Modifier::BOLD);
             }
 
             if self.focus == Focus::Playlist && i == self.pl_cursor {
                 style = Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD);
             }
 
@@ -648,7 +767,9 @@ impl App {
             if qp > 0 {
                 spans.push(Span::styled(
                     format!(" [Q{qp}]"),
-                    Style::default().fg(C808_AMBER).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(colors.amber)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 
@@ -659,6 +780,7 @@ impl App {
     }
 
     fn render_808_provider(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         if self.prov_loading {
             let name = self.provider_name();
             let target = if self.apple_music_showing_tracks() {
@@ -668,7 +790,7 @@ impl App {
             };
             let line = Line::from(Span::styled(
                 format!("  Loading {name} {target}..."),
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -678,7 +800,7 @@ impl App {
             if self.apple_music_tracks.is_empty() {
                 let line = Line::from(Span::styled(
                     "  No tracks found",
-                    Style::default().fg(C808_DIM),
+                    Style::default().fg(colors.dim),
                 ));
                 frame.render_widget(Paragraph::new(line), area);
                 return;
@@ -696,10 +818,10 @@ impl App {
                 let track = &self.apple_music_tracks[i];
                 let style = if i == self.prov_cursor {
                     Style::default()
-                        .fg(C808_YELLOW)
+                        .fg(colors.yellow)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(C808_GREY)
+                    Style::default().fg(colors.grey)
                 };
                 let prefix = if i == self.prov_cursor {
                     " ► "
@@ -721,7 +843,7 @@ impl App {
         if self.provider_lists.is_empty() {
             let line = Line::from(Span::styled(
                 "  No playlists found",
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -739,10 +861,10 @@ impl App {
             let pl = &self.provider_lists[i];
             let style = if i == self.prov_cursor {
                 Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(C808_GREY)
+                Style::default().fg(colors.grey)
             };
             let prefix = if i == self.prov_cursor {
                 " ► "
@@ -759,10 +881,11 @@ impl App {
     }
 
     fn render_808_browser(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let Some(explorer) = self.explorer.as_ref() else {
             let line = Line::from(Span::styled(
                 "  Press [L] to browse local playlists",
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -771,7 +894,7 @@ impl App {
         if area.height < 2 {
             let line = Line::from(Span::styled(
                 explorer.header_text(),
-                Style::default().fg(C808_GREY),
+                Style::default().fg(colors.grey),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -783,19 +906,20 @@ impl App {
             .split(area);
         let header = Line::from(Span::styled(
             explorer.header_text(),
-            Style::default().fg(C808_GREY),
+            Style::default().fg(colors.grey),
         ));
         frame.render_widget(Paragraph::new(header), chunks[0]);
         frame.render_widget_ref(explorer.widget(), chunks[1]);
     }
 
     fn render_808_search(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         let mut lines = vec![Line::from(vec![
-            Span::styled(" / ", Style::default().fg(C808_YELLOW)),
-            Span::styled(&self.search_query, Style::default().fg(C808_GREY)),
+            Span::styled(" / ", Style::default().fg(colors.yellow)),
+            Span::styled(&self.search_query, Style::default().fg(colors.grey)),
             Span::styled(
                 format!("  ({} found)", self.search_results.len()),
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ),
         ])];
 
@@ -821,10 +945,10 @@ impl App {
 
             let style = if j == self.search_cursor {
                 Style::default()
-                    .fg(C808_YELLOW)
+                    .fg(colors.yellow)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(C808_GREY)
+                Style::default().fg(colors.grey)
             };
 
             lines.push(Line::from(Span::styled(
@@ -837,10 +961,11 @@ impl App {
     }
 
     fn render_808_help(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         if self.command_mode {
             let line = Line::from(Span::styled(
                 format!(" : {}  [Enter]RUN [Esc]CANCEL", self.command_input),
-                Style::default().fg(C808_GREY),
+                Style::default().fg(colors.grey),
             ));
             frame.render_widget(Paragraph::new(line), area);
             return;
@@ -866,7 +991,7 @@ impl App {
                 .map(|(key, action)| format!("[{key}]{action}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let line = Line::from(Span::styled(text, Style::default().fg(C808_DIM)));
+            let line = Line::from(Span::styled(text, Style::default().fg(colors.dim)));
             frame.render_widget(Paragraph::new(line), area);
             return;
         }
@@ -889,17 +1014,17 @@ impl App {
                 used += 1;
             }
 
-            let pad_color = step_pad_color(i);
+            let pad_color = step_pad_color(i, colors);
             key_spans.push(Span::styled(
                 format!("{:^CELL_W$}", key),
                 Style::default()
-                    .fg(C808_BLACK)
+                    .fg(colors.black)
                     .bg(pad_color)
                     .add_modifier(Modifier::BOLD),
             ));
             action_spans.push(Span::styled(
                 format!("{:^CELL_W$}", action),
-                Style::default().fg(C808_DIM),
+                Style::default().fg(colors.dim),
             ));
             used += CELL_W as u16;
         }
@@ -909,22 +1034,23 @@ impl App {
     }
 
     fn render_808_status_line(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
         if self.command_mode {
             let line = Line::from(Span::styled(
                 format!(" :{}_", self.command_input),
-                Style::default().fg(C808_YELLOW),
+                Style::default().fg(colors.yellow),
             ));
             frame.render_widget(Paragraph::new(line), area);
         } else if let Some(ref err) = self.err {
             let line = Line::from(Span::styled(
                 format!(" ERR: {err}"),
-                Style::default().fg(C808_RED),
+                Style::default().fg(colors.red),
             ));
             frame.render_widget(Paragraph::new(line), area);
         } else if !self.save_msg.is_empty() {
             let line = Line::from(Span::styled(
                 format!(" {}", self.save_msg),
-                Style::default().fg(C808_ORANGE),
+                Style::default().fg(colors.orange),
             ));
             frame.render_widget(Paragraph::new(line), area);
         }
@@ -935,7 +1061,14 @@ impl App {
 ///
 /// `value` is normalized 0.0-1.0.
 /// The knob arc spans from 210deg (min) to -30deg (max), clockwise.
-fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected: bool) {
+fn render_knob(
+    frame: &mut Frame,
+    area: Rect,
+    value: f64,
+    label: &str,
+    selected: bool,
+    colors: Classic808Colors,
+) {
     if area.width < 4 || area.height < 3 {
         return;
     }
@@ -963,8 +1096,12 @@ fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected:
     let sweep = start_angle - end_angle; // positive, ~240 degrees
     let val_angle = start_angle - value * sweep;
 
-    let accent = if selected { C808_YELLOW } else { C808_GREY };
-    let fill_color = if selected { C808_ORANGE } else { C808_AMBER };
+    let accent = if selected { colors.yellow } else { colors.grey };
+    let fill_color = if selected {
+        colors.orange
+    } else {
+        colors.amber
+    };
 
     let canvas = Canvas::default()
         .x_bounds([-5.0, 5.0])
@@ -978,7 +1115,7 @@ fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected:
                 let angle = start_angle - t * sweep;
                 let px = cx + radius * angle.cos();
                 let py = cy + radius * angle.sin();
-                ctx.print(px, py, Span::styled("·", Style::default().fg(C808_DIM)));
+                ctx.print(px, py, Span::styled("·", Style::default().fg(colors.dim)));
             }
 
             // Active arc — draw from min to current value
@@ -1009,10 +1146,10 @@ fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected:
     // Label below knob
     let label_style = if selected {
         Style::default()
-            .fg(C808_YELLOW)
+            .fg(colors.yellow)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(C808_GREY)
+        Style::default().fg(colors.grey)
     };
 
     let label_line = Line::from(Span::styled(label, label_style));
@@ -1022,13 +1159,13 @@ fn render_knob(frame: &mut Frame, area: Rect, value: f64, label: &str, selected:
     );
 }
 
-fn step_pad_color(idx: usize) -> Color {
+fn step_pad_color(idx: usize, colors: Classic808Colors) -> Color {
     match idx {
-        0 | 1 => C808_RED,
-        2 | 3 => C808_ORANGE,
-        4 | 5 => C808_AMBER,
-        6 | 7 => C808_YELLOW,
-        _ => C808_IVORY,
+        0 | 1 => colors.red,
+        2 | 3 => colors.orange,
+        4 | 5 => colors.amber,
+        6 | 7 => colors.yellow,
+        _ => colors.ivory,
     }
 }
 
@@ -1038,6 +1175,7 @@ fn render_mode_808(mode: VisMode) -> RenderMode808 {
         VisMode::Bars => RenderMode808::HorizontalBars,
         VisMode::VBars => RenderMode808::LedColumns,
         VisMode::Bricks => RenderMode808::LedColumns,
+        VisMode::Retro => RenderMode808::Retro,
         VisMode::Scope => RenderMode808::Oscilloscope,
     }
 }
@@ -1048,20 +1186,65 @@ fn vis_mode_label(mode: VisMode) -> &'static str {
         VisMode::BarsGap => "SOLID",
         VisMode::VBars => "VBAR",
         VisMode::Bricks => "LEDS",
+        VisMode::Retro => "RETRO",
         VisMode::Scope => "SCOPE",
     }
 }
 
-fn make_808_border_effect() -> tachyonfx::Effect {
+fn retro_grid_color_808(row_bottom: f64, colors: Classic808Colors) -> Color {
+    if row_bottom >= 0.72 {
+        colors.red
+    } else if row_bottom >= 0.45 {
+        colors.orange
+    } else if row_bottom >= 0.18 {
+        colors.amber
+    } else {
+        colors.deep_amber
+    }
+}
+
+fn retro_wave_color_808(row_bottom: f64, colors: Classic808Colors) -> Color {
+    if row_bottom >= 0.72 {
+        colors.hot_pink
+    } else if row_bottom >= 0.4 {
+        colors.sunset_orange
+    } else {
+        colors.orange
+    }
+}
+
+fn spectrum_style_808(seg: &SpectrumSegment, colors: Classic808Colors) -> Style {
+    match seg.kind {
+        SpectrumSegmentKind::Gradient => {
+            let color = if seg.row_bottom >= 0.6 {
+                colors.red
+            } else if seg.row_bottom >= 0.3 {
+                colors.amber
+            } else {
+                colors.yellow
+            };
+            Style::default().fg(color)
+        }
+        SpectrumSegmentKind::RetroGrid => {
+            Style::default().fg(retro_grid_color_808(seg.row_bottom, colors))
+        }
+        SpectrumSegmentKind::RetroSun => Style::default().fg(colors.yellow),
+        SpectrumSegmentKind::RetroWave => Style::default()
+            .fg(retro_wave_color_808(seg.row_bottom, colors))
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn make_808_border_effect(colors: Classic808Colors) -> tachyonfx::Effect {
     fx::repeating(fx::sequence(&[
-        fx::fade_to_fg(C808_AMBER, (700, Interpolation::SineInOut)),
-        fx::fade_to_fg(C808_YELLOW, (500, Interpolation::SineInOut)),
-        fx::fade_to_fg(C808_DIM, (900, Interpolation::SineInOut)),
+        fx::fade_to_fg(colors.amber, (700, Interpolation::SineInOut)),
+        fx::fade_to_fg(colors.yellow, (500, Interpolation::SineInOut)),
+        fx::fade_to_fg(colors.dim, (900, Interpolation::SineInOut)),
     ]))
     .with_filter(CellFilter::Outer(Margin::new(1, 1)))
 }
 
-fn make_808_header_effect() -> tachyonfx::Effect {
+fn make_808_header_effect(_colors: Classic808Colors) -> tachyonfx::Effect {
     fx::repeating(fx::hsl_shift_fg(
         [18.0, 0.0, 0.0],
         (1400, Interpolation::SineInOut),
@@ -1069,10 +1252,10 @@ fn make_808_header_effect() -> tachyonfx::Effect {
     .with_filter(CellFilter::Text)
 }
 
-fn make_808_focus_effect() -> tachyonfx::Effect {
+fn make_808_focus_effect(colors: Classic808Colors) -> tachyonfx::Effect {
     fx::repeating(fx::sequence(&[
-        fx::fade_to_fg(C808_YELLOW, (280, Interpolation::QuadOut)),
-        fx::fade_to_fg(C808_DIM, (600, Interpolation::QuadIn)),
+        fx::fade_to_fg(colors.yellow, (280, Interpolation::QuadOut)),
+        fx::fade_to_fg(colors.dim, (600, Interpolation::QuadIn)),
     ]))
     .with_filter(CellFilter::Outer(Margin::new(1, 1)))
 }
@@ -1282,14 +1465,20 @@ mod tests {
 
     #[test]
     fn browser_focus_reserves_base_view_browser_height() {
-        assert_eq!(content_height_808(true, 40), 31);
+        assert_eq!(content_height_808(true, false, 40), 31);
         assert_eq!(browser_panel_min_height_808(true), 6);
     }
 
     #[test]
     fn non_browser_focus_keeps_standard_808_height() {
-        assert_eq!(content_height_808(false, 40), 28);
+        assert_eq!(content_height_808(false, false, 40), 28);
         assert_eq!(browser_panel_min_height_808(false), 3);
+    }
+
+    #[test]
+    fn retro_mode_reserves_more_vertical_space() {
+        assert_eq!(content_height_808(false, true, 40), 31);
+        assert_eq!(content_height_808(true, true, 40), 34);
     }
 
     #[test]
@@ -1304,6 +1493,7 @@ mod tests {
         );
         assert_eq!(render_mode_808(VisMode::VBars), RenderMode808::LedColumns);
         assert_eq!(render_mode_808(VisMode::Bricks), RenderMode808::LedColumns);
+        assert_eq!(render_mode_808(VisMode::Retro), RenderMode808::Retro);
         assert_eq!(render_mode_808(VisMode::Scope), RenderMode808::Oscilloscope);
     }
 
@@ -1313,7 +1503,89 @@ mod tests {
         assert_eq!(vis_mode_label(VisMode::BarsGap), "SOLID");
         assert_eq!(vis_mode_label(VisMode::VBars), "VBAR");
         assert_eq!(vis_mode_label(VisMode::Bricks), "LEDS");
+        assert_eq!(vis_mode_label(VisMode::Retro), "RETRO");
         assert_eq!(vis_mode_label(VisMode::Scope), "SCOPE");
+    }
+
+    #[test]
+    fn retro_grid_uses_warm_gradient_instead_of_flat_grey() {
+        let colors = Classic808Colors::classic();
+        let hot_horizon = SpectrumSegment {
+            text: "⣿".to_string(),
+            row_bottom: 0.8,
+            kind: SpectrumSegmentKind::RetroGrid,
+        };
+        let deep_floor = SpectrumSegment {
+            text: "⣿".to_string(),
+            row_bottom: 0.1,
+            kind: SpectrumSegmentKind::RetroGrid,
+        };
+
+        assert_eq!(spectrum_style_808(&hot_horizon, colors).fg, Some(C808_RED));
+        assert_eq!(
+            spectrum_style_808(&deep_floor, colors).fg,
+            Some(C808_DEEP_AMBER)
+        );
+    }
+
+    #[test]
+    fn retro_wave_uses_synthwave_hot_pink_to_orange_ramp() {
+        let colors = Classic808Colors::classic();
+        let crest = SpectrumSegment {
+            text: "⣿".to_string(),
+            row_bottom: 0.85,
+            kind: SpectrumSegmentKind::RetroWave,
+        };
+        let mid_wave = SpectrumSegment {
+            text: "⣿".to_string(),
+            row_bottom: 0.55,
+            kind: SpectrumSegmentKind::RetroWave,
+        };
+        let lower_wave = SpectrumSegment {
+            text: "⣿".to_string(),
+            row_bottom: 0.25,
+            kind: SpectrumSegmentKind::RetroWave,
+        };
+
+        assert_eq!(spectrum_style_808(&crest, colors).fg, Some(C808_HOT_PINK));
+        assert_eq!(
+            spectrum_style_808(&mid_wave, colors).fg,
+            Some(C808_SUNSET_ORANGE)
+        );
+        assert_eq!(
+            spectrum_style_808(&lower_wave, colors).fg,
+            Some(C808_ORANGE)
+        );
+        assert!(
+            spectrum_style_808(&crest, colors)
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn themed_808_colors_follow_palette() {
+        let palette = Palette {
+            title: Color::Rgb(0x11, 0x22, 0x33),
+            text: Color::Rgb(0xE0, 0xE1, 0xE2),
+            dim: Color::Rgb(0x44, 0x55, 0x66),
+            accent: Color::Rgb(0xAA, 0xBB, 0xCC),
+            playing: Color::Rgb(0x10, 0x20, 0x30),
+            seek_bar: Color::Rgb(0x40, 0x50, 0x60),
+            volume: Color::Rgb(0x70, 0x80, 0x90),
+            error: Color::Rgb(0x91, 0x92, 0x93),
+            spectrum_low: Color::Rgb(0x12, 0x13, 0x14),
+            spectrum_mid: Color::Rgb(0x21, 0x22, 0x23),
+            spectrum_high: Color::Rgb(0x31, 0x32, 0x33),
+        };
+
+        let themed = Classic808Colors::themed(&palette);
+        assert_eq!(themed.red, palette.error);
+        assert_eq!(themed.orange, palette.playing);
+        assert_eq!(themed.amber, palette.seek_bar);
+        assert_eq!(themed.yellow, palette.accent);
+        assert_eq!(themed.grey, palette.text);
+        assert_eq!(themed.dim, palette.dim);
     }
 
     #[test]
