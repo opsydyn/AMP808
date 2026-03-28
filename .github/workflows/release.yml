@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: amp808
+
+jobs:
+  create-draft-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.APP_NAME }} ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+
+  build-release:
+    name: Build release (${{ matrix.label }})
+    needs: create-draft-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+            artifact_name: amp808-${{ github.ref_name }}-linux-x86_64.tar.gz
+            bin_name: amp808
+          - os: macos-latest
+            label: macos
+            artifact_name: amp808-${{ github.ref_name }}-macos-universal.tar.gz
+            bin_name: amp808
+          - os: windows-latest
+            label: windows
+            artifact_name: amp808-${{ github.ref_name }}-windows-x86_64.zip
+            bin_name: amp808.exe
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux audio dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate tests (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --quiet --locked
+
+      - name: Run release gate clippy (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build release (macOS universal)
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build release
+        if: matrix.os != 'macos-latest'
+        run: cargo build --release --locked
+
+      - name: Package release (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p dist/${{ env.APP_NAME }}
+          cp target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/
+          cp README.md dist/${{ env.APP_NAME }}/
+          tar -C dist -czf dist/${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+
+      - name: Package release (macOS universal)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p dist/${{ env.APP_NAME }}
+          lipo -create \
+            target/aarch64-apple-darwin/release/${{ matrix.bin_name }} \
+            target/x86_64-apple-darwin/release/${{ matrix.bin_name }} \
+            -output dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}
+          cp README.md dist/${{ env.APP_NAME }}/
+          tar -C dist -czf dist/${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+
+      - name: Verify universal binary
+        if: matrix.os == 'macos-latest'
+        run: lipo -info dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}
+
+      - name: Package release (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/${{ env.APP_NAME }} -Force | Out-Null
+          Copy-Item target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/${{ matrix.bin_name }}
+          Copy-Item README.md dist/${{ env.APP_NAME }}/README.md
+          Compress-Archive -Path dist/${{ env.APP_NAME }}/* -DestinationPath dist/${{ matrix.artifact_name }} -Force
+
+      - name: Upload asset to draft release
+        run: gh release upload ${{ github.ref_name }} dist/${{ matrix.artifact_name }} --clobber --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    name: Publish release
+    needs: build-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Publish release
+        run: gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release is published
+        run: gh release view ${{ github.ref_name }} --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
