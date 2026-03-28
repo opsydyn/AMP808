@@ -98,14 +98,6 @@ impl BpmState {
         }
     }
 
-    pub fn machine_text(&self) -> String {
-        match self.display {
-            BpmDisplayState::Estimating => "TMP:EST".to_string(),
-            BpmDisplayState::Locked(bpm) => format!("TMP:{bpm}"),
-            BpmDisplayState::Unavailable => "TMP:--".to_string(),
-        }
-    }
-
     fn clear_estimation(&mut self) {
         self.envelope.clear();
         self.prev_frame_energy = 0.0;
@@ -261,9 +253,6 @@ mod tests {
         assert_eq!(BpmState::estimating().standard_text(), "[BPM EST]");
         assert_eq!(BpmState::locked(128).standard_text(), "[128 BPM]");
         assert_eq!(BpmState::unavailable().standard_text(), "[BPM --]");
-        assert_eq!(BpmState::estimating().machine_text(), "TMP:EST");
-        assert_eq!(BpmState::locked(128).machine_text(), "TMP:128");
-        assert_eq!(BpmState::unavailable().machine_text(), "TMP:--");
     }
 
     #[test]
@@ -310,14 +299,14 @@ mod tests {
         let mut state = BpmState::estimating();
         let samples = synthetic_click_track(120.0, 44_100, 12.0);
         feed_track(&mut state, &samples, 44_100);
-        let locked = state.machine_text();
+        let locked = state.standard_text();
 
         let more_samples = synthetic_click_track(90.0, 44_100, 4.0);
         for chunk in more_samples.chunks(2048) {
             state.update(chunk, 44_100, true, true);
         }
 
-        assert_eq!(state.machine_text(), locked);
+        assert_eq!(state.standard_text(), locked);
     }
 
     #[test]
@@ -345,7 +334,7 @@ mod tests {
             let mut state = BpmState::estimating();
             let samples = read_all_samples(path);
             feed_track(&mut state, &samples, 44_100);
-            eprintln!("{path}: {}", state.machine_text());
+            eprintln!("{path}: {}", state.standard_text());
             assert!(matches!(
                 state.display,
                 BpmDisplayState::Locked(_) | BpmDisplayState::Estimating

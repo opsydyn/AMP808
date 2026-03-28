@@ -12,6 +12,7 @@ use tachyonfx::{EffectRenderer, Interpolation, fx};
 use tui_big_text::{BigText, PixelSize};
 
 use super::App;
+use super::bpm::BpmDisplayState;
 use super::keys::Focus;
 use super::styles::Palette;
 use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
@@ -64,12 +65,17 @@ struct PanelTraceConfig {
     tail_ratio: f32,
     head_mix: f32,
     tail_mix: f32,
+    min_tail_cells: f32,
+    hotspot_gamma: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct HeaderAccentConfig {
     cycle_ms: u32,
     amplitude: f32,
+    wave_offset_scale: f32,
+    lift_floor: f32,
+    accent_gain: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,91 +95,343 @@ struct HeaderAccentState {
     config: HeaderAccentConfig,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MotionWeights808 {
+    playing: f32,
+    buffering: f32,
+    paused: f32,
+    stopped: f32,
+    error: f32,
+    scope: f32,
+    retro: f32,
+    bars: f32,
+    playlist: f32,
+    eq: f32,
+    provider: f32,
+    browser: f32,
+}
+
+impl MotionWeights808 {
+    fn transport(self, transport: ChromeTransportState) -> f32 {
+        match transport {
+            ChromeTransportState::Playing => self.playing,
+            ChromeTransportState::Buffering => self.buffering,
+            ChromeTransportState::Paused => self.paused,
+            ChromeTransportState::Stopped => self.stopped,
+            ChromeTransportState::Error => self.error,
+        }
+    }
+
+    fn mode(self, mode: VisMode) -> f32 {
+        match mode {
+            VisMode::Scope => self.scope,
+            VisMode::Retro => self.retro,
+            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars,
+        }
+    }
+
+    fn focus(self, focus: Focus) -> f32 {
+        match focus {
+            Focus::Playlist => self.playlist,
+            Focus::EQ => self.eq,
+            Focus::Provider => self.provider,
+            Focus::Browser => self.browser,
+        }
+    }
+
+    fn intensity(self, transport: ChromeTransportState, mode: VisMode, focus: Focus) -> f32 {
+        self.transport(transport) * self.mode(mode) * self.focus(focus)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransportFocusWeights808 {
+    playing: f32,
+    buffering: f32,
+    paused: f32,
+    stopped: f32,
+    error: f32,
+    playlist: f32,
+    eq: f32,
+    provider: f32,
+    browser: f32,
+}
+
+impl TransportFocusWeights808 {
+    fn transport(self, transport: ChromeTransportState) -> f32 {
+        match transport {
+            ChromeTransportState::Playing => self.playing,
+            ChromeTransportState::Buffering => self.buffering,
+            ChromeTransportState::Paused => self.paused,
+            ChromeTransportState::Stopped => self.stopped,
+            ChromeTransportState::Error => self.error,
+        }
+    }
+
+    fn focus(self, focus: Focus) -> f32 {
+        match focus {
+            Focus::Playlist => self.playlist,
+            Focus::EQ => self.eq,
+            Focus::Provider => self.provider,
+            Focus::Browser => self.browser,
+        }
+    }
+
+    fn strength(self, transport: ChromeTransportState, focus: Focus) -> f32 {
+        self.transport(transport) * self.focus(focus)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DurationRamp808 {
+    base_ms: f32,
+    range_ms: f32,
+}
+
+impl DurationRamp808 {
+    fn descending_ms(self, value: f32) -> u32 {
+        (self.base_ms - value * self.range_ms).round() as u32
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ValueRamp808 {
+    base: f32,
+    range: f32,
+}
+
+impl ValueRamp808 {
+    fn at(self, value: f32) -> f32 {
+        self.base + value * self.range
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelTraceTuning808 {
+    disable_in_browser_focus: bool,
+    weights: MotionWeights808,
+    activation_threshold: f32,
+    cycle: DurationRamp808,
+    tail_ratio: ValueRamp808,
+    head_mix: ValueRamp808,
+    tail_mix: ValueRamp808,
+    min_tail_cells: f32,
+    hotspot_gamma: f32,
+}
+
+impl PanelTraceTuning808 {
+    fn intensity(self, chrome: ChromeFxSignature) -> f32 {
+        self.weights
+            .intensity(chrome.transport, chrome.mode, chrome.focus)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeaderAccentTuning808 {
+    weights: MotionWeights808,
+    activation_threshold: f32,
+    amplitude_cap: f32,
+    cycle: DurationRamp808,
+    wave_offset_scale: f32,
+    lift_floor: f32,
+    accent_gain: f32,
+}
+
+impl HeaderAccentTuning808 {
+    fn amplitude(self, chrome: ChromeFxSignature) -> f32 {
+        self.weights
+            .intensity(chrome.transport, chrome.mode, chrome.focus)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeekPulseTuning808 {
+    weights: MotionWeights808,
+    strength_cap: f32,
+    scope_period: f32,
+    retro_period: f32,
+    bars_period: f32,
+}
+
+impl SeekPulseTuning808 {
+    fn strength(self, chrome: ChromeFxSignature) -> f32 {
+        self.weights
+            .intensity(chrome.transport, chrome.mode, chrome.focus)
+    }
+
+    fn period(self, mode: VisMode) -> f32 {
+        match mode {
+            VisMode::Scope => self.scope_period,
+            VisMode::Retro => self.retro_period,
+            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars_period,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RowLiftTuning808 {
+    weights: TransportFocusWeights808,
+    strength_cap: f32,
+}
+
+impl RowLiftTuning808 {
+    fn strength(self, chrome: ChromeFxSignature) -> f32 {
+        self.weights.strength(chrome.transport, chrome.focus)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChromeMotionTuning808 {
+    panel_trace: PanelTraceTuning808,
+    header_accent: HeaderAccentTuning808,
+    seek_pulse: SeekPulseTuning808,
+    row_lift: RowLiftTuning808,
+}
+
+const CHROME_MOTION_808: ChromeMotionTuning808 = ChromeMotionTuning808 {
+    panel_trace: PanelTraceTuning808 {
+        disable_in_browser_focus: true,
+        weights: MotionWeights808 {
+            playing: 1.0,
+            buffering: 0.78,
+            paused: 0.42,
+            stopped: 0.18,
+            error: 0.0,
+            scope: 1.0,
+            retro: 0.52,
+            bars: 0.74,
+            playlist: 0.68,
+            eq: 0.82,
+            provider: 0.38,
+            browser: 0.22,
+        },
+        activation_threshold: 0.12,
+        cycle: DurationRamp808 {
+            base_ms: 9800.0,
+            range_ms: 3600.0,
+        },
+        tail_ratio: ValueRamp808 {
+            base: 0.12,
+            range: 0.08,
+        },
+        head_mix: ValueRamp808 {
+            base: 0.36,
+            range: 0.38,
+        },
+        tail_mix: ValueRamp808 {
+            base: 0.14,
+            range: 0.16,
+        },
+        min_tail_cells: 4.0,
+        hotspot_gamma: 1.7,
+    },
+    header_accent: HeaderAccentTuning808 {
+        weights: MotionWeights808 {
+            playing: 0.34,
+            buffering: 0.28,
+            paused: 0.18,
+            stopped: 0.08,
+            error: 0.0,
+            scope: 1.0,
+            retro: 0.58,
+            bars: 0.78,
+            playlist: 1.0,
+            eq: 0.92,
+            provider: 0.55,
+            browser: 0.18,
+        },
+        activation_threshold: 0.07,
+        amplitude_cap: 0.34,
+        cycle: DurationRamp808 {
+            base_ms: 7600.0,
+            range_ms: 1800.0,
+        },
+        wave_offset_scale: 1.35,
+        lift_floor: 0.35,
+        accent_gain: 0.82,
+    },
+    seek_pulse: SeekPulseTuning808 {
+        weights: MotionWeights808 {
+            playing: 0.24,
+            buffering: 0.18,
+            paused: 0.08,
+            stopped: 0.0,
+            error: 0.0,
+            scope: 1.0,
+            retro: 0.55,
+            bars: 0.8,
+            playlist: 1.0,
+            eq: 0.88,
+            provider: 0.45,
+            browser: 0.16,
+        },
+        strength_cap: 0.26,
+        scope_period: 18.0,
+        retro_period: 28.0,
+        bars_period: 22.0,
+    },
+    row_lift: RowLiftTuning808 {
+        weights: TransportFocusWeights808 {
+            playing: 1.0,
+            buffering: 1.0,
+            paused: 0.82,
+            stopped: 0.72,
+            error: 0.5,
+            playlist: 0.16,
+            eq: 0.0,
+            provider: 0.14,
+            browser: 0.0,
+        },
+        strength_cap: 0.18,
+    },
+};
+
 impl ChromeFxSignature {
     fn panel_trace_config(self) -> Option<PanelTraceConfig> {
-        let transport = match self.transport {
-            ChromeTransportState::Playing => 1.0_f32,
-            ChromeTransportState::Buffering => 0.78_f32,
-            ChromeTransportState::Paused => 0.42_f32,
-            ChromeTransportState::Stopped => 0.18_f32,
-            ChromeTransportState::Error => 0.0_f32,
-        };
-        let mode = match self.mode {
-            VisMode::Scope => 1.0_f32,
-            VisMode::Retro => 0.52_f32,
-            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.74_f32,
-        };
-        let focus = match self.focus {
-            Focus::EQ => 0.82_f32,
-            Focus::Playlist => 0.68_f32,
-            Focus::Provider => 0.38_f32,
-            Focus::Browser => 0.22_f32,
-        };
-        let intensity = (transport * mode * focus).clamp(0.0_f32, 1.0_f32);
-        if intensity < 0.12 {
+        let tuning = CHROME_MOTION_808.panel_trace;
+        if tuning.disable_in_browser_focus && self.focus == Focus::Browser {
+            return None;
+        }
+
+        let intensity = tuning.intensity(self).clamp(0.0, 1.0);
+        if intensity < tuning.activation_threshold {
             return None;
         }
 
         Some(PanelTraceConfig {
-            cycle_ms: (9800.0_f32 - intensity * 3600.0_f32).round() as u32,
-            tail_ratio: 0.12_f32 + intensity * 0.08_f32,
-            head_mix: 0.36_f32 + intensity * 0.38_f32,
-            tail_mix: 0.14_f32 + intensity * 0.16_f32,
+            cycle_ms: tuning.cycle.descending_ms(intensity),
+            tail_ratio: tuning.tail_ratio.at(intensity),
+            head_mix: tuning.head_mix.at(intensity),
+            tail_mix: tuning.tail_mix.at(intensity),
+            min_tail_cells: tuning.min_tail_cells,
+            hotspot_gamma: tuning.hotspot_gamma,
         })
     }
 
     fn header_accent_config(self) -> Option<HeaderAccentConfig> {
-        let transport = match self.transport {
-            ChromeTransportState::Playing => 0.34_f32,
-            ChromeTransportState::Buffering => 0.28_f32,
-            ChromeTransportState::Paused => 0.18_f32,
-            ChromeTransportState::Stopped => 0.08_f32,
-            ChromeTransportState::Error => 0.0_f32,
-        };
-        let mode = match self.mode {
-            VisMode::Scope => 1.0_f32,
-            VisMode::Retro => 0.58_f32,
-            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.78_f32,
-        };
-        let amplitude = (transport * mode).clamp(0.0_f32, 0.34_f32);
-        if amplitude < 0.07 {
+        let tuning = CHROME_MOTION_808.header_accent;
+        let amplitude = tuning.amplitude(self).clamp(0.0, tuning.amplitude_cap);
+        if amplitude < tuning.activation_threshold {
             return None;
         }
 
         Some(HeaderAccentConfig {
-            cycle_ms: (7600.0_f32 - amplitude * 1800.0_f32).round() as u32,
+            cycle_ms: tuning.cycle.descending_ms(amplitude),
             amplitude,
+            wave_offset_scale: tuning.wave_offset_scale,
+            lift_floor: tuning.lift_floor,
+            accent_gain: tuning.accent_gain,
         })
     }
 
     fn seek_pulse_strength(self) -> f32 {
-        let transport = match self.transport {
-            ChromeTransportState::Playing => 0.24_f32,
-            ChromeTransportState::Buffering => 0.18_f32,
-            ChromeTransportState::Paused => 0.08_f32,
-            ChromeTransportState::Stopped | ChromeTransportState::Error => 0.0_f32,
-        };
-        let mode = match self.mode {
-            VisMode::Scope => 1.0_f32,
-            VisMode::Retro => 0.55_f32,
-            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.8_f32,
-        };
-        (transport * mode).clamp(0.0_f32, 0.26_f32)
+        let tuning = CHROME_MOTION_808.seek_pulse;
+        tuning.strength(self).clamp(0.0, tuning.strength_cap)
     }
 
     fn row_lift_strength(self) -> f32 {
-        let base = match self.focus {
-            Focus::Playlist => 0.16_f32,
-            Focus::Provider => 0.14_f32,
-            Focus::Browser | Focus::EQ => 0.0_f32,
-        };
-        let transport = match self.transport {
-            ChromeTransportState::Playing | ChromeTransportState::Buffering => 1.0_f32,
-            ChromeTransportState::Paused => 0.82_f32,
-            ChromeTransportState::Stopped => 0.72_f32,
-            ChromeTransportState::Error => 0.5_f32,
-        };
-        (base * transport).clamp(0.0_f32, 0.18_f32)
+        let tuning = CHROME_MOTION_808.row_lift;
+        tuning.strength(self).clamp(0.0, tuning.strength_cap)
     }
 }
 
@@ -311,6 +569,48 @@ fn content_height_808(browser_focus: bool, retro_mode: bool, terminal_height: u1
 
 fn browser_panel_min_height_808(browser_focus: bool) -> u16 {
     if browser_focus { 6 } else { 3 }
+}
+
+fn playlist_source_label_808(
+    is_music_app: bool,
+    current_track: Option<&crate::playlist::Track>,
+) -> &'static str {
+    if is_music_app {
+        "MUSIC.APP"
+    } else if current_track.is_some_and(|track| track.stream) {
+        "STREAM"
+    } else {
+        "LOCAL"
+    }
+}
+
+fn focus_tag_label_808(
+    focus: Focus,
+    searching: bool,
+    playlist_is_queue: bool,
+    provider_name: &str,
+    showing_provider_tracks: bool,
+) -> String {
+    match focus {
+        Focus::EQ => "EQ".to_string(),
+        Focus::Playlist => {
+            if searching {
+                "SEARCH".to_string()
+            } else if playlist_is_queue {
+                "QUEUE".to_string()
+            } else {
+                "PLAYLIST".to_string()
+            }
+        }
+        Focus::Provider => {
+            if showing_provider_tracks {
+                "TRACKS".to_string()
+            } else {
+                provider_name.to_ascii_uppercase()
+            }
+        }
+        Focus::Browser => "BROWSER".to_string(),
+    }
 }
 
 impl App {
@@ -459,6 +759,8 @@ impl App {
         if let Some(effect) = self.fx_808_panel.as_mut() {
             frame.render_effect(effect, focus_area, tick);
         }
+
+        self.render_808_focus_tag(frame, focus_area);
     }
 
     fn ensure_808_effects(&mut self, chrome: ChromeFxSignature) {
@@ -468,6 +770,166 @@ impl App {
             self.fx_808_panel = make_808_panel_effect(colors, chrome);
             self.fx_808_signature = Some(chrome);
         }
+    }
+
+    fn render_808_centered_panel_lines(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        lines: Vec<Line<'static>>,
+    ) {
+        if area.height == 0 || lines.is_empty() {
+            return;
+        }
+
+        let visible = lines.len().min(area.height as usize);
+        let top_pad = area.height.saturating_sub(visible as u16) / 2;
+        for (idx, line) in lines.into_iter().take(visible).enumerate() {
+            let line_area = Rect::new(area.x, area.y + top_pad + idx as u16, area.width, 1);
+            frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), line_area);
+        }
+    }
+
+    fn render_808_playlist_placeholder(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
+        let lines = if self.player.is_music_app() {
+            vec![
+                Line::from(Span::styled(
+                    "SYSTEM PLAYER ACTIVE",
+                    Style::default()
+                        .fg(colors.grey)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Transport follows Music.app",
+                    Style::default().fg(colors.grey),
+                )),
+                Line::from(Span::styled(
+                    "SPACE PLAY   <> TRACK   TAB FOCUS",
+                    Style::default().fg(colors.dim),
+                )),
+            ]
+        } else {
+            vec![
+                Line::from(Span::styled(
+                    "READY FOR A SET",
+                    Style::default()
+                        .fg(colors.grey)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Load tracks, playlists, or a stream URL",
+                    Style::default().fg(colors.grey),
+                )),
+                Line::from(Span::styled(
+                    "L LOAD   : CMD   8 808",
+                    Style::default().fg(colors.dim),
+                )),
+            ]
+        };
+
+        self.render_808_centered_panel_lines(frame, area, lines);
+    }
+
+    fn render_808_playlist_overview(&self, frame: &mut Frame, area: Rect, track_count: usize) {
+        if area.height < 3 {
+            return;
+        }
+
+        let colors = self.colors_808();
+        let current_track = self.playlist.current().map(|(track, _)| track);
+        let source = playlist_source_label_808(self.player.is_music_app(), current_track);
+        let queue_len = self.playlist.queue_len();
+        let action_hint = if self.player.supports_local_playlist() {
+            "S SAVE   L LOAD   / FIND"
+        } else {
+            "SPACE PLAY   <> TRACK   V VIS"
+        };
+
+        let lines = vec![
+            Line::from(Span::styled(
+                "SET SUMMARY",
+                Style::default()
+                    .fg(colors.grey)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "TRACKS {:02}   QUEUE {:02}   {source}",
+                    track_count, queue_len
+                ),
+                Style::default().fg(colors.grey),
+            )),
+            Line::from(Span::styled(action_hint, Style::default().fg(colors.dim))),
+        ];
+
+        self.render_808_centered_panel_lines(frame, area, lines);
+    }
+
+    fn render_808_browser_placeholder(&self, frame: &mut Frame, area: Rect) {
+        let colors = self.colors_808();
+        let lines = vec![
+            Line::from(Span::styled(
+                "BROWSE PLAYLISTS",
+                Style::default()
+                    .fg(colors.grey)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                ".m3u / .m3u8 files from any folder",
+                Style::default().fg(colors.grey),
+            )),
+            Line::from(Span::styled(
+                "L OPEN   ESC RETURN",
+                Style::default().fg(colors.dim),
+            )),
+        ];
+
+        self.render_808_centered_panel_lines(frame, area, lines);
+    }
+
+    fn render_808_focus_tag(&self, frame: &mut Frame, area: Rect) {
+        if area.width < 10 || area.height < 2 {
+            return;
+        }
+
+        let colors = self.colors_808();
+        let raw_label = focus_tag_label_808(
+            self.focus,
+            self.searching,
+            self.player.is_music_app(),
+            &self.provider_name(),
+            self.apple_music_showing_tracks(),
+        );
+        let max_label_chars = area.width.saturating_sub(6) as usize;
+        if max_label_chars < 2 {
+            return;
+        }
+
+        let label = if raw_label.chars().count() > max_label_chars {
+            let mut clipped: String = raw_label
+                .chars()
+                .take(max_label_chars.saturating_sub(1))
+                .collect();
+            clipped.push('…');
+            clipped
+        } else {
+            raw_label
+        };
+
+        let tag_width = label.chars().count() as u16 + 4;
+        let tag_area = Rect::new(area.x.saturating_add(2), area.y, tag_width, 1);
+        let bracket = Style::default().fg(colors.grey);
+        let chip = Style::default()
+            .fg(colors.black)
+            .bg(colors.yellow)
+            .add_modifier(Modifier::BOLD);
+        let line = Line::from(vec![
+            Span::styled("┤", bracket),
+            Span::styled(format!(" {label} "), chip),
+            Span::styled("├", bracket),
+        ]);
+        frame.render_widget(Paragraph::new(line), tag_area);
     }
 
     fn render_808_header(&self, frame: &mut Frame, area: Rect) {
@@ -610,15 +1072,6 @@ impl App {
             self.player.is_paused(),
         );
 
-        let status_prefix = match status_label {
-            "BUFFERING" => "◌ BUFFERING",
-            "ERROR" => "! ERROR",
-            "PAUSED" => "⏸ PAUSED",
-            "PLAYING" if self.player.is_streaming() => "● PLAYING",
-            "PLAYING" => "▶ PLAYING",
-            _ => "■ STOPPED",
-        };
-
         let time_str = if is_stream && dur_secs == 0 {
             format!("{pos_min:02}:{pos_sec:02}/--:--")
         } else {
@@ -626,7 +1079,24 @@ impl App {
             let dur_sec = dur_secs % 60;
             format!("{pos_min:02}:{pos_sec:02}/{dur_min:02}:{dur_sec:02}")
         };
-        let max_name = (area.width as usize).saturating_sub(time_str.len() + 5);
+        let badge = chip_span_808(
+            transport_badge_text_808(chrome.transport, self.player.is_streaming()),
+            transport_badge_style_808(colors, chrome.transport),
+        );
+        let badge_width = badge.width() as u16;
+        let time_span = Span::styled(
+            time_str.clone(),
+            Style::default()
+                .fg(colors.grey)
+                .add_modifier(Modifier::BOLD),
+        );
+        let time_width = time_span.width() as u16;
+        let reserved = 1u16
+            .saturating_add(badge_width)
+            .saturating_add(1)
+            .saturating_add(time_width)
+            .saturating_add(1);
+        let max_name = area.width.saturating_sub(reserved) as usize;
         let display_name: String = if name.chars().count() > max_name {
             let mut s: String = name.chars().take(max_name.saturating_sub(1)).collect();
             s.push('…');
@@ -634,23 +1104,24 @@ impl App {
         } else {
             name
         };
-
-        let transport_color = transport_accent_color_808(colors, chrome.transport);
-        let mut transport_style = Style::default().fg(transport_color);
-        if matches!(
-            chrome.transport,
-            ChromeTransportState::Playing | ChromeTransportState::Buffering
-        ) {
-            transport_style = transport_style.add_modifier(Modifier::BOLD);
-        }
-        let name_span = Span::styled(format!(" {status_prefix} {display_name}"), transport_style);
+        let name_style = if status_label == "STOPPED" && display_name == "No track loaded" {
+            Style::default().fg(colors.dim)
+        } else {
+            Style::default().fg(colors.ivory)
+        };
+        let name_span = Span::styled(display_name, name_style);
         let gap = area
             .width
-            .saturating_sub(name_span.width() as u16 + time_str.len() as u16 + 1);
+            .saturating_sub(1 + badge_width + 1 + name_span.width() as u16 + time_width);
         let spaces = Span::raw(" ".repeat(gap as usize));
-        let time_span = Span::styled(format!("{time_str} "), Style::default().fg(colors.grey));
-
-        let track_line = Line::from(vec![name_span, spaces, time_span]);
+        let track_line = Line::from(vec![
+            Span::raw(" "),
+            badge,
+            Span::raw(" "),
+            name_span,
+            spaces,
+            time_span,
+        ]);
 
         // Seek bar
         let w = area.width as usize;
@@ -697,79 +1168,57 @@ impl App {
 
     fn render_808_status(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
-        let mut spans = vec![Span::styled(" ", Style::default())];
-
-        // Repeat
-        let repeat_str = format!("RPT:{}", self.playlist.repeat());
-        if self.playlist.repeat() != crate::playlist::RepeatMode::Off {
-            spans.push(Span::styled(
-                repeat_str,
-                Style::default()
-                    .fg(colors.yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        let repeat_mode = self.playlist.repeat();
+        let repeat_style = if repeat_mode == crate::playlist::RepeatMode::Off {
+            chip_style_inactive_808(colors)
         } else {
-            spans.push(Span::styled(repeat_str, Style::default().fg(colors.dim)));
-        }
-
-        spans.push(Span::raw("  "));
-
-        // Shuffle
-        if self.playlist.shuffled() {
-            spans.push(Span::styled(
-                "SHF",
-                Style::default()
-                    .fg(colors.yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            chip_style_active_808(colors, colors.yellow)
+        };
+        let shuffle_style = if self.playlist.shuffled() {
+            chip_style_active_808(colors, colors.yellow)
         } else {
-            spans.push(Span::styled("SHF", Style::default().fg(colors.dim)));
-        }
-
-        spans.push(Span::raw("  "));
-
-        // Mono
-        if self.player.mono() {
-            spans.push(Span::styled(
-                "MONO",
-                Style::default()
-                    .fg(colors.orange)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            chip_style_inactive_808(colors)
+        };
+        let mono_style = if self.player.mono() {
+            chip_style_active_808(colors, colors.orange)
         } else {
-            spans.push(Span::styled("MONO", Style::default().fg(colors.dim)));
-        }
+            chip_style_inactive_808(colors)
+        };
+        let bpm_style = match self.bpm.display {
+            BpmDisplayState::Locked(_) => chip_style_active_808(colors, colors.amber),
+            BpmDisplayState::Estimating => chip_style_info_808(colors),
+            BpmDisplayState::Unavailable => chip_style_inactive_808(colors),
+        };
 
-        spans.push(Span::raw("  "));
+        let mut spans = vec![
+            Span::raw(" "),
+            chip_span_808(repeat_chip_label_808(repeat_mode), repeat_style),
+            Span::raw(" "),
+            chip_span_808("SHUF", shuffle_style),
+            Span::raw(" "),
+            chip_span_808("MONO", mono_style),
+            Span::raw(" "),
+            chip_span_808(
+                format!("{:+.1} dB", self.player.volume()),
+                chip_style_info_808(colors),
+            ),
+            Span::raw(" "),
+            chip_span_808(bpm_chip_label_808(&self.bpm.display), bpm_style),
+        ];
 
-        // Volume dB readout
-        spans.push(Span::styled(
-            format!("{:+.1}dB", self.player.volume()),
-            Style::default().fg(colors.grey),
-        ));
-
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            self.bpm.machine_text(),
-            Style::default().fg(colors.grey),
-        ));
-
-        // Queue count
         let q_len = self.playlist.queue_len();
         if q_len > 0 {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("Q:{q_len}"),
-                Style::default()
-                    .fg(colors.amber)
-                    .add_modifier(Modifier::BOLD),
+            spans.push(Span::raw(" "));
+            spans.push(chip_span_808(
+                format!("Q {q_len}"),
+                chip_style_active_808(colors, colors.orange),
             ));
         }
 
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("VIS:{}", vis_mode_label(self.vis.mode)),
-            Style::default().fg(colors.dim),
+        spans.push(Span::raw(" "));
+        spans.push(chip_span_808(
+            vis_mode_label(self.vis.mode),
+            chip_style_info_808(colors),
         ));
 
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -916,13 +1365,7 @@ impl App {
         let chrome = self.chrome_signature_808();
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
-            let text = if self.player.is_music_app() {
-                "  Music.app backend active"
-            } else {
-                "  No tracks loaded"
-            };
-            let line = Line::from(Span::styled(text, Style::default().fg(colors.dim)));
-            frame.render_widget(Paragraph::new(line), area);
+            self.render_808_playlist_placeholder(frame, area);
             return;
         }
 
@@ -932,7 +1375,19 @@ impl App {
         }
 
         let current_idx = self.playlist.index().unwrap_or(usize::MAX);
-        let visible = (area.height as usize).min(tracks.len());
+        let sparse_overview = tracks.len() <= 2 && area.height >= 6;
+        let (list_area, overview_area) = if sparse_overview {
+            let list_height = (tracks.len() as u16).max(1);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(list_height), Constraint::Min(0)])
+                .split(area);
+            (chunks[0], chunks[1])
+        } else {
+            (area, Rect::new(area.x, area.bottom(), area.width, 0))
+        };
+
+        let visible = (list_area.height as usize).min(tracks.len());
         // Update pl_visible for scroll calculations
         let pl_visible = visible;
 
@@ -962,7 +1417,7 @@ impl App {
             }
 
             let name = tracks[i].display_name();
-            let max_w = area.width as usize - 8;
+            let max_w = list_area.width as usize - 8;
             let display_name: String = if name.chars().count() > max_w {
                 let mut s: String = name.chars().take(max_w - 1).collect();
                 s.push('…');
@@ -990,7 +1445,11 @@ impl App {
             lines.push(Line::from(spans));
         }
 
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines), list_area);
+
+        if sparse_overview {
+            self.render_808_playlist_overview(frame, overview_area, tracks.len());
+        }
     }
 
     fn render_808_provider(&self, frame: &mut Frame, area: Rect) {
@@ -1102,11 +1561,7 @@ impl App {
     fn render_808_browser(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
         let Some(explorer) = self.explorer.as_ref() else {
-            let line = Line::from(Span::styled(
-                "  Press [L] to browse local playlists",
-                Style::default().fg(colors.dim),
-            ));
-            frame.render_widget(Paragraph::new(line), area);
+            self.render_808_browser_placeholder(frame, area);
             return;
         };
 
@@ -1207,7 +1662,13 @@ impl App {
             // Fallback for very small terminals.
             let text = controls
                 .iter()
-                .map(|(key, action)| format!("[{key}]{action}"))
+                .map(|(key, action)| {
+                    format!(
+                        "[{}]{}",
+                        control_key_display_808(key),
+                        control_action_display_808(action)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let line = Line::from(Span::styled(text, Style::default().fg(colors.dim)));
@@ -1235,15 +1696,15 @@ impl App {
 
             let pad_color = step_pad_color(i, colors);
             key_spans.push(Span::styled(
-                format!("{:^CELL_W$}", key),
+                format!("{:^CELL_W$}", control_action_display_808(action)),
                 Style::default()
                     .fg(colors.black)
                     .bg(pad_color)
                     .add_modifier(Modifier::BOLD),
             ));
             action_spans.push(Span::styled(
-                format!("{:^CELL_W$}", action),
-                Style::default().fg(colors.dim),
+                format!("{:^CELL_W$}", control_key_display_808(key)),
+                Style::default().fg(colors.grey),
             ));
             used += CELL_W as u16;
         }
@@ -1482,12 +1943,14 @@ fn make_808_header_effect(
                 };
 
                 let offset = pos.x.saturating_sub(ctx.area.x) as f32 / width;
-                let wave = (ctx.alpha() * TAU + offset * 1.35).sin() * 0.5 + 0.5;
-                let lift = state.config.amplitude * (0.35 + 0.65 * wave);
+                let wave =
+                    (ctx.alpha() * TAU + offset * state.config.wave_offset_scale).sin() * 0.5 + 0.5;
+                let lift = state.config.amplitude
+                    * (state.config.lift_floor + (1.0 - state.config.lift_floor) * wave);
                 let target = if base == state.dim {
                     mix_rgb(base, state.warm, lift)
                 } else {
-                    mix_rgb(base, state.accent, lift * 0.82)
+                    mix_rgb(base, state.accent, lift * state.config.accent_gain)
                 };
                 cell.set_fg(target);
             });
@@ -1519,7 +1982,8 @@ fn make_808_panel_effect(
             }
 
             let head = ctx.alpha() * perimeter as f32;
-            let tail_len = (perimeter as f32 * state.config.tail_ratio).max(4.0);
+            let tail_len =
+                (perimeter as f32 * state.config.tail_ratio).max(state.config.min_tail_cells);
 
             cells.for_each_cell(|pos, cell| {
                 let Some(index) = perimeter_index_808(ctx.area, pos) else {
@@ -1529,7 +1993,7 @@ fn make_808_panel_effect(
                 let distance = (head - index as f32).rem_euclid(perimeter as f32);
                 if distance <= tail_len {
                     let falloff = 1.0 - distance / tail_len;
-                    let hotspot = falloff.powf(1.7);
+                    let hotspot = falloff.powf(state.config.hotspot_gamma);
                     let accent = mix_rgb(state.tail, state.head, hotspot);
                     let mix = state.config.tail_mix
                         + (state.config.head_mix - state.config.tail_mix) * hotspot;
@@ -1567,11 +2031,7 @@ fn seek_dot_pulse_808(frame: usize, chrome: ChromeFxSignature) -> f32 {
         return 0.0;
     }
 
-    let period = match chrome.mode {
-        VisMode::Scope => 18.0,
-        VisMode::Retro => 28.0,
-        VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 22.0,
-    };
+    let period = CHROME_MOTION_808.seek_pulse.period(chrome.mode);
     let wave = ((frame as f32 / period) * TAU).sin() * 0.5 + 0.5;
     strength * wave
 }
@@ -1648,6 +2108,87 @@ fn playback_state_label(
         "PLAYING"
     } else {
         "STOPPED"
+    }
+}
+
+fn transport_badge_text_808(transport: ChromeTransportState, is_streaming: bool) -> &'static str {
+    match transport {
+        ChromeTransportState::Buffering => "BUFFER",
+        ChromeTransportState::Error => "ERROR",
+        ChromeTransportState::Paused => "PAUSED",
+        ChromeTransportState::Playing if is_streaming => "STREAM",
+        ChromeTransportState::Playing => "PLAY",
+        ChromeTransportState::Stopped => "STOP",
+    }
+}
+
+fn transport_badge_style_808(colors: Classic808Colors, transport: ChromeTransportState) -> Style {
+    match transport {
+        ChromeTransportState::Stopped => Style::default()
+            .fg(colors.grey)
+            .bg(mix_rgb(colors.black, colors.dim, 0.38))
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(colors.black)
+            .bg(transport_accent_color_808(colors, transport))
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn chip_style_active_808(colors: Classic808Colors, fill: Color) -> Style {
+    Style::default()
+        .fg(colors.black)
+        .bg(fill)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn chip_style_inactive_808(colors: Classic808Colors) -> Style {
+    Style::default()
+        .fg(colors.grey)
+        .bg(mix_rgb(colors.black, colors.dim, 0.42))
+}
+
+fn chip_style_info_808(colors: Classic808Colors) -> Style {
+    Style::default()
+        .fg(colors.ivory)
+        .bg(mix_rgb(colors.black, colors.grey, 0.18))
+}
+
+fn chip_span_808(label: impl Into<String>, style: Style) -> Span<'static> {
+    Span::styled(format!(" {} ", label.into()), style)
+}
+
+fn repeat_chip_label_808(mode: crate::playlist::RepeatMode) -> &'static str {
+    match mode {
+        crate::playlist::RepeatMode::Off => "OFF",
+        crate::playlist::RepeatMode::All => "ALL",
+        crate::playlist::RepeatMode::One => "ONE",
+    }
+}
+
+fn bpm_chip_label_808(display: &BpmDisplayState) -> String {
+    match display {
+        BpmDisplayState::Estimating => "BPM EST".to_string(),
+        BpmDisplayState::Locked(bpm) => format!("{bpm} BPM"),
+        BpmDisplayState::Unavailable => "BPM --".to_string(),
+    }
+}
+
+fn control_action_display_808(action: &'static str) -> &'static str {
+    match action {
+        "TRK" => "TRACK",
+        "FOCS" => "FOCUS",
+        _ => action,
+    }
+}
+
+fn control_key_display_808(key: &'static str) -> &'static str {
+    match key {
+        "Spc" => "SPACE",
+        "Enter" => "ENTER",
+        "Esc" => "ESC",
+        "Tab" => "TAB",
+        _ => key,
     }
 }
 
@@ -1765,6 +2306,52 @@ mod tests {
     }
 
     #[test]
+    fn transport_badge_text_is_compact_and_stream_aware() {
+        assert_eq!(
+            transport_badge_text_808(ChromeTransportState::Buffering, false),
+            "BUFFER"
+        );
+        assert_eq!(
+            transport_badge_text_808(ChromeTransportState::Playing, false),
+            "PLAY"
+        );
+        assert_eq!(
+            transport_badge_text_808(ChromeTransportState::Playing, true),
+            "STREAM"
+        );
+    }
+
+    #[test]
+    fn status_chip_labels_are_human_facing() {
+        assert_eq!(bpm_chip_label_808(&BpmDisplayState::Estimating), "BPM EST");
+        assert_eq!(bpm_chip_label_808(&BpmDisplayState::Locked(185)), "185 BPM");
+        assert_eq!(bpm_chip_label_808(&BpmDisplayState::Unavailable), "BPM --");
+        assert_eq!(
+            repeat_chip_label_808(crate::playlist::RepeatMode::Off),
+            "OFF"
+        );
+        assert_eq!(
+            repeat_chip_label_808(crate::playlist::RepeatMode::All),
+            "ALL"
+        );
+        assert_eq!(
+            repeat_chip_label_808(crate::playlist::RepeatMode::One),
+            "ONE"
+        );
+    }
+
+    #[test]
+    fn help_strip_uses_readable_action_and_key_labels() {
+        assert_eq!(control_action_display_808("TRK"), "TRACK");
+        assert_eq!(control_action_display_808("FOCS"), "FOCUS");
+        assert_eq!(control_action_display_808("PLAY"), "PLAY");
+        assert_eq!(control_key_display_808("Spc"), "SPACE");
+        assert_eq!(control_key_display_808("Enter"), "ENTER");
+        assert_eq!(control_key_display_808("Tab"), "TAB");
+        assert_eq!(control_key_display_808("←→"), "←→");
+    }
+
+    #[test]
     fn controls_playlist_has_load_browser() {
         let controls = controls_808(Focus::Playlist, true, true, true, true, true, false);
         assert!(
@@ -1829,6 +2416,63 @@ mod tests {
                 .iter()
                 .any(|(key, action)| *key == "s" && *action == "STOP")
         );
+    }
+
+    #[test]
+    fn focus_tag_label_tracks_panel_context() {
+        assert_eq!(
+            focus_tag_label_808(Focus::Playlist, false, false, "Apple Music", false),
+            "PLAYLIST"
+        );
+        assert_eq!(
+            focus_tag_label_808(Focus::Playlist, true, false, "Apple Music", false),
+            "SEARCH"
+        );
+        assert_eq!(
+            focus_tag_label_808(Focus::Playlist, false, true, "Apple Music", false),
+            "QUEUE"
+        );
+        assert_eq!(
+            focus_tag_label_808(Focus::EQ, false, false, "Apple Music", false),
+            "EQ"
+        );
+        assert_eq!(
+            focus_tag_label_808(Focus::Browser, false, false, "Apple Music", false),
+            "BROWSER"
+        );
+    }
+
+    #[test]
+    fn focus_tag_label_uses_provider_name_and_track_mode() {
+        assert_eq!(
+            focus_tag_label_808(Focus::Provider, false, false, "Apple Music", false),
+            "APPLE MUSIC"
+        );
+        assert_eq!(
+            focus_tag_label_808(Focus::Provider, false, false, "Apple Music", true),
+            "TRACKS"
+        );
+    }
+
+    #[test]
+    fn playlist_source_label_matches_backend_and_track_type() {
+        let local = crate::playlist::Track {
+            path: "/tmp/demo.flac".to_string(),
+            title: "Demo".to_string(),
+            artist: "Unit".to_string(),
+            stream: false,
+        };
+        let stream = crate::playlist::Track {
+            path: "https://example.com/demo".to_string(),
+            title: "Demo".to_string(),
+            artist: "Unit".to_string(),
+            stream: true,
+        };
+
+        assert_eq!(playlist_source_label_808(false, Some(&local)), "LOCAL");
+        assert_eq!(playlist_source_label_808(false, Some(&stream)), "STREAM");
+        assert_eq!(playlist_source_label_808(true, Some(&local)), "MUSIC.APP");
+        assert_eq!(playlist_source_label_808(true, None), "MUSIC.APP");
     }
 
     #[test]
@@ -2069,6 +2713,36 @@ mod tests {
         assert!(scope.head_mix > retro.head_mix);
         assert!(scope.cycle_ms < retro.cycle_ms);
         assert!(browsing.is_none());
+    }
+
+    #[test]
+    fn browser_focus_disables_panel_trace_even_while_playing() {
+        let browsing = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Browser,
+            mode: VisMode::Scope,
+        };
+
+        assert!(browsing.panel_trace_config().is_none());
+    }
+
+    #[test]
+    fn browser_focus_quiets_header_and_seek_motion() {
+        let playlist = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Playlist,
+            mode: VisMode::Scope,
+        };
+        let browser = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Browser,
+            mode: VisMode::Scope,
+        };
+
+        assert!(playlist.header_accent_config().is_some());
+        assert!(browser.header_accent_config().is_none());
+        assert!(browser.seek_pulse_strength() < playlist.seek_pulse_strength());
+        assert!(browser.seek_pulse_strength() < 0.05);
     }
 
     #[test]

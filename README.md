@@ -1,5 +1,8 @@
 # amp808
 
+[![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
+</h1>
+
 ![amp808 logo](AMP808-TUI-logo.png)
 
 A Winamp 2.x-inspired terminal music player, written in Rust with Ratatui. Port of [cliamp](https://github.com/bjarneo/cliamp) (Go/Bubbletea).
