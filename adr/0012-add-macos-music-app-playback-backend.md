@@ -62,7 +62,7 @@ The project direction here is KISS and brilliant basics:
    - no config-persisted backend selection in v1
 8. In `music-app` mode, positional media arguments are invalid in v1.
    - `cliamp --backend music-app` starts in remote-control mode
-   - `cliamp --backend music-app Alive.mp3` fails fast with a clear startup error
+   - `cliamp --backend music-app track.mp3` fails fast with a clear startup error
 9. On non-macOS platforms, selecting the `music-app` backend must fail fast with a clear startup
    error.
 
@@ -119,7 +119,7 @@ The project direction here is KISS and brilliant basics:
 - [x] `cliamp foo.mp3` behaves exactly as today and uses the local backend.
 - [x] Starting `cliamp` with `music-app` on macOS shows current Music.app playback state in the UI.
 - [x] `cliamp --backend music-app` starts without requiring positional media arguments.
-- [x] `cliamp --backend music-app Alive.mp3` fails with a clear startup error.
+- [x] `cliamp --backend music-app track.mp3` fails with a clear startup error.
 - [x] `Space`, next-track, previous-track, and volume commands control `Music.app` instead of the local engine.
 - [x] Seek, EQ, mono, waveform/scope, and cover-art paths are hidden or disabled in `music-app` mode.
 - [x] Non-macOS startup with `music-app` fails immediately with a clear message.
@@ -172,8 +172,8 @@ Implementation update 2026-03-07:
   - the TUI starts in `music-app` mode
   - current Music.app playback state is shown in the UI
   - play/pause of an already playing track works in phase 1
-  - local backend release smoke with `./target/release/cliamp Alive.mp3` starts and renders `▶ Playing`
-  - `./target/release/cliamp --backend music-app Alive.mp3` fails with `music-app backend does not accept media paths or URLs`
+  - local backend release smoke with `./target/release/cliamp track.mp3` starts and renders `▶ Playing`
+  - `./target/release/cliamp --backend music-app track.mp3` fails with `music-app backend does not accept media paths or URLs`
   - `music-app` mode renders the reduced control surface, omitting local-only playlist/search/EQ/visualizer/art actions
   - ignored live test `ui::keys::tests::live_music_app_transport_keys_control_music_app` drives `Space`, `.`, `,`, `+`, and `-` through `App.handle_key(...)` and confirms they affect `Music.app`
   - unit tests `platform_guard_rejects_non_macos` and `platform_guard_accepts_macos` cover the platform gate used by `music-app` startup

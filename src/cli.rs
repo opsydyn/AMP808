@@ -54,10 +54,10 @@ mod tests {
 
     #[test]
     fn defaults_to_local_backend() {
-        let cli = parse_args(["Alive.mp3"]).unwrap();
+        let cli = parse_args(["track.mp3"]).unwrap();
 
         assert_eq!(cli.backend, BackendKind::Local);
-        assert_eq!(cli.inputs, vec!["Alive.mp3"]);
+        assert_eq!(cli.inputs, vec!["track.mp3"]);
     }
 
     #[test]
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn rejects_media_inputs_in_music_app_mode() {
-        let err = parse_args(["--backend", "music-app", "Alive.mp3"]).unwrap_err();
+        let err = parse_args(["--backend", "music-app", "track.mp3"]).unwrap_err();
 
         assert!(
             err.to_string()

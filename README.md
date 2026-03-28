@@ -29,7 +29,7 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 
 ![Classic TR-808 view with bars visualizer](demo-images/demo1.png)
 
-Classic 808 layout with the standard bar visualizer and default hardware-inspired palette.
+Classic 808 layout with the standard bar visualizer and custom theme palette.
 
 ### TR-808 Retro Visualizer
 
@@ -131,7 +131,7 @@ NAVIDROME_URL=https://music.example.com NAVIDROME_USER=alice NAVIDROME_PASS=secr
 cargo run -- --backend music-app
 
 # Release binary examples
-./target/release/amp808 "Alive.mp3"
+./target/release/amp808 "track.mp3"
 ./target/release/amp808 --backend music-app
 ```
 
@@ -199,7 +199,7 @@ The first run may prompt for macOS Automation permission to control `Music.app`.
 Invalid usage:
 
 ```bash
-./target/release/amp808 --backend music-app "Alive.mp3"
+./target/release/amp808 --backend music-app "track.mp3"
 ```
 
 That fails by design because `music-app` mode is a remote-control backend, not a local file player.

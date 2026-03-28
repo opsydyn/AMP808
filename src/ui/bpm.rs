@@ -332,13 +332,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual tuning smoke test against local repo media"]
-    fn repo_media_smoke_prints_estimated_bpms() {
-        for path in [
-            "Alive.mp3",
-            "daft-punk-around-the-world.mp3",
-            "DJ Dado - Twin Peaks Theme.mp3",
-        ] {
+    #[ignore = "manual tuning smoke test; set AMP808_BPM_SMOKE_FILES to comma-separated local audio paths"]
+    fn local_media_smoke_prints_estimated_bpms() {
+        let paths = std::env::var("AMP808_BPM_SMOKE_FILES")
+            .expect("set AMP808_BPM_SMOKE_FILES to comma-separated local audio file paths");
+
+        for path in paths
+            .split(',')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
             let mut state = BpmState::estimating();
             let samples = read_all_samples(path);
             feed_track(&mut state, &samples, 44_100);
