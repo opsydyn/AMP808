@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - main
     paths-ignore:
       - '**/*.md'
       - 'demo-images/**'
@@ -56,7 +55,7 @@ jobs:
           {
             echo "## release-plz PR"
             echo
-            if [[ -n "${PR:-}" ]]; then
+            if [[ -n "${PR:-}" && "${PR}" != "{}" ]]; then
               echo "- Release PR: ${PR}"
             elif [[ -n "${PRS:-}" && "${PRS}" != "[]" ]]; then
               echo "- Release PR payload: \`${PRS}\`"
