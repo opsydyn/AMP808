@@ -179,6 +179,7 @@ impl ChromeFxSignature {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Classic808Colors {
+    themed: bool,
     red: Color,
     orange: Color,
     amber: Color,
@@ -195,6 +196,7 @@ struct Classic808Colors {
 impl Classic808Colors {
     fn classic() -> Self {
         Self {
+            themed: false,
             red: C808_RED,
             orange: C808_ORANGE,
             amber: C808_AMBER,
@@ -211,6 +213,7 @@ impl Classic808Colors {
 
     fn themed(palette: &Palette) -> Self {
         Self {
+            themed: true,
             red: palette.error,
             orange: palette.playing,
             amber: palette.seek_bar,
@@ -222,6 +225,62 @@ impl Classic808Colors {
             hot_pink: mix_rgb(palette.spectrum_high, palette.accent, 0.45),
             ivory: mix_rgb(palette.text, palette.accent, 0.15),
             black: C808_BLACK,
+        }
+    }
+
+    fn header_accent(self) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.42)
+        } else {
+            mix_rgb(self.amber, self.yellow, 0.32)
+        }
+    }
+
+    fn header_warm(self) -> Color {
+        if self.themed {
+            mix_rgb(self.dim, self.yellow, 0.24)
+        } else {
+            mix_rgb(self.deep_amber, self.amber, 0.58)
+        }
+    }
+
+    fn panel_trace_head(self) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.58)
+        } else {
+            mix_rgb(self.amber, self.yellow, 0.28)
+        }
+    }
+
+    fn panel_trace_tail(self) -> Color {
+        if self.themed {
+            mix_rgb(self.dim, self.yellow, 0.32)
+        } else {
+            mix_rgb(self.deep_amber, self.amber, 0.46)
+        }
+    }
+
+    fn seek_tail_color(self, pulse: f32) -> Color {
+        if self.themed {
+            mix_rgb(self.dim, self.yellow, 0.18 + pulse * 0.18)
+        } else {
+            mix_rgb(self.amber, self.orange, 0.24 + pulse * 0.32)
+        }
+    }
+
+    fn seek_dot_color(self, pulse: f32) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.48 + pulse * 0.24)
+        } else {
+            mix_rgb(self.amber, self.yellow, 0.36 + pulse * 0.46)
+        }
+    }
+
+    fn row_lift_target(self) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.24)
+        } else {
+            self.ivory
         }
     }
 }
@@ -615,8 +674,8 @@ impl App {
             let pulse = seek_dot_pulse_808(self.title_off, chrome);
             let warm_tail = filled.min(4);
             let base_fill = filled.saturating_sub(warm_tail);
-            let warm_color = mix_rgb(colors.amber, colors.orange, 0.24 + pulse * 0.32);
-            let dot_color = mix_rgb(colors.amber, colors.yellow, 0.36 + pulse * 0.46);
+            let warm_color = colors.seek_tail_color(pulse);
+            let dot_color = colors.seek_dot_color(pulse);
             let mut dot_style = Style::default().fg(dot_color);
             if pulse > 0.12 {
                 dot_style = dot_style.add_modifier(Modifier::BOLD);
@@ -1404,8 +1463,8 @@ fn make_808_header_effect(
         HeaderAccentState {
             dim: colors.dim,
             grey: colors.grey,
-            accent: mix_rgb(colors.amber, colors.yellow, 0.32),
-            warm: mix_rgb(colors.deep_amber, colors.amber, 0.58),
+            accent: colors.header_accent(),
+            warm: colors.header_warm(),
             config,
         },
         (config.cycle_ms, Interpolation::SineInOut),
@@ -1444,8 +1503,8 @@ fn make_808_panel_effect(
     Some(fx::repeating(fx::effect_fn(
         PanelTraceState {
             base: colors.dim,
-            head: mix_rgb(colors.amber, colors.yellow, 0.28),
-            tail: mix_rgb(colors.deep_amber, colors.amber, 0.46),
+            head: colors.panel_trace_head(),
+            tail: colors.panel_trace_tail(),
             config,
         },
         (config.cycle_ms, Interpolation::Linear),
@@ -1494,7 +1553,11 @@ fn transport_accent_color_808(colors: Classic808Colors, transport: ChromeTranspo
 }
 
 fn lift_style_808(style: Style, colors: Classic808Colors, strength: f32) -> Style {
-    let lifted = mix_rgb(style.fg.unwrap_or(colors.grey), colors.ivory, strength);
+    let lifted = mix_rgb(
+        style.fg.unwrap_or(colors.grey),
+        colors.row_lift_target(),
+        strength,
+    );
     style.fg(lifted).add_modifier(Modifier::BOLD)
 }
 
@@ -1885,12 +1948,75 @@ mod tests {
         };
 
         let themed = Classic808Colors::themed(&palette);
+        assert!(themed.themed);
         assert_eq!(themed.red, palette.error);
         assert_eq!(themed.orange, palette.playing);
         assert_eq!(themed.amber, palette.seek_bar);
         assert_eq!(themed.yellow, palette.accent);
         assert_eq!(themed.grey, palette.text);
         assert_eq!(themed.dim, palette.dim);
+    }
+
+    #[test]
+    fn themed_motion_colors_stay_palette_relative() {
+        let palette = Palette {
+            title: Color::Rgb(0x11, 0x22, 0x33),
+            text: Color::Rgb(0xE0, 0xE1, 0xE2),
+            dim: Color::Rgb(0x44, 0x55, 0x66),
+            accent: Color::Rgb(0xAA, 0xBB, 0xCC),
+            playing: Color::Rgb(0x10, 0x20, 0x30),
+            seek_bar: Color::Rgb(0x40, 0x50, 0x60),
+            volume: Color::Rgb(0x70, 0x80, 0x90),
+            error: Color::Rgb(0x91, 0x92, 0x93),
+            spectrum_low: Color::Rgb(0x12, 0x13, 0x14),
+            spectrum_mid: Color::Rgb(0x21, 0x22, 0x23),
+            spectrum_high: Color::Rgb(0x31, 0x32, 0x33),
+        };
+
+        let themed = Classic808Colors::themed(&palette);
+        assert_eq!(
+            themed.header_accent(),
+            mix_rgb(themed.grey, themed.yellow, 0.42)
+        );
+        assert_eq!(
+            themed.header_warm(),
+            mix_rgb(themed.dim, themed.yellow, 0.24)
+        );
+        assert_eq!(
+            themed.panel_trace_head(),
+            mix_rgb(themed.grey, themed.yellow, 0.58)
+        );
+        assert_eq!(
+            themed.panel_trace_tail(),
+            mix_rgb(themed.dim, themed.yellow, 0.32)
+        );
+        assert_eq!(
+            themed.seek_tail_color(0.5),
+            mix_rgb(themed.dim, themed.yellow, 0.27)
+        );
+        assert_eq!(
+            themed.seek_dot_color(0.5),
+            mix_rgb(themed.grey, themed.yellow, 0.60)
+        );
+    }
+
+    #[test]
+    fn classic_motion_colors_keep_warm_808_bias() {
+        let classic = Classic808Colors::classic();
+
+        assert!(!classic.themed);
+        assert_eq!(
+            classic.panel_trace_head(),
+            mix_rgb(classic.amber, classic.yellow, 0.28)
+        );
+        assert_eq!(
+            classic.panel_trace_tail(),
+            mix_rgb(classic.deep_amber, classic.amber, 0.46)
+        );
+        assert_eq!(
+            classic.seek_tail_color(0.5),
+            mix_rgb(classic.amber, classic.orange, 0.40)
+        );
     }
 
     #[test]
