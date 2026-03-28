@@ -14,51 +14,9 @@ env:
   APP_NAME: amp808
 
 jobs:
-  release-preflight:
-    name: Release preflight
-    if: ${{ github.repository_owner == 'opsydyn' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Validate GitHub Actions workflow permissions
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          response=$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPOSITORY}/actions/permissions/workflow")
-
-          export WORKFLOW_PERMISSIONS_JSON="$response"
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          permissions = json.loads(os.environ["WORKFLOW_PERMISSIONS_JSON"])
-          default_permissions = permissions.get("default_workflow_permissions")
-          can_approve_reviews = permissions.get("can_approve_pull_request_reviews")
-
-          print(f"default_workflow_permissions={default_permissions}")
-          print(f"can_approve_pull_request_reviews={can_approve_reviews}")
-
-          if default_permissions != "write":
-              print("::error::GitHub Actions workflow permissions are set to read-only. Set Settings → Actions → General → Workflow permissions to 'Read and write permissions' so release-plz can open release PRs and create tags/releases.")
-              print("::notice::Also verify 'Allow GitHub Actions to create and approve pull requests' is enabled in the same settings page.")
-              sys.exit(1)
-          PY
-
   release-plz-pr:
     name: Release-plz PR
     if: ${{ github.repository_owner == 'opsydyn' }}
-    needs: release-preflight
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -88,10 +46,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Write PR workflow summary
+        shell: bash
+        env:
+          PR: ${{ steps.release-plz.outputs.pr }}
+          PRS: ${{ steps.release-plz.outputs.prs }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## release-plz PR"
+            echo
+            if [[ -n "${PR:-}" ]]; then
+              echo "- Release PR: ${PR}"
+            elif [[ -n "${PRS:-}" && "${PRS}" != "[]" ]]; then
+              echo "- Release PR payload: \`${PRS}\`"
+            else
+              echo "- No release PR was created or updated on this run."
+              echo "- If this is unexpected, verify the repository Actions permissions in Settings → Actions → General and check whether this ref includes releasable changes."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   release-plz-release:
     name: Release-plz release
     if: ${{ github.repository_owner == 'opsydyn' }}
-    needs: release-preflight
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -133,6 +110,24 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write release workflow summary
+        shell: bash
+        env:
+          RELEASES_CREATED: ${{ steps.release-plz.outputs.releases_created }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## release-plz release"
+            echo
+            echo "- Releases created: \`${RELEASES_CREATED:-false}\`"
+            if [[ "${RELEASES_CREATED:-false}" == "true" ]]; then
+              echo "- Release payload: \`${RELEASES}\`"
+            else
+              echo "- No GitHub release was created from this ref, so asset packaging is skipped intentionally."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Capture release metadata
         id: meta
