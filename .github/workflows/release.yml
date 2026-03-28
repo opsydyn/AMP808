@@ -2,50 +2,130 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - 'demo-images/**'
 
 env:
   CARGO_TERM_COLOR: always
   APP_NAME: amp808
 
 jobs:
-  create-draft-release:
-    name: Create draft release
+  release-plz-pr:
+    name: Release-plz PR
+    if: ${{ github.repository_owner == 'opsydyn' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
     steps:
-      - name: Create draft release
-        uses: softprops/action-gh-release@v2
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ env.APP_NAME }} ${{ github.ref_name }}
-          draft: true
-          generate_release_notes: true
+          fetch-depth: 0
+          persist-credentials: false
 
-  build-release:
-    name: Build release (${{ matrix.label }})
-    needs: create-draft-release
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release-plz release-pr
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-plz-release:
+    name: Release-plz release
+    if: ${{ github.repository_owner == 'opsydyn' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      release_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Linux audio dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run release gate tests
+        run: cargo test --quiet --locked
+
+      - name: Run release gate clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run release-plz release
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Capture release metadata
+        id: meta
+        if: steps.release-plz.outputs.releases_created == 'true'
+        shell: bash
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          release_tag=$(python3 -c 'import json, os; print(json.loads(os.environ["RELEASES"])[0]["tag"])')
+          echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "Released ${release_tag}"
+
+  build-release-assets:
+    name: Build release assets (${{ matrix.label }})
+    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
+    needs: release-plz-release
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             label: linux
-            artifact_name: amp808-${{ github.ref_name }}-linux-x86_64.tar.gz
+            artifact_name: linux-x86_64.tar.gz
             bin_name: amp808
           - os: macos-latest
             label: macos
-            artifact_name: amp808-${{ github.ref_name }}-macos-universal.tar.gz
+            artifact_name: macos-universal.tar.gz
             bin_name: amp808
           - os: windows-latest
             label: windows
-            artifact_name: amp808-${{ github.ref_name }}-windows-x86_64.zip
+            artifact_name: windows-x86_64.zip
             bin_name: amp808.exe
 
     defaults:
@@ -53,8 +133,11 @@ jobs:
         working-directory: ${{ github.workspace }}
 
     steps:
-      - name: Checkout
+      - name: Checkout released tag
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-plz-release.outputs.release_tag }}
 
       - name: Install Linux audio dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -67,14 +150,6 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Run release gate tests (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo test --quiet --locked
-
-      - name: Run release gate clippy (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Build release (macOS universal)
         if: matrix.os == 'macos-latest'
@@ -89,22 +164,30 @@ jobs:
 
       - name: Package release (Linux)
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release-plz-release.outputs.release_tag }}
         run: |
+          set -euo pipefail
           mkdir -p dist/${{ env.APP_NAME }}
           cp target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/
           cp README.md dist/${{ env.APP_NAME }}/
-          tar -C dist -czf dist/${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+          tar -C dist -czf dist/${{ env.APP_NAME }}-${RELEASE_TAG}-${{ matrix.artifact_name }} ${{ env.APP_NAME }}
 
       - name: Package release (macOS universal)
         if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release-plz-release.outputs.release_tag }}
         run: |
+          set -euo pipefail
           mkdir -p dist/${{ env.APP_NAME }}
           lipo -create \
             target/aarch64-apple-darwin/release/${{ matrix.bin_name }} \
             target/x86_64-apple-darwin/release/${{ matrix.bin_name }} \
             -output dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}
           cp README.md dist/${{ env.APP_NAME }}/
-          tar -C dist -czf dist/${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+          tar -C dist -czf dist/${{ env.APP_NAME }}-${RELEASE_TAG}-${{ matrix.artifact_name }} ${{ env.APP_NAME }}
 
       - name: Verify universal binary
         if: matrix.os == 'macos-latest'
@@ -113,29 +196,19 @@ jobs:
       - name: Package release (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.release-plz-release.outputs.release_tag }}
         run: |
           New-Item -ItemType Directory -Path dist/${{ env.APP_NAME }} -Force | Out-Null
           Copy-Item target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/${{ matrix.bin_name }}
           Copy-Item README.md dist/${{ env.APP_NAME }}/README.md
-          Compress-Archive -Path dist/${{ env.APP_NAME }}/* -DestinationPath dist/${{ matrix.artifact_name }} -Force
+          Compress-Archive -Path dist/${{ env.APP_NAME }}/* -DestinationPath dist/${{ env.APP_NAME }}-$env:RELEASE_TAG-${{ matrix.artifact_name }} -Force
 
-      - name: Upload asset to draft release
-        run: gh release upload ${{ github.ref_name }} dist/${{ matrix.artifact_name }} --clobber --repo ${{ github.repository }}
+      - name: Upload asset to GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-release:
-    name: Publish release
-    needs: build-release
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Publish release
-        run: gh release edit ${{ github.ref_name }} --draft=false --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify release is published
-        run: gh release view ${{ github.ref_name }} --repo ${{ github.repository }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.release-plz-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/*-"$RELEASE_TAG"-${{ matrix.artifact_name }} --clobber --repo ${{ github.repository }}

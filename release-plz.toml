@@ -1,0 +1,16 @@
+[workspace]
+# GitHub releases only for now; switch these two flags when amp808 is ready for crates.io.
+git_only = true
+publish = false
+
+# Only cut a release after merging the release-plz PR.
+release_always = false
+
+# Keep release-plz from creating/updating a CHANGELOG.md file for now.
+changelog_update = false
+
+# Keep the GitHub release name aligned with the existing branding.
+git_release_name = "amp808 v{{ version }}"
+
+# A small breadcrumb in the PR list never hurt anyone.
+pr_labels = ["release"]

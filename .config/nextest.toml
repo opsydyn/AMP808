@@ -1,0 +1,5 @@
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "amp808-ci"
+store-success-output = false
+store-failure-output = true

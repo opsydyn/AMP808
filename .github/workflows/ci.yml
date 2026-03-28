@@ -95,8 +95,84 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --quiet
+      - name: Run tests with nextest
+        run: cargo nextest run --profile ci
+
+      - name: Run doctests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          has_lib=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; meta=json.load(sys.stdin); print("true" if any("lib" in target.get("kind", []) for package in meta["packages"] for target in package.get("targets", [])) else "false")')
+          if [[ "$has_lib" == "true" ]]; then
+            cargo test --doc --quiet
+          else
+            echo "No library target present; skipping doctests."
+          fi
+
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  publish-test-results:
+    name: Publish test results
+    if: ${{ always() && !cancelled() }}
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Download JUnit artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nextest-junit-*
+          path: test-results
+
+      - name: Detect JUnit reports
+        id: junit
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          files=(test-results/**/*.xml)
+          if (( ${#files[@]} > 0 )); then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            printf 'Found JUnit files:\n%s\n' "${files[*]}"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No JUnit files found to publish."
+          fi
+
+      - name: Publish test results
+        if: ${{ !cancelled() && steps.junit.outputs.found == 'true' }}
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results/**/*.xml
+          check_name: Test Results
+          comment_mode: off
+
+      - name: Summarize missing JUnit reports
+        if: ${{ !cancelled() && steps.junit.outputs.found != 'true' }}
+        shell: bash
+        run: |
+          {
+            echo "## Test reporting"
+            echo
+            echo "No JUnit reports were found to publish."
+            echo "This usually means compilation or setup failed before nextest wrote its report."
+          } >> "$GITHUB_STEP_SUMMARY"

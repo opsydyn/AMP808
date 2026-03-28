@@ -206,8 +206,13 @@ That fails by design because `music-app` mode is a remote-control backend, not a
 
 ## Development
 
+Maintainers: the GitHub release process is documented in [`RELEASING.md`](RELEASING.md).
+
 ```bash
-# Run tests
+# Run the same main test runner used in CI
+cargo nextest run --profile ci
+
+# Optional: plain cargo test still works for local spot checks
 cargo test
 
 # Run clippy lints
@@ -219,6 +224,10 @@ cargo fmt
 # Build and run in one step
 cargo run -- <args>
 ```
+
+`amp808` CI uses [`cargo-nextest`](https://nexte.st/) plus JUnit output configured in
+`.config/nextest.toml`. This crate is currently binary-only, so `cargo test --doc` is skipped in
+CI unless a library target exists.
 
 ### Project Structure
 
