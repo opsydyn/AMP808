@@ -1,12 +1,14 @@
+use std::f32::consts::TAU;
+
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, FrameExt as _, Paragraph,
     canvas::{Canvas, Line as CanvasLine},
 };
-use tachyonfx::{CellFilter, EffectRenderer, Interpolation, fx};
+use tachyonfx::{EffectRenderer, Interpolation, fx};
 use tui_big_text::{BigText, PixelSize};
 
 use super::App;
@@ -38,6 +40,141 @@ enum RenderMode808 {
     LedColumns,
     Retro,
     Oscilloscope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChromeTransportState {
+    Stopped,
+    Paused,
+    Playing,
+    Buffering,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChromeFxSignature {
+    transport: ChromeTransportState,
+    focus: Focus,
+    mode: VisMode,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelTraceConfig {
+    cycle_ms: u32,
+    tail_ratio: f32,
+    head_mix: f32,
+    tail_mix: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeaderAccentConfig {
+    cycle_ms: u32,
+    amplitude: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PanelTraceState {
+    base: Color,
+    head: Color,
+    tail: Color,
+    config: PanelTraceConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeaderAccentState {
+    dim: Color,
+    grey: Color,
+    accent: Color,
+    warm: Color,
+    config: HeaderAccentConfig,
+}
+
+impl ChromeFxSignature {
+    fn panel_trace_config(self) -> Option<PanelTraceConfig> {
+        let transport = match self.transport {
+            ChromeTransportState::Playing => 1.0_f32,
+            ChromeTransportState::Buffering => 0.78_f32,
+            ChromeTransportState::Paused => 0.42_f32,
+            ChromeTransportState::Stopped => 0.18_f32,
+            ChromeTransportState::Error => 0.0_f32,
+        };
+        let mode = match self.mode {
+            VisMode::Scope => 1.0_f32,
+            VisMode::Retro => 0.52_f32,
+            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.74_f32,
+        };
+        let focus = match self.focus {
+            Focus::EQ => 0.82_f32,
+            Focus::Playlist => 0.68_f32,
+            Focus::Provider => 0.38_f32,
+            Focus::Browser => 0.22_f32,
+        };
+        let intensity = (transport * mode * focus).clamp(0.0_f32, 1.0_f32);
+        if intensity < 0.12 {
+            return None;
+        }
+
+        Some(PanelTraceConfig {
+            cycle_ms: (9800.0_f32 - intensity * 3600.0_f32).round() as u32,
+            tail_ratio: 0.12_f32 + intensity * 0.08_f32,
+            head_mix: 0.36_f32 + intensity * 0.38_f32,
+            tail_mix: 0.14_f32 + intensity * 0.16_f32,
+        })
+    }
+
+    fn header_accent_config(self) -> Option<HeaderAccentConfig> {
+        let transport = match self.transport {
+            ChromeTransportState::Playing => 0.34_f32,
+            ChromeTransportState::Buffering => 0.28_f32,
+            ChromeTransportState::Paused => 0.18_f32,
+            ChromeTransportState::Stopped => 0.08_f32,
+            ChromeTransportState::Error => 0.0_f32,
+        };
+        let mode = match self.mode {
+            VisMode::Scope => 1.0_f32,
+            VisMode::Retro => 0.58_f32,
+            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.78_f32,
+        };
+        let amplitude = (transport * mode).clamp(0.0_f32, 0.34_f32);
+        if amplitude < 0.07 {
+            return None;
+        }
+
+        Some(HeaderAccentConfig {
+            cycle_ms: (7600.0_f32 - amplitude * 1800.0_f32).round() as u32,
+            amplitude,
+        })
+    }
+
+    fn seek_pulse_strength(self) -> f32 {
+        let transport = match self.transport {
+            ChromeTransportState::Playing => 0.24_f32,
+            ChromeTransportState::Buffering => 0.18_f32,
+            ChromeTransportState::Paused => 0.08_f32,
+            ChromeTransportState::Stopped | ChromeTransportState::Error => 0.0_f32,
+        };
+        let mode = match self.mode {
+            VisMode::Scope => 1.0_f32,
+            VisMode::Retro => 0.55_f32,
+            VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 0.8_f32,
+        };
+        (transport * mode).clamp(0.0_f32, 0.26_f32)
+    }
+
+    fn row_lift_strength(self) -> f32 {
+        let base = match self.focus {
+            Focus::Playlist => 0.16_f32,
+            Focus::Provider => 0.14_f32,
+            Focus::Browser | Focus::EQ => 0.0_f32,
+        };
+        let transport = match self.transport {
+            ChromeTransportState::Playing | ChromeTransportState::Buffering => 1.0_f32,
+            ChromeTransportState::Paused => 0.82_f32,
+            ChromeTransportState::Stopped => 0.72_f32,
+            ChromeTransportState::Error => 0.5_f32,
+        };
+        (base * transport).clamp(0.0_f32, 0.18_f32)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +260,19 @@ impl App {
             Classic808Colors::themed(&self.palette)
         } else {
             Classic808Colors::classic()
+        }
+    }
+
+    fn chrome_signature_808(&self) -> ChromeFxSignature {
+        ChromeFxSignature {
+            transport: chrome_transport_state(
+                self.buffering,
+                self.err.is_some(),
+                self.player.is_playing(),
+                self.player.is_paused(),
+            ),
+            focus: self.focus,
+            mode: self.vis.mode,
         }
     }
 
@@ -215,7 +365,8 @@ impl App {
         focus_area: Rect,
     ) {
         let colors = self.colors_808();
-        self.ensure_808_effects();
+        let chrome = self.chrome_signature_808();
+        self.ensure_808_effects(chrome);
 
         let base = Style::default().fg(colors.dim);
         if outer_area.width >= 2 && outer_area.height >= 2 {
@@ -243,29 +394,20 @@ impl App {
         let tick_ms = elapsed.as_millis().clamp(16, 120) as u32;
         let tick = tachyonfx::Duration::from_millis(tick_ms);
 
-        if tachyon_should_animate(self.player.is_playing(), self.player.is_paused()) {
-            if let Some(effect) = self.fx_808_border.as_mut() {
-                frame.render_effect(effect, outer_area, tick);
-            }
-            if let Some(effect) = self.fx_808_header.as_mut() {
-                frame.render_effect(effect, header_area, tick);
-            }
-            if let Some(effect) = self.fx_808_focus.as_mut() {
-                frame.render_effect(effect, focus_area, tick);
-            }
+        if let Some(effect) = self.fx_808_header.as_mut() {
+            frame.render_effect(effect, header_area, tick);
+        }
+        if let Some(effect) = self.fx_808_panel.as_mut() {
+            frame.render_effect(effect, focus_area, tick);
         }
     }
 
-    fn ensure_808_effects(&mut self) {
+    fn ensure_808_effects(&mut self, chrome: ChromeFxSignature) {
         let colors = self.colors_808();
-        if self.fx_808_border.is_none() {
-            self.fx_808_border = Some(make_808_border_effect(colors));
-        }
-        if self.fx_808_header.is_none() {
-            self.fx_808_header = Some(make_808_header_effect(colors));
-        }
-        if self.fx_808_focus.is_none() {
-            self.fx_808_focus = Some(make_808_focus_effect(colors));
+        if self.fx_808_signature != Some(chrome) {
+            self.fx_808_header = make_808_header_effect(colors, chrome);
+            self.fx_808_panel = make_808_panel_effect(colors, chrome);
+            self.fx_808_signature = Some(chrome);
         }
     }
 
@@ -382,6 +524,7 @@ impl App {
 
     fn render_808_now_playing(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
+        let chrome = self.chrome_signature_808();
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
@@ -424,21 +567,24 @@ impl App {
             let dur_sec = dur_secs % 60;
             format!("{pos_min:02}:{pos_sec:02}/{dur_min:02}:{dur_sec:02}")
         };
-        let max_name = area.width as usize - time_str.len() - 5;
+        let max_name = (area.width as usize).saturating_sub(time_str.len() + 5);
         let display_name: String = if name.chars().count() > max_name {
-            let mut s: String = name.chars().take(max_name - 1).collect();
+            let mut s: String = name.chars().take(max_name.saturating_sub(1)).collect();
             s.push('…');
             s
         } else {
             name
         };
 
-        let name_span = Span::styled(
-            format!(" {status_prefix} {display_name}"),
-            Style::default()
-                .fg(colors.orange)
-                .add_modifier(Modifier::BOLD),
-        );
+        let transport_color = transport_accent_color_808(colors, chrome.transport);
+        let mut transport_style = Style::default().fg(transport_color);
+        if matches!(
+            chrome.transport,
+            ChromeTransportState::Playing | ChromeTransportState::Buffering
+        ) {
+            transport_style = transport_style.add_modifier(Modifier::BOLD);
+        }
+        let name_span = Span::styled(format!(" {status_prefix} {display_name}"), transport_style);
         let gap = area
             .width
             .saturating_sub(name_span.width() as u16 + time_str.len() as u16 + 1);
@@ -466,10 +612,20 @@ impl App {
                 0.0
             };
             let filled = (progress * (w.saturating_sub(2)) as f64) as usize;
+            let pulse = seek_dot_pulse_808(self.title_off, chrome);
+            let warm_tail = filled.min(4);
+            let base_fill = filled.saturating_sub(warm_tail);
+            let warm_color = mix_rgb(colors.amber, colors.orange, 0.24 + pulse * 0.32);
+            let dot_color = mix_rgb(colors.amber, colors.yellow, 0.36 + pulse * 0.46);
+            let mut dot_style = Style::default().fg(dot_color);
+            if pulse > 0.12 {
+                dot_style = dot_style.add_modifier(Modifier::BOLD);
+            }
             Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled("━".repeat(filled), Style::default().fg(colors.amber)),
-                Span::styled("●", Style::default().fg(colors.yellow)),
+                Span::styled("━".repeat(base_fill), Style::default().fg(colors.amber)),
+                Span::styled("━".repeat(warm_tail), Style::default().fg(warm_color)),
+                Span::styled("●", dot_style),
                 Span::styled(
                     "━".repeat(w.saturating_sub(filled + 2)),
                     Style::default().fg(colors.dim),
@@ -698,6 +854,7 @@ impl App {
 
     fn render_808_playlist(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
+        let chrome = self.chrome_signature_808();
         let tracks = self.playlist.tracks();
         if tracks.is_empty() {
             let text = if self.player.is_music_app() {
@@ -742,9 +899,7 @@ impl App {
             }
 
             if self.focus == Focus::Playlist && i == self.pl_cursor {
-                style = Style::default()
-                    .fg(colors.yellow)
-                    .add_modifier(Modifier::BOLD);
+                style = lift_style_808(style, colors, chrome.row_lift_strength());
             }
 
             let name = tracks[i].display_name();
@@ -781,6 +936,7 @@ impl App {
 
     fn render_808_provider(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
+        let chrome = self.chrome_signature_808();
         if self.prov_loading {
             let name = self.provider_name();
             let target = if self.apple_music_showing_tracks() {
@@ -817,9 +973,11 @@ impl App {
             for i in scroll..self.apple_music_tracks.len().min(scroll + visible) {
                 let track = &self.apple_music_tracks[i];
                 let style = if i == self.prov_cursor {
-                    Style::default()
-                        .fg(colors.yellow)
-                        .add_modifier(Modifier::BOLD)
+                    lift_style_808(
+                        Style::default().fg(colors.grey),
+                        colors,
+                        chrome.row_lift_strength(),
+                    )
                 } else {
                     Style::default().fg(colors.grey)
                 };
@@ -860,9 +1018,11 @@ impl App {
         for i in scroll..self.provider_lists.len().min(scroll + visible) {
             let pl = &self.provider_lists[i];
             let style = if i == self.prov_cursor {
-                Style::default()
-                    .fg(colors.yellow)
-                    .add_modifier(Modifier::BOLD)
+                lift_style_808(
+                    Style::default().fg(colors.grey),
+                    colors,
+                    chrome.row_lift_strength(),
+                )
             } else {
                 Style::default().fg(colors.grey)
             };
@@ -1235,33 +1395,178 @@ fn spectrum_style_808(seg: &SpectrumSegment, colors: Classic808Colors) -> Style 
     }
 }
 
-fn make_808_border_effect(colors: Classic808Colors) -> tachyonfx::Effect {
-    fx::repeating(fx::sequence(&[
-        fx::fade_to_fg(colors.amber, (700, Interpolation::SineInOut)),
-        fx::fade_to_fg(colors.yellow, (500, Interpolation::SineInOut)),
-        fx::fade_to_fg(colors.dim, (900, Interpolation::SineInOut)),
-    ]))
-    .with_filter(CellFilter::Outer(Margin::new(1, 1)))
+fn make_808_header_effect(
+    colors: Classic808Colors,
+    chrome: ChromeFxSignature,
+) -> Option<tachyonfx::Effect> {
+    let config = chrome.header_accent_config()?;
+    Some(fx::repeating(fx::effect_fn(
+        HeaderAccentState {
+            dim: colors.dim,
+            grey: colors.grey,
+            accent: mix_rgb(colors.amber, colors.yellow, 0.32),
+            warm: mix_rgb(colors.deep_amber, colors.amber, 0.58),
+            config,
+        },
+        (config.cycle_ms, Interpolation::SineInOut),
+        |state, ctx, cells| {
+            let width = ctx.area.width.max(1) as f32;
+            cells.for_each_cell(|pos, cell| {
+                if is_block_border_symbol_808(cell.symbol()) || cell.symbol().trim().is_empty() {
+                    return;
+                }
+
+                let base = match cell.fg {
+                    color if color == state.dim => state.dim,
+                    color if color == state.grey => state.grey,
+                    _ => return,
+                };
+
+                let offset = pos.x.saturating_sub(ctx.area.x) as f32 / width;
+                let wave = (ctx.alpha() * TAU + offset * 1.35).sin() * 0.5 + 0.5;
+                let lift = state.config.amplitude * (0.35 + 0.65 * wave);
+                let target = if base == state.dim {
+                    mix_rgb(base, state.warm, lift)
+                } else {
+                    mix_rgb(base, state.accent, lift * 0.82)
+                };
+                cell.set_fg(target);
+            });
+        },
+    )))
 }
 
-fn make_808_header_effect(_colors: Classic808Colors) -> tachyonfx::Effect {
-    fx::repeating(fx::hsl_shift_fg(
-        [18.0, 0.0, 0.0],
-        (1400, Interpolation::SineInOut),
-    ))
-    .with_filter(CellFilter::Text)
+fn make_808_panel_effect(
+    colors: Classic808Colors,
+    chrome: ChromeFxSignature,
+) -> Option<tachyonfx::Effect> {
+    let config = chrome.panel_trace_config()?;
+    Some(fx::repeating(fx::effect_fn(
+        PanelTraceState {
+            base: colors.dim,
+            head: mix_rgb(colors.amber, colors.yellow, 0.28),
+            tail: mix_rgb(colors.deep_amber, colors.amber, 0.46),
+            config,
+        },
+        (config.cycle_ms, Interpolation::Linear),
+        |state, ctx, cells| {
+            if ctx.area.width < 2 || ctx.area.height < 2 {
+                return;
+            }
+
+            let perimeter = perimeter_len_808(ctx.area);
+            if perimeter == 0 {
+                return;
+            }
+
+            let head = ctx.alpha() * perimeter as f32;
+            let tail_len = (perimeter as f32 * state.config.tail_ratio).max(4.0);
+
+            cells.for_each_cell(|pos, cell| {
+                let Some(index) = perimeter_index_808(ctx.area, pos) else {
+                    return;
+                };
+
+                let distance = (head - index as f32).rem_euclid(perimeter as f32);
+                if distance <= tail_len {
+                    let falloff = 1.0 - distance / tail_len;
+                    let hotspot = falloff.powf(1.7);
+                    let accent = mix_rgb(state.tail, state.head, hotspot);
+                    let mix = state.config.tail_mix
+                        + (state.config.head_mix - state.config.tail_mix) * hotspot;
+                    cell.set_fg(mix_rgb(state.base, accent, mix));
+                } else {
+                    cell.set_fg(state.base);
+                }
+            });
+        },
+    )))
 }
 
-fn make_808_focus_effect(colors: Classic808Colors) -> tachyonfx::Effect {
-    fx::repeating(fx::sequence(&[
-        fx::fade_to_fg(colors.yellow, (280, Interpolation::QuadOut)),
-        fx::fade_to_fg(colors.dim, (600, Interpolation::QuadIn)),
-    ]))
-    .with_filter(CellFilter::Outer(Margin::new(1, 1)))
+fn transport_accent_color_808(colors: Classic808Colors, transport: ChromeTransportState) -> Color {
+    match transport {
+        ChromeTransportState::Playing => colors.orange,
+        ChromeTransportState::Buffering => mix_rgb(colors.amber, colors.orange, 0.35),
+        ChromeTransportState::Paused => mix_rgb(colors.orange, colors.grey, 0.42),
+        ChromeTransportState::Stopped => mix_rgb(colors.grey, colors.dim, 0.28),
+        ChromeTransportState::Error => colors.red,
+    }
 }
 
-fn tachyon_should_animate(is_playing: bool, is_paused: bool) -> bool {
-    is_playing && !is_paused
+fn lift_style_808(style: Style, colors: Classic808Colors, strength: f32) -> Style {
+    let lifted = mix_rgb(style.fg.unwrap_or(colors.grey), colors.ivory, strength);
+    style.fg(lifted).add_modifier(Modifier::BOLD)
+}
+
+fn seek_dot_pulse_808(frame: usize, chrome: ChromeFxSignature) -> f32 {
+    let strength = chrome.seek_pulse_strength();
+    if strength <= 0.0 {
+        return 0.0;
+    }
+
+    let period = match chrome.mode {
+        VisMode::Scope => 18.0,
+        VisMode::Retro => 28.0,
+        VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => 22.0,
+    };
+    let wave = ((frame as f32 / period) * TAU).sin() * 0.5 + 0.5;
+    strength * wave
+}
+
+fn chrome_transport_state(
+    buffering: bool,
+    has_error: bool,
+    is_playing: bool,
+    is_paused: bool,
+) -> ChromeTransportState {
+    if buffering {
+        ChromeTransportState::Buffering
+    } else if has_error {
+        ChromeTransportState::Error
+    } else if is_playing && is_paused {
+        ChromeTransportState::Paused
+    } else if is_playing {
+        ChromeTransportState::Playing
+    } else {
+        ChromeTransportState::Stopped
+    }
+}
+
+fn perimeter_len_808(area: Rect) -> u16 {
+    area.width
+        .saturating_mul(2)
+        .saturating_add(area.height.saturating_mul(2))
+        .saturating_sub(4)
+}
+
+fn perimeter_index_808(area: Rect, pos: Position) -> Option<u16> {
+    if area.width < 2 || area.height < 2 {
+        return None;
+    }
+
+    let left = area.x;
+    let right = area.right().saturating_sub(1);
+    let top = area.y;
+    let bottom = area.bottom().saturating_sub(1);
+
+    if pos.y == top && pos.x >= left && pos.x <= right {
+        Some(pos.x - left)
+    } else if pos.x == right && pos.y > top && pos.y <= bottom {
+        Some(area.width + (pos.y - top - 1))
+    } else if pos.y == bottom && pos.x >= left && pos.x < right {
+        Some(area.width + (area.height - 1) + (right - pos.x - 1))
+    } else if pos.x == left && pos.y > top && pos.y < bottom {
+        Some(area.width + (area.height - 1) + (area.width - 1) + (bottom - pos.y - 1))
+    } else {
+        None
+    }
+}
+
+fn is_block_border_symbol_808(symbol: &str) -> bool {
+    matches!(
+        symbol,
+        "─" | "│" | "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼"
+    )
 }
 
 fn playback_state_label(
@@ -1589,9 +1894,93 @@ mod tests {
     }
 
     #[test]
-    fn tachyon_animation_follows_play_pause_state() {
-        assert!(tachyon_should_animate(true, false));
-        assert!(!tachyon_should_animate(true, true));
-        assert!(!tachyon_should_animate(false, false));
+    fn chrome_transport_state_follows_play_pause_state() {
+        assert_eq!(
+            chrome_transport_state(true, false, true, false),
+            ChromeTransportState::Buffering
+        );
+        assert_eq!(
+            chrome_transport_state(false, true, true, false),
+            ChromeTransportState::Error
+        );
+        assert_eq!(
+            chrome_transport_state(false, false, true, true),
+            ChromeTransportState::Paused
+        );
+        assert_eq!(
+            chrome_transport_state(false, false, true, false),
+            ChromeTransportState::Playing
+        );
+        assert_eq!(
+            chrome_transport_state(false, false, false, false),
+            ChromeTransportState::Stopped
+        );
+    }
+
+    #[test]
+    fn chrome_signature_softens_retro_and_browser_motion() {
+        let scope = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Playlist,
+            mode: VisMode::Scope,
+        }
+        .panel_trace_config()
+        .unwrap();
+        let retro = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Playlist,
+            mode: VisMode::Retro,
+        }
+        .panel_trace_config()
+        .unwrap();
+        let browsing = ChromeFxSignature {
+            transport: ChromeTransportState::Stopped,
+            focus: Focus::Browser,
+            mode: VisMode::Bars,
+        }
+        .panel_trace_config();
+
+        assert!(scope.head_mix > retro.head_mix);
+        assert!(scope.cycle_ms < retro.cycle_ms);
+        assert!(browsing.is_none());
+    }
+
+    #[test]
+    fn seek_pulse_only_moves_when_transport_has_motion() {
+        let playing = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Playlist,
+            mode: VisMode::Bars,
+        }
+        .seek_pulse_strength();
+        let paused = ChromeFxSignature {
+            transport: ChromeTransportState::Paused,
+            focus: Focus::Playlist,
+            mode: VisMode::Bars,
+        }
+        .seek_pulse_strength();
+        let stopped = ChromeFxSignature {
+            transport: ChromeTransportState::Stopped,
+            focus: Focus::Playlist,
+            mode: VisMode::Bars,
+        }
+        .seek_pulse_strength();
+
+        assert!(playing > paused);
+        assert_eq!(stopped, 0.0);
+    }
+
+    #[test]
+    fn perimeter_index_walks_clockwise_once() {
+        let area = Rect::new(10, 5, 4, 3);
+        assert_eq!(perimeter_index_808(area, Position::new(10, 5)), Some(0));
+        assert_eq!(perimeter_index_808(area, Position::new(13, 5)), Some(3));
+        assert_eq!(perimeter_index_808(area, Position::new(13, 6)), Some(4));
+        assert_eq!(perimeter_index_808(area, Position::new(13, 7)), Some(5));
+        assert_eq!(perimeter_index_808(area, Position::new(12, 7)), Some(6));
+        assert_eq!(perimeter_index_808(area, Position::new(11, 7)), Some(7));
+        assert_eq!(perimeter_index_808(area, Position::new(10, 7)), Some(8));
+        assert_eq!(perimeter_index_808(area, Position::new(10, 6)), Some(9));
+        assert_eq!(perimeter_index_808(area, Position::new(11, 6)), None);
     }
 }

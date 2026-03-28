@@ -31,6 +31,7 @@ use self::explorer::PlaylistExplorer;
 use self::keys::Focus;
 use self::styles::Palette;
 use self::theme::Theme;
+use self::view_808::ChromeFxSignature;
 use self::visualizer::Visualizer;
 use crate::app_paths;
 use crate::external::apple_music_api::{AppleMusicClient, LibraryTrack};
@@ -132,9 +133,9 @@ pub struct App {
     pub apple_music_tracks: Vec<LibraryTrack>,
     pub apple_music_track_context: Option<AppleMusicTrackContext>,
     pub apple_music_error: Option<String>,
-    pub fx_808_border: Option<tachyonfx::Effect>,
     pub fx_808_header: Option<tachyonfx::Effect>,
-    pub fx_808_focus: Option<tachyonfx::Effect>,
+    pub fx_808_panel: Option<tachyonfx::Effect>,
+    pub fx_808_signature: Option<ChromeFxSignature>,
     pub fx_last_frame: Instant,
     last_backend_refresh: Instant,
     tracker: YtdlTempTracker,
@@ -205,9 +206,9 @@ impl App {
             apple_music_tracks: Vec::new(),
             apple_music_track_context: None,
             apple_music_error: None,
-            fx_808_border: None,
             fx_808_header: None,
-            fx_808_focus: None,
+            fx_808_panel: None,
+            fx_808_signature: None,
             fx_last_frame: Instant::now(),
             last_backend_refresh: Instant::now(),
             tracker,
@@ -237,9 +238,9 @@ impl App {
             _ => Palette::default(),
         };
 
-        self.fx_808_border = None;
         self.fx_808_header = None;
-        self.fx_808_focus = None;
+        self.fx_808_panel = None;
+        self.fx_808_signature = None;
     }
 
     /// Get the current theme name.
