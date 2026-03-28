@@ -7,6 +7,12 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'demo-images/**'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build and upload assets for
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,7 +21,7 @@ env:
 jobs:
   release-plz-pr:
     name: Release-plz PR
-    if: ${{ github.repository_owner == 'opsydyn' }}
+    if: ${{ github.event_name == 'push' && github.repository_owner == 'opsydyn' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -67,7 +73,7 @@ jobs:
 
   release-plz-release:
     name: Release-plz release
-    if: ${{ github.repository_owner == 'opsydyn' }}
+    if: ${{ github.event_name == 'push' && github.repository_owner == 'opsydyn' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -246,6 +252,115 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.release-plz-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/*-"$RELEASE_TAG"-${{ matrix.artifact_name }} --clobber --repo ${{ github.repository }}
+
+  build-existing-release-assets:
+    name: Build existing release assets (${{ matrix.label }})
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository_owner == 'opsydyn' && github.event.inputs.release_tag != '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+            artifact_name: linux-x86_64.tar.gz
+            bin_name: amp808
+          - os: macos-latest
+            label: macos
+            artifact_name: macos-universal.tar.gz
+            bin_name: amp808
+          - os: windows-latest
+            label: windows
+            artifact_name: windows-x86_64.zip
+            bin_name: amp808.exe
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout requested tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_tag }}
+
+      - name: Install Linux audio dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release (macOS universal)
+        if: matrix.os == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build release
+        if: matrix.os != 'macos-latest'
+        run: cargo build --release --locked
+
+      - name: Package release (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/${{ env.APP_NAME }}
+          cp target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/
+          cp README.md dist/${{ env.APP_NAME }}/
+          tar -C dist -czf dist/${{ env.APP_NAME }}-${RELEASE_TAG}-${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+
+      - name: Package release (macOS universal)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/${{ env.APP_NAME }}
+          lipo -create \
+            target/aarch64-apple-darwin/release/${{ matrix.bin_name }} \
+            target/x86_64-apple-darwin/release/${{ matrix.bin_name }} \
+            -output dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}
+          cp README.md dist/${{ env.APP_NAME }}/
+          tar -C dist -czf dist/${{ env.APP_NAME }}-${RELEASE_TAG}-${{ matrix.artifact_name }} ${{ env.APP_NAME }}
+
+      - name: Verify universal binary
+        if: matrix.os == 'macos-latest'
+        run: lipo -info dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}
+
+      - name: Package release (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          New-Item -ItemType Directory -Path dist/${{ env.APP_NAME }} -Force | Out-Null
+          Copy-Item target/release/${{ matrix.bin_name }} dist/${{ env.APP_NAME }}/${{ matrix.bin_name }}
+          Copy-Item README.md dist/${{ env.APP_NAME }}/README.md
+          Compress-Archive -Path dist/${{ env.APP_NAME }}/* -DestinationPath dist/${{ env.APP_NAME }}-$env:RELEASE_TAG-${{ matrix.artifact_name }} -Force
+
+      - name: Upload asset to GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" dist/*-"$RELEASE_TAG"-${{ matrix.artifact_name }} --clobber --repo ${{ github.repository }}
