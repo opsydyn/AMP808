@@ -10,6 +10,8 @@ pub mod view_808;
 pub mod visualizer;
 
 use std::io;
+#[cfg(not(test))]
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,22 @@ use crate::playback_backend::PlaybackBackend;
 use crate::playlist::{self, Playlist, PlaylistInfo, Provider, Track};
 use crate::resolve;
 use crate::resolve::ytdl::YtdlTempTracker;
+
+fn detect_image_picker() -> Option<ratatui_image::picker::Picker> {
+    #[cfg(test)]
+    {
+        None
+    }
+
+    #[cfg(not(test))]
+    {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return None;
+        }
+
+        ratatui_image::picker::Picker::from_query_stdio().ok()
+    }
+}
 
 /// Messages sent from async tasks to the main event loop.
 pub enum AppMsg {
@@ -142,7 +160,7 @@ impl App {
         } else {
             Focus::Playlist
         };
-        let image_picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+        let image_picker = detect_image_picker();
         let app = Self {
             player,
             playlist,
@@ -1099,5 +1117,10 @@ mod tests {
         assert_eq!(app.palette.title, themed.title);
         assert_eq!(app.palette.text, themed.text);
         assert_eq!(app.palette.spectrum_high, themed.spectrum_high);
+    }
+
+    #[test]
+    fn image_picker_probe_is_disabled_in_tests() {
+        assert!(super::detect_image_picker().is_none());
     }
 }

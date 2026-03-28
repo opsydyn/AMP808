@@ -236,7 +236,6 @@ async fn resolve_m3u(m3u_url: &str) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_supported_ext() {
@@ -373,7 +372,10 @@ mod tests {
 
         let tracks = load_local_playlist_file(&playlist).unwrap();
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].path, PathBuf::from(&song).to_string_lossy());
+        assert_eq!(
+            std::fs::canonicalize(&tracks[0].path).unwrap(),
+            std::fs::canonicalize(&song).unwrap()
+        );
         assert_eq!(tracks[0].title, "Track One");
 
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -395,7 +397,10 @@ mod tests {
 
         let tracks = load_local_playlist_file(&playlist).unwrap();
         assert_eq!(tracks.len(), 2);
-        assert_eq!(tracks[0].path, PathBuf::from(&song).to_string_lossy());
+        assert_eq!(
+            std::fs::canonicalize(&tracks[0].path).unwrap(),
+            std::fs::canonicalize(&song).unwrap()
+        );
         assert_eq!(tracks[1].path, "https://example.com/stream.mp3");
 
         std::fs::remove_dir_all(&tmp).unwrap();

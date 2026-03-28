@@ -372,8 +372,12 @@ mod tests {
         std::fs::write(&tmp, b"fake audio").unwrap();
 
         let stdout = format!(
-            "{{\"title\":\"Twin Peaks Theme\",\"uploader\":\"DJ Dado\",\"_filename\":\"{}\"}}\n",
-            tmp.display()
+            "{}\n",
+            serde_json::json!({
+                "title": "Twin Peaks Theme",
+                "uploader": "DJ Dado",
+                "_filename": tmp,
+            })
         );
 
         let (entry, file_path) = parse_download_output(&stdout);

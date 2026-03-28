@@ -5,7 +5,13 @@ on:
     branches:
       - main
       - master
+    paths-ignore:
+      - '**/*.md'
+      - 'demo-images/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'demo-images/**'
 
 permissions:
   contents: read
@@ -17,6 +23,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,6 +42,7 @@ jobs:
   clippy:
     name: Clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +74,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
