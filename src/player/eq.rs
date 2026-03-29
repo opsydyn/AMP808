@@ -83,7 +83,10 @@ impl Biquad {
         self.calc_coeffs(gain_db);
 
         for sample in samples.iter_mut() {
-            #[allow(clippy::needless_range_loop)]
+            #[allow(
+                clippy::needless_range_loop,
+                reason = "A fixed two-channel loop keeps the coefficient state updates explicit."
+            )]
             for ch in 0..2 {
                 let x = sample[ch] as f64;
                 let y = self.b0 * x + self.b1 * self.x1[ch] + self.b2 * self.x2[ch]

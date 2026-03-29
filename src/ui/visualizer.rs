@@ -115,7 +115,10 @@ impl Visualizer {
         let half_len = FFT_SIZE / 2;
 
         // Sum magnitudes per frequency band
-        #[allow(clippy::needless_range_loop)]
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "Band-edge lookups and output writes are clearest when indexed together."
+        )]
         for b in 0..NUM_BANDS {
             let lo_idx = (BAND_EDGES[b] / bin_hz) as usize;
             let hi_idx = (BAND_EDGES[b + 1] / bin_hz) as usize;

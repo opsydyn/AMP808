@@ -16,7 +16,10 @@ use super::stream::StreamingSource;
 #[derive(Debug, Clone)]
 pub struct CoverArt {
     pub data: Vec<u8>,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Retained for MIME-aware artwork handling even when current callers only use bytes."
+    )]
     pub media_type: String,
 }
 

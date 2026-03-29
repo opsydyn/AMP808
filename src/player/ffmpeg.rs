@@ -62,7 +62,10 @@ pub fn decode_ffmpeg(path: &str, target_sr: u32) -> anyhow::Result<Box<dyn Audio
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
+    #[allow(
+        unused_imports,
+        reason = "The test module intentionally keeps the full parent surface available for compact fixtures."
+    )]
     use super::*;
 
     #[test]

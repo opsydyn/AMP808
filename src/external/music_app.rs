@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Music.app control helpers are scaffolded ahead of full command exposure."
+)]
 
 use std::process::Command;
 

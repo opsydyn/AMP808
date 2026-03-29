@@ -41,7 +41,10 @@ impl BpmState {
         state
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Useful for targeted state construction in tests and future explicit lock injection."
+    )]
     pub fn locked(bpm: u16) -> Self {
         let mut state = Self::estimating();
         state.display = BpmDisplayState::Locked(bpm);

@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Apple Music integration is scaffolded ahead of full UI/backend wiring."
+)]
 
 use anyhow::{Context, bail};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -304,6 +307,7 @@ mod tests {
     #[test]
     fn from_env_reads_required_tokens() {
         let _guard = test_env_lock().lock().unwrap();
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::set_var("APPLE_MUSIC_DEVELOPER_TOKEN", "dev-token");
             std::env::set_var("APPLE_MUSIC_USER_TOKEN", "user-token");
@@ -312,6 +316,7 @@ mod tests {
 
         let result = AppleMusicClient::from_env();
 
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::remove_var("APPLE_MUSIC_DEVELOPER_TOKEN");
             std::env::remove_var("APPLE_MUSIC_USER_TOKEN");
@@ -324,6 +329,7 @@ mod tests {
     #[test]
     fn from_env_rejects_missing_developer_token() {
         let _guard = test_env_lock().lock().unwrap();
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::remove_var("APPLE_MUSIC_DEVELOPER_TOKEN");
             std::env::set_var("APPLE_MUSIC_USER_TOKEN", "user-token");
@@ -331,6 +337,7 @@ mod tests {
 
         let err = AppleMusicClient::from_env().unwrap_err();
 
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::remove_var("APPLE_MUSIC_DEVELOPER_TOKEN");
             std::env::remove_var("APPLE_MUSIC_USER_TOKEN");
@@ -342,6 +349,7 @@ mod tests {
     #[test]
     fn from_env_rejects_missing_user_token() {
         let _guard = test_env_lock().lock().unwrap();
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::set_var("APPLE_MUSIC_DEVELOPER_TOKEN", "dev-token");
             std::env::remove_var("APPLE_MUSIC_USER_TOKEN");
@@ -349,6 +357,7 @@ mod tests {
 
         let err = AppleMusicClient::from_env().unwrap_err();
 
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::remove_var("APPLE_MUSIC_DEVELOPER_TOKEN");
             std::env::remove_var("APPLE_MUSIC_USER_TOKEN");
@@ -360,6 +369,7 @@ mod tests {
     #[test]
     fn from_env_uses_optional_storefront() {
         let _guard = test_env_lock().lock().unwrap();
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::set_var("APPLE_MUSIC_DEVELOPER_TOKEN", "dev-token");
             std::env::set_var("APPLE_MUSIC_USER_TOKEN", "user-token");
@@ -368,6 +378,7 @@ mod tests {
 
         let client = AppleMusicClient::from_env().unwrap();
 
+        // SAFETY: these tests serialize process environment mutation behind `test_env_lock`.
         unsafe {
             std::env::remove_var("APPLE_MUSIC_DEVELOPER_TOKEN");
             std::env::remove_var("APPLE_MUSIC_USER_TOKEN");

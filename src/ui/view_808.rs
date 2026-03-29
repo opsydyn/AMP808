@@ -534,6 +534,22 @@ impl Classic808Colors {
         }
     }
 
+    fn buffer_badge_fill(self, pulse: f32) -> Color {
+        if self.themed {
+            mix_rgb(self.black, self.dim, 0.28 + pulse * 0.12)
+        } else {
+            mix_rgb(self.black, self.deep_amber, 0.34 + pulse * 0.16)
+        }
+    }
+
+    fn buffer_badge_text(self, pulse: f32) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.26 + pulse * 0.52)
+        } else {
+            mix_rgb(self.amber, self.yellow, 0.22 + pulse * 0.58)
+        }
+    }
+
     fn row_lift_target(self) -> Color {
         if self.themed {
             mix_rgb(self.grey, self.yellow, 0.24)
@@ -1081,7 +1097,7 @@ impl App {
         };
         let badge = chip_span_808(
             transport_badge_text_808(chrome.transport, self.player.is_streaming()),
-            transport_badge_style_808(colors, chrome.transport),
+            transport_badge_style_808(colors, chrome, self.title_off),
         );
         let badge_width = badge.width() as u16;
         let time_span = Span::styled(
@@ -2036,6 +2052,21 @@ fn seek_dot_pulse_808(frame: usize, chrome: ChromeFxSignature) -> f32 {
     strength * wave
 }
 
+fn buffer_badge_pulse_808(frame: usize, chrome: ChromeFxSignature) -> f32 {
+    if chrome.transport != ChromeTransportState::Buffering {
+        return 0.0;
+    }
+
+    let strength = chrome.seek_pulse_strength().clamp(0.0, 0.18);
+    if strength <= 0.0 {
+        return 0.0;
+    }
+
+    let period = CHROME_MOTION_808.seek_pulse.period(chrome.mode) * 1.35;
+    let wave = ((frame as f32 / period) * TAU).sin() * 0.5 + 0.5;
+    strength * wave
+}
+
 fn chrome_transport_state(
     buffering: bool,
     has_error: bool,
@@ -2122,15 +2153,30 @@ fn transport_badge_text_808(transport: ChromeTransportState, is_streaming: bool)
     }
 }
 
-fn transport_badge_style_808(colors: Classic808Colors, transport: ChromeTransportState) -> Style {
-    match transport {
+fn transport_badge_style_808(
+    colors: Classic808Colors,
+    chrome: ChromeFxSignature,
+    frame: usize,
+) -> Style {
+    match chrome.transport {
         ChromeTransportState::Stopped => Style::default()
             .fg(colors.grey)
             .bg(mix_rgb(colors.black, colors.dim, 0.38))
             .add_modifier(Modifier::BOLD),
+        ChromeTransportState::Buffering => {
+            let pulse = buffer_badge_pulse_808(frame, chrome);
+            let mut style = Style::default()
+                .fg(colors.buffer_badge_text(pulse))
+                .bg(colors.buffer_badge_fill(pulse))
+                .add_modifier(Modifier::BOLD);
+            if pulse > 0.08 {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            style
+        }
         _ => Style::default()
             .fg(colors.black)
-            .bg(transport_accent_color_808(colors, transport))
+            .bg(transport_accent_color_808(colors, chrome.transport))
             .add_modifier(Modifier::BOLD),
     }
 }
@@ -2319,6 +2365,32 @@ mod tests {
             transport_badge_text_808(ChromeTransportState::Playing, true),
             "STREAM"
         );
+    }
+
+    #[test]
+    fn buffering_badge_pulses_while_other_transport_badges_stay_static() {
+        let colors = Classic808Colors::classic();
+        let buffering = ChromeFxSignature {
+            transport: ChromeTransportState::Buffering,
+            focus: Focus::Playlist,
+            mode: VisMode::Scope,
+        };
+        let playing = ChromeFxSignature {
+            transport: ChromeTransportState::Playing,
+            focus: Focus::Playlist,
+            mode: VisMode::Scope,
+        };
+
+        let buffer_style_early = transport_badge_style_808(colors, buffering, 0);
+        let buffer_style_peak = transport_badge_style_808(colors, buffering, 4);
+        let play_style_early = transport_badge_style_808(colors, playing, 0);
+        let play_style_later = transport_badge_style_808(colors, playing, 4);
+
+        assert_ne!(buffer_badge_pulse_808(0, buffering), 0.0);
+        assert_ne!(buffer_style_early.fg, buffer_style_peak.fg);
+        assert_ne!(buffer_style_early.bg, buffer_style_peak.bg);
+        assert_eq!(buffer_badge_pulse_808(4, playing), 0.0);
+        assert_eq!(play_style_early, play_style_later);
     }
 
     #[test]

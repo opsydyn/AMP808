@@ -2,6 +2,16 @@
 name = "amp808"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.85"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+allow_attributes_without_reason = "warn"
+dbg_macro = "deny"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [dependencies]
 # TUI
