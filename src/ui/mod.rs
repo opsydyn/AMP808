@@ -123,6 +123,7 @@ pub struct App {
     pub stream_title: String,
     pub show_cover_art: bool,
     pub cover_art_proto: Option<ratatui_image::protocol::Protocol>,
+    cover_art_proto_808: Option<ratatui_image::protocol::Protocol>,
     cover_art_loaded: bool,
     image_picker: Option<ratatui_image::picker::Picker>,
     pub provider: Option<std::sync::Arc<dyn Provider>>,
@@ -196,6 +197,7 @@ impl App {
             stream_title: String::new(),
             show_cover_art: true,
             cover_art_proto: None,
+            cover_art_proto_808: None,
             cover_art_loaded: false,
             image_picker,
             provider,
@@ -288,13 +290,21 @@ impl App {
             {
                 if let Ok(img) = image::load_from_memory(&art.data)
                     && let Some(ref picker) = self.image_picker
-                    && let Ok(proto) = picker.new_protocol(
-                        img,
-                        ratatui::layout::Rect::new(0, 0, 24, 5),
-                        ratatui_image::Resize::Fit(None),
-                    )
                 {
-                    self.cover_art_proto = Some(proto);
+                    self.cover_art_proto = picker
+                        .new_protocol(
+                            img.clone(),
+                            ratatui::layout::Rect::new(0, 0, 24, 5),
+                            ratatui_image::Resize::Fit(None),
+                        )
+                        .ok();
+                    self.cover_art_proto_808 = picker
+                        .new_protocol(
+                            img,
+                            ratatui::layout::Rect::new(0, 0, 28, 8),
+                            ratatui_image::Resize::Fit(None),
+                        )
+                        .ok();
                 }
                 self.cover_art_loaded = true;
             }
@@ -483,6 +493,7 @@ impl App {
         self.reset_bpm_state();
         self.stream_title.clear();
         self.cover_art_proto = None;
+        self.cover_art_proto_808 = None;
         self.cover_art_loaded = false;
 
         // Lazy-resolve yt-dlp URLs

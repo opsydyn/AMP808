@@ -138,6 +138,26 @@ cargo run -- --backend music-app
 ./target/release/amp808 --backend music-app
 ```
 
+### macOS first run for downloaded release binaries
+
+If you download the macOS release tarball and run the unpacked binary directly, the first launch may
+need one-time macOS cleanup before Terminal can execute it:
+
+```bash
+chmod +x amp808
+xattr -d com.apple.quarantine amp808
+./amp808
+```
+
+Why this may be necessary:
+
+- `chmod +x amp808` restores the executable bit if your download or extraction path did not preserve it.
+- `xattr -d com.apple.quarantine amp808` removes the Gatekeeper quarantine flag macOS often adds to binaries downloaded from the internet.
+- `./amp808` runs the local binary once those two macOS checks are out of the way.
+
+If `xattr` reports that `com.apple.quarantine` does not exist, that is fine; it just means macOS did
+not mark this copy of `amp808` as quarantined.
+
 ### Special cases
 
 Running `cargo run` with no media arguments prints the startup usage summary and exits.

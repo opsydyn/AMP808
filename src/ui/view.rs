@@ -14,7 +14,7 @@ impl App {
     /// Render the full TUI frame.
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let retro_mode = self.vis.mode == VisMode::Retro;
+        let tall_visual_mode = matches!(self.vis.mode, VisMode::Retro | VisMode::Logo);
 
         if self.show_keymap {
             self.render_keymap(frame, area);
@@ -33,8 +33,8 @@ impl App {
 
         // Center content in terminal
         let content_width = PANEL_WIDTH + 6; // panel + padding
-        let spectrum_height = if retro_mode { 8u16 } else { 5u16 };
-        let content_height = if retro_mode { 31u16 } else { 28u16 };
+        let spectrum_height = if tall_visual_mode { 8u16 } else { 5u16 };
+        let content_height = if tall_visual_mode { 31u16 } else { 28u16 };
         let x = area.width.saturating_sub(content_width) / 2;
         let y = area.height.saturating_sub(content_height) / 2;
         let inner = Rect::new(
@@ -96,15 +96,7 @@ impl App {
                 spec_chunks[1].height,
             );
             let art_area = if let Some(proto) = self.cover_art_proto.as_ref() {
-                let proto_area = proto.area();
-                let w = proto_area.width.min(art_slot.width);
-                let h = proto_area.height.min(art_slot.height);
-                Rect::new(
-                    art_slot.x + art_slot.width.saturating_sub(w) / 2,
-                    art_slot.y,
-                    w,
-                    h,
-                )
+                self.cover_art_area_for_slot(art_slot, proto.area())
             } else {
                 art_slot
             };
@@ -246,6 +238,9 @@ impl App {
             if self.vis.mode == VisMode::Retro {
                 self.vis
                     .render_retro(&bands, area.width as usize, area.height as usize, animate)
+            } else if self.vis.mode == VisMode::Logo {
+                self.vis
+                    .render_logo(&bands, area.width as usize, area.height as usize, animate)
             } else {
                 self.vis.render_synthetic(&bands)
             }
@@ -256,6 +251,11 @@ impl App {
                 let animate = self.player.is_playing() && !self.player.is_paused();
                 self.vis
                     .render_retro(&bands, area.width as usize, area.height as usize, animate)
+            } else if self.vis.mode == VisMode::Logo {
+                let bands = self.vis.analyze(&samples);
+                let animate = self.player.is_playing() && !self.player.is_paused();
+                self.vis
+                    .render_logo(&bands, area.width as usize, area.height as usize, animate)
             } else if self.vis.mode == VisMode::Scope {
                 self.vis
                     .render_scope(&samples, area.width as usize, area.height as usize)
@@ -283,8 +283,36 @@ impl App {
 
     pub fn render_cover_art(&self, frame: &mut Frame, area: Rect) {
         if let Some(ref proto) = self.cover_art_proto {
-            let image = ratatui_image::Image::new(proto);
-            frame.render_widget(image, area);
+            self.render_cover_art_proto(frame, area, proto);
+        }
+    }
+
+    pub fn render_cover_art_proto(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        proto: &ratatui_image::protocol::Protocol,
+    ) {
+        let image = ratatui_image::Image::new(proto);
+        frame.render_widget(image, area);
+    }
+
+    pub fn cover_art_area_for_slot(&self, slot: Rect, proto_area: Rect) -> Rect {
+        let w = proto_area.width.min(slot.width);
+        let h = proto_area.height.min(slot.height);
+        Rect::new(slot.x + slot.width.saturating_sub(w) / 2, slot.y, w, h)
+    }
+
+    pub fn cover_art_proto_for_808(
+        &self,
+        tall_visual_mode: bool,
+    ) -> Option<&ratatui_image::protocol::Protocol> {
+        if tall_visual_mode {
+            self.cover_art_proto_808
+                .as_ref()
+                .or(self.cover_art_proto.as_ref())
+        } else {
+            self.cover_art_proto.as_ref()
         }
     }
 

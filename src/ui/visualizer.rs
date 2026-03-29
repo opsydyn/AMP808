@@ -8,6 +8,13 @@ const FFT_SIZE: usize = 2048;
 const BAND_FILL_WIDTH: usize = 4;
 const BAND_GAP_WIDTH: usize = 1;
 const SOLID_BAR_WIDTH: usize = NUM_BANDS * BAND_FILL_WIDTH + (NUM_BANDS - 1) * BAND_GAP_WIDTH;
+const LOGO_GLYPH_W: usize = 5;
+const LOGO_GLYPH_H: usize = 7;
+const LOGO_GLYPH_GAP: usize = 2;
+const LOGO_GLYPH_COUNT: usize = 6;
+const LOGO_TOTAL_W: usize =
+    LOGO_GLYPH_COUNT * LOGO_GLYPH_W + (LOGO_GLYPH_COUNT - 1) * LOGO_GLYPH_GAP;
+const LOGO_BAND_MAP: [usize; LOGO_GLYPH_COUNT] = [0, 2, 4, 5, 7, 9];
 
 /// Thin glyph for horizontal bars so adjacent rows keep a visible gap.
 const HBAR_GLYPH: &str = "▀";
@@ -19,6 +26,17 @@ const BAND_EDGES: [f64; 11] = [
     20.0, 100.0, 200.0, 400.0, 800.0, 1600.0, 3200.0, 6400.0, 12800.0, 16000.0, 20000.0,
 ];
 
+/// 5x7 pixel glyphs for `TR-808`.
+/// Each row uses 5 bits, with bit 4 as the leftmost pixel.
+const LOGO_GLYPHS: [[u8; LOGO_GLYPH_H]; LOGO_GLYPH_COUNT] = [
+    [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04], // T
+    [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11], // R
+    [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00], // -
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
+    [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E], // 0
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E], // 8
+];
+
 /// Visualizer mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisMode {
@@ -27,6 +45,7 @@ pub enum VisMode {
     VBars,
     Bricks,
     Retro,
+    Logo,
     Scope,
 }
 
@@ -73,7 +92,8 @@ impl Visualizer {
             VisMode::BarsGap => VisMode::VBars,
             VisMode::VBars => VisMode::Bricks,
             VisMode::Bricks => VisMode::Retro,
-            VisMode::Retro => VisMode::Scope,
+            VisMode::Retro => VisMode::Logo,
+            VisMode::Logo => VisMode::Scope,
             VisMode::Scope => VisMode::Bars,
         };
     }
@@ -83,7 +103,8 @@ impl Visualizer {
             VisMode::Bars => VisMode::BarsGap,
             VisMode::BarsGap => VisMode::VBars,
             VisMode::VBars => VisMode::Bricks,
-            VisMode::Bricks | VisMode::Retro | VisMode::Scope => VisMode::Bars,
+            VisMode::Bricks => VisMode::Logo,
+            VisMode::Logo | VisMode::Retro | VisMode::Scope => VisMode::Bars,
         };
     }
 
@@ -202,13 +223,17 @@ impl Visualizer {
             VisMode::BarsGap => self.render_bars_solid(bands),
             VisMode::VBars => self.render_vertical_bars_gapped(bands),
             VisMode::Bricks => self.render_bricks(bands),
-            VisMode::Retro | VisMode::Scope => self.render_vertical_bars_gapped(&[0.0; NUM_BANDS]),
+            VisMode::Retro | VisMode::Logo | VisMode::Scope => {
+                self.render_vertical_bars_gapped(&[0.0; NUM_BANDS])
+            }
         }
     }
 
     pub fn render_synthetic(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         match self.mode {
-            VisMode::Retro | VisMode::Scope => self.render_vertical_bars_gapped(bands),
+            VisMode::Retro | VisMode::Logo | VisMode::Scope => {
+                self.render_vertical_bars_gapped(bands)
+            }
             _ => self.render(bands),
         }
     }
@@ -407,6 +432,78 @@ impl Visualizer {
         }
 
         lines
+    }
+
+    /// Render a dissolving `TR-808` Braille logo driven by spectrum energy.
+    pub fn render_logo(
+        &mut self,
+        bands: &[f64; NUM_BANDS],
+        width: usize,
+        height: usize,
+        animate: bool,
+    ) -> Vec<SpectrumLine> {
+        if width == 0 || height == 0 {
+            return Vec::new();
+        }
+
+        let dot_rows = height * 4;
+        let dot_cols = width * 2;
+        if dot_rows == 0 || dot_cols == 0 {
+            return Vec::new();
+        }
+
+        let mut pixels = vec![vec![false; dot_cols]; dot_rows];
+
+        let scale_x = (dot_cols / LOGO_TOTAL_W).max(1);
+        let scale_y = ((dot_rows.saturating_mul(4) / 5) / LOGO_GLYPH_H).max(1);
+        let rendered_w = LOGO_TOTAL_W * scale_x;
+        let rendered_h = LOGO_GLYPH_H * scale_y;
+        let offset_x = dot_cols.saturating_sub(rendered_w) / 2;
+        let base_offset_y = dot_rows.saturating_sub(rendered_h) / 2;
+        let frame = self.frame;
+
+        for (glyph_idx, glyph) in LOGO_GLYPHS.iter().enumerate() {
+            let energy = bands[LOGO_BAND_MAP[glyph_idx]].clamp(0.0, 1.0);
+            let wave = ((frame as f64) * 0.085 + glyph_idx as f64 * 0.78).sin() * 2.4;
+            let bounce = (energy * base_offset_y as f64 * 0.5 + wave).round() as isize;
+
+            let letter_x = offset_x + glyph_idx * (LOGO_GLYPH_W + LOGO_GLYPH_GAP) * scale_x;
+            let letter_y = base_offset_y as isize - bounce;
+
+            for (py, row_bits) in glyph.iter().enumerate() {
+                for px in 0..LOGO_GLYPH_W {
+                    if row_bits & (1 << (LOGO_GLYPH_W - 1 - px)) == 0 {
+                        continue;
+                    }
+
+                    // Loud passages fill the logo solid; silence dissolves it to sparse dots.
+                    let fill = (energy * energy * 0.58 + 0.32).clamp(0.0, 0.9);
+                    for sy in 0..scale_y {
+                        for sx in 0..scale_x {
+                            let dx = letter_x + px * scale_x + sx;
+                            let dy = letter_y + (py * scale_y + sy) as isize;
+                            if dx >= dot_cols || dy < 0 || dy as usize >= dot_rows {
+                                continue;
+                            }
+
+                            if scatter_hash(glyph_idx, py * scale_y + sy, px * scale_x + sx, frame)
+                                > fill
+                            {
+                                continue;
+                            }
+
+                            pixels[dy as usize][dx] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if animate {
+            self.frame = self.frame.wrapping_add(1);
+        }
+
+        braille_lines_from_pixels(&pixels, width, height, SpectrumSegmentKind::Gradient)
     }
 
     /// Render a basic oscilloscope trace from recent time-domain samples.
@@ -697,6 +794,19 @@ fn sample_linear(samples: &[f64], t: f64) -> f64 {
     samples[idx] * (1.0 - frac) + samples[next] * frac
 }
 
+fn scatter_hash(band: usize, row: usize, col: usize, frame: u64) -> f64 {
+    let stagger = (row * 3 + col) as u64;
+    let frame_bucket = (frame + stagger) / 3;
+    let mut hash = (band as u64) * 7_919
+        + (row as u64) * 6_271
+        + (col as u64) * 3_037
+        + frame_bucket * 104_729;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x45d9_f3b3_7197_344b);
+    hash ^= hash >> 16;
+    (hash % 10_000) as f64 / 10_000.0
+}
+
 fn set_pixel(pixels: &mut [Vec<bool>], x: i32, y: i32) {
     if x < 0 || y < 0 {
         return;
@@ -922,6 +1032,8 @@ mod tests {
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Retro);
         vis.cycle_mode();
+        assert_eq!(vis.mode, VisMode::Logo);
+        vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Scope);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bars);
@@ -938,9 +1050,15 @@ mod tests {
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bricks);
         vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Logo);
+        vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bars);
 
         vis.mode = VisMode::Retro;
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::Bars);
+
+        vis.mode = VisMode::Logo;
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bars);
 
@@ -1144,6 +1262,90 @@ mod tests {
         assert_eq!(vis.frame, 0);
 
         let _ = vis.render_retro(&bands, 24, 8, true);
+        assert_eq!(vis.frame, 1);
+    }
+
+    #[test]
+    fn test_render_logo_dimensions() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.5; NUM_BANDS];
+        let lines = vis.render_logo(&bands, 24, 5, true);
+        assert_eq!(lines.len(), 5);
+        assert!(lines.iter().all(|line| {
+            line.segments
+                .iter()
+                .map(|seg| seg.text.chars().count())
+                .sum::<usize>()
+                == 24
+        }));
+    }
+
+    #[test]
+    fn test_render_logo_uses_braille_and_gradient_segments() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.9, 0.15, 0.75, 0.2, 0.85, 0.65, 0.2, 0.7, 0.1, 0.95];
+        let lines = vis.render_logo(&bands, 24, 5, true);
+        let chars: Vec<char> = lines
+            .iter()
+            .flat_map(|line| line.segments.iter())
+            .flat_map(|seg| seg.text.chars())
+            .collect();
+        let kinds: Vec<SpectrumSegmentKind> = lines
+            .iter()
+            .flat_map(|line| line.segments.iter().map(|seg| seg.kind))
+            .collect();
+
+        assert!(
+            chars
+                .iter()
+                .any(|&c| ('\u{2801}'..='\u{28ff}').contains(&c)),
+            "logo should render with braille glyphs for finer dot detail"
+        );
+        assert!(
+            kinds
+                .iter()
+                .all(|kind| *kind == SpectrumSegmentKind::Gradient)
+        );
+    }
+
+    #[test]
+    fn test_render_logo_dissolves_at_low_energy_and_fills_at_high_energy() {
+        let mut vis = Visualizer::new(44100.0);
+        let quiet = [0.0; NUM_BANDS];
+        let loud = [1.0; NUM_BANDS];
+
+        let quiet_lines = vis.render_logo(&quiet, 24, 5, false);
+        let loud_lines = vis.render_logo(&loud, 24, 5, false);
+
+        let painted_count = |lines: &[SpectrumLine]| {
+            lines
+                .iter()
+                .flat_map(|line| line.segments.iter())
+                .flat_map(|seg| seg.text.chars())
+                .filter(|&ch| ch != ' ' && ch != '\u{2800}')
+                .count()
+        };
+
+        assert!(
+            painted_count(&loud_lines) > painted_count(&quiet_lines),
+            "high-energy logo should fill in more densely than low-energy logo"
+        );
+    }
+
+    #[test]
+    fn test_render_logo_freezes_when_not_animating() {
+        let mut vis = Visualizer::new(44100.0);
+        let bands = [0.65; NUM_BANDS];
+
+        let first = vis.render_logo(&bands, 24, 5, false);
+        let second = vis.render_logo(&bands, 24, 5, false);
+        assert_eq!(vis.frame, 0);
+        assert_eq!(
+            first[0].segments[0].text, second[0].segments[0].text,
+            "logo should stay stable when animation is disabled"
+        );
+
+        let _ = vis.render_logo(&bands, 24, 5, true);
         assert_eq!(vis.frame, 1);
     }
 

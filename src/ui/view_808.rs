@@ -34,12 +34,16 @@ const C808_BLACK: Color = Color::Rgb(0x12, 0x12, 0x12);
 const EQ_LABELS: [&str; 10] = [
     "70", "180", "320", "600", "1k", "3k", "6k", "12k", "14k", "16k",
 ];
+const COVER_ART_GAP_808: u16 = 2;
+const COVER_ART_WIDTH_808: u16 = 24;
+const COVER_ART_WIDTH_808_TALL: u16 = 28;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenderMode808 {
     HorizontalBars,
     LedColumns,
     Retro,
+    Logo,
     Oscilloscope,
 }
 
@@ -125,7 +129,7 @@ impl MotionWeights808 {
     fn mode(self, mode: VisMode) -> f32 {
         match mode {
             VisMode::Scope => self.scope,
-            VisMode::Retro => self.retro,
+            VisMode::Retro | VisMode::Logo => self.retro,
             VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars,
         }
     }
@@ -262,7 +266,7 @@ impl SeekPulseTuning808 {
     fn period(self, mode: VisMode) -> f32 {
         match mode {
             VisMode::Scope => self.scope_period,
-            VisMode::Retro => self.retro_period,
+            VisMode::Retro | VisMode::Logo => self.retro_period,
             VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars_period,
         }
     }
@@ -583,6 +587,10 @@ fn content_height_808(browser_focus: bool, retro_mode: bool, terminal_height: u1
     target.min(terminal_height)
 }
 
+fn tall_visual_scene_808(mode: VisMode) -> bool {
+    matches!(mode, VisMode::Retro | VisMode::Logo)
+}
+
 fn browser_panel_min_height_808(browser_focus: bool) -> u16 {
     if browser_focus { 6 } else { 3 }
 }
@@ -655,12 +663,12 @@ impl App {
     pub fn render_808(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let browser_focus = self.focus == Focus::Browser;
-        let retro_mode = self.vis.mode == VisMode::Retro;
+        let tall_visual_mode = tall_visual_scene_808(self.vis.mode);
 
         // Content sizing — centre both horizontally and vertically
         let content_width = 80u16.min(area.width);
-        let content_height = content_height_808(browser_focus, retro_mode, area.height);
-        let spectrum_height = if retro_mode { 8u16 } else { 5u16 };
+        let content_height = content_height_808(browser_focus, tall_visual_mode, area.height);
+        let spectrum_height = if tall_visual_mode { 8u16 } else { 5u16 };
         let x = area.width.saturating_sub(content_width) / 2;
         let y = area.height.saturating_sub(content_height) / 2;
         let inner = Rect::new(x, y, content_width, content_height);
@@ -690,13 +698,25 @@ impl App {
         self.render_808_status(frame, chunks[5]);
 
         // Split spectrum area for album art when available
-        if self.show_cover_art && self.cover_art_proto.is_some() {
+        if self.show_cover_art && self.cover_art_proto_for_808(tall_visual_mode).is_some() {
+            let art_width = if tall_visual_mode {
+                COVER_ART_WIDTH_808_TALL
+            } else {
+                COVER_ART_WIDTH_808
+            };
             let spec_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(40), Constraint::Length(24)])
+                .constraints([
+                    Constraint::Min(36),
+                    Constraint::Length(COVER_ART_GAP_808),
+                    Constraint::Length(art_width),
+                ])
                 .split(chunks[7]);
             self.render_808_spectrum(frame, spec_chunks[0]);
-            self.render_cover_art(frame, spec_chunks[1]);
+            if let Some(proto) = self.cover_art_proto_for_808(tall_visual_mode) {
+                let art_area = self.cover_art_area_for_slot(spec_chunks[2], proto.area());
+                self.render_cover_art_proto(frame, art_area, proto);
+            }
         } else {
             self.render_808_spectrum(frame, chunks[7]);
         }
@@ -1268,6 +1288,15 @@ impl App {
                     );
                     self.render_808_visual_lines(frame, area, lines);
                 }
+                RenderMode808::Logo => {
+                    let lines = self.vis.render_logo(
+                        &bands,
+                        area.width as usize,
+                        area.height as usize,
+                        animate,
+                    );
+                    self.render_808_visual_lines(frame, area, lines);
+                }
                 RenderMode808::Oscilloscope => {
                     self.render_808_led_columns(frame, area, &bands);
                 }
@@ -1291,6 +1320,17 @@ impl App {
                 let bands = self.vis.analyze(&samples);
                 let animate = self.player.is_playing() && !self.player.is_paused();
                 let lines = self.vis.render_retro(
+                    &bands,
+                    area.width as usize,
+                    area.height as usize,
+                    animate,
+                );
+                self.render_808_visual_lines(frame, area, lines);
+            }
+            RenderMode808::Logo => {
+                let bands = self.vis.analyze(&samples);
+                let animate = self.player.is_playing() && !self.player.is_paused();
+                let lines = self.vis.render_logo(
                     &bands,
                     area.width as usize,
                     area.height as usize,
@@ -1872,6 +1912,7 @@ fn render_mode_808(mode: VisMode) -> RenderMode808 {
         VisMode::VBars => RenderMode808::LedColumns,
         VisMode::Bricks => RenderMode808::LedColumns,
         VisMode::Retro => RenderMode808::Retro,
+        VisMode::Logo => RenderMode808::Logo,
         VisMode::Scope => RenderMode808::Oscilloscope,
     }
 }
@@ -1883,6 +1924,7 @@ fn vis_mode_label(mode: VisMode) -> &'static str {
         VisMode::VBars => "VBAR",
         VisMode::Bricks => "LEDS",
         VisMode::Retro => "RETRO",
+        VisMode::Logo => "LOGO",
         VisMode::Scope => "SCOPE",
     }
 }
@@ -2566,6 +2608,19 @@ mod tests {
     }
 
     #[test]
+    fn logo_mode_shares_tall_visual_scene_height() {
+        assert!(tall_visual_scene_808(VisMode::Logo));
+        assert_eq!(
+            content_height_808(false, tall_visual_scene_808(VisMode::Logo), 40),
+            31
+        );
+        assert_eq!(
+            content_height_808(true, tall_visual_scene_808(VisMode::Logo), 40),
+            34
+        );
+    }
+
+    #[test]
     fn render_mode_mapping_matches_808_design() {
         assert_eq!(
             render_mode_808(VisMode::Bars),
@@ -2578,6 +2633,7 @@ mod tests {
         assert_eq!(render_mode_808(VisMode::VBars), RenderMode808::LedColumns);
         assert_eq!(render_mode_808(VisMode::Bricks), RenderMode808::LedColumns);
         assert_eq!(render_mode_808(VisMode::Retro), RenderMode808::Retro);
+        assert_eq!(render_mode_808(VisMode::Logo), RenderMode808::Logo);
         assert_eq!(render_mode_808(VisMode::Scope), RenderMode808::Oscilloscope);
     }
 
@@ -2588,6 +2644,7 @@ mod tests {
         assert_eq!(vis_mode_label(VisMode::VBars), "VBAR");
         assert_eq!(vis_mode_label(VisMode::Bricks), "LEDS");
         assert_eq!(vis_mode_label(VisMode::Retro), "RETRO");
+        assert_eq!(vis_mode_label(VisMode::Logo), "LOGO");
         assert_eq!(vis_mode_label(VisMode::Scope), "SCOPE");
     }
 
