@@ -1,9 +1,9 @@
-# amp808
+# AMP808
 
 [![Built With Ratatui](https://ratatui.rs/built-with-ratatui/badge.svg)](https://ratatui.rs/)
 </h1>
 
-![amp808 logo](AMP808-TUI-logo.png)
+![amp808 logo](https://raw.githubusercontent.com/opsydyn/AMP808/main/AMP808-TUI-logo.png)
 
 A Winamp 2.x-inspired terminal music player, written in Rust with Ratatui. Port of [cliamp](https://github.com/bjarneo/cliamp) (Go/Bubbletea).
 
@@ -30,25 +30,25 @@ EQ  70 180 320 600 1k 3k 6k 12k 14k 16k [Rock]
 
 ### Classic TR-808
 
-![Classic TR-808 view with bars visualizer](demo-images/demo1.png)
+![Classic TR-808 view with bars visualizer](https://raw.githubusercontent.com/opsydyn/AMP808/main/demo-images/demo1.png)
 
 Classic 808 layout with the standard bar visualizer and custom theme palette.
 
 ### TR-808 Retro Visualizer
 
-![TR-808 view with retro synthwave visualizer](demo-images/demo2.png)
+![TR-808 view with retro synthwave visualizer](https://raw.githubusercontent.com/opsydyn/AMP808/main/demo-images/demo2.png)
 
 Retro synthwave mode in the 808 layout, with the sun/grid scene centered in the player.
 
 ### Themed 808 Variant
 
-![Themed TR-808 variant with lavender accents](demo-images/demo3.png)
+![Themed TR-808 variant with lavender accents](https://raw.githubusercontent.com/opsydyn/AMP808/main/demo-images/demo3.png)
 
 The classic 808 renderer using one of the main theme selections instead of the default yellow/orange scheme.
 
 ### TR-808 Solid Bars
 
-![TR-808 view with solid bars visualizer](demo-images/demo4..png)
+![TR-808 view with solid bars visualizer](https://raw.githubusercontent.com/opsydyn/AMP808/main/demo-images/demo4..png)
 
 Solid bar mode in the 808 layout for a denser, more meter-like playback display.
 

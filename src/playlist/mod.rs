@@ -387,6 +387,12 @@ impl Playlist {
     /// Toggle shuffle mode. Fisher-Yates shuffle preserving current track at pos 0.
     pub fn toggle_shuffle(&mut self) {
         self.shuffle = !self.shuffle;
+        if self.tracks.is_empty() {
+            self.order.clear();
+            self.pos = 0;
+            self.queued_idx = None;
+            return;
+        }
         if self.shuffle {
             self.do_shuffle();
         } else {
@@ -433,6 +439,7 @@ impl Playlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn make_track(title: &str) -> Track {
         Track {
@@ -440,6 +447,125 @@ mod tests {
             title: title.to_string(),
             artist: String::new(),
             stream: false,
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct PlaylistSnapshot {
+        order: Vec<usize>,
+        pos: usize,
+        shuffle: bool,
+        repeat: RepeatMode,
+        queue: Vec<usize>,
+        queued_idx: Option<usize>,
+    }
+
+    #[derive(Clone, Debug)]
+    enum PlaylistOp {
+        ToggleShuffle,
+        CycleRepeat,
+        Next,
+        Prev,
+        PeekNext,
+        SetIndex(usize),
+        Queue(usize),
+        Dequeue(usize),
+    }
+
+    fn snapshot(playlist: &Playlist) -> PlaylistSnapshot {
+        PlaylistSnapshot {
+            order: playlist.order.clone(),
+            pos: playlist.pos,
+            shuffle: playlist.shuffle,
+            repeat: playlist.repeat,
+            queue: playlist.queue.clone(),
+            queued_idx: playlist.queued_idx,
+        }
+    }
+
+    fn op_strategy() -> impl Strategy<Value = PlaylistOp> {
+        prop_oneof![
+            Just(PlaylistOp::ToggleShuffle),
+            Just(PlaylistOp::CycleRepeat),
+            Just(PlaylistOp::Next),
+            Just(PlaylistOp::Prev),
+            Just(PlaylistOp::PeekNext),
+            (0usize..32).prop_map(PlaylistOp::SetIndex),
+            (0usize..32).prop_map(PlaylistOp::Queue),
+            (0usize..32).prop_map(PlaylistOp::Dequeue),
+        ]
+    }
+
+    fn make_tracks(count: usize) -> Vec<Track> {
+        (0..count).map(|i| make_track(&format!("T{i}"))).collect()
+    }
+
+    fn assert_playlist_invariants(playlist: &Playlist) {
+        let len = playlist.tracks.len();
+        assert_eq!(playlist.order.len(), len);
+        assert_eq!(playlist.queue_len(), playlist.queue.len());
+        assert!(playlist.queue.iter().all(|&idx| idx < len));
+
+        if len == 0 {
+            assert!(playlist.order.is_empty());
+            assert_eq!(playlist.pos, 0);
+            assert!(playlist.current().is_none());
+            assert!(playlist.index().is_none());
+            assert!(playlist.queue.is_empty());
+            assert!(playlist.queued_idx.is_none());
+            return;
+        }
+
+        assert!(playlist.pos < len);
+
+        let mut seen = vec![false; len];
+        for &idx in &playlist.order {
+            assert!(idx < len);
+            assert!(!seen[idx]);
+            seen[idx] = true;
+        }
+        assert!(seen.into_iter().all(std::convert::identity));
+
+        if !playlist.shuffle {
+            let expected: Vec<usize> = (0..len).collect();
+            assert_eq!(playlist.order, expected);
+        }
+
+        let expected_idx = playlist.queued_idx.unwrap_or(playlist.order[playlist.pos]);
+        assert_eq!(playlist.index(), Some(expected_idx));
+        let (_, current_idx) = playlist.current().expect("non-empty playlist has current");
+        assert_eq!(current_idx, expected_idx);
+
+        for idx in 0..len {
+            let pos = playlist.queue_position(idx);
+            if pos == 0 {
+                assert!(!playlist.queue.contains(&idx));
+            } else {
+                assert_eq!(playlist.queue[pos - 1], idx);
+            }
+        }
+    }
+
+    fn apply_op(playlist: &mut Playlist, op: PlaylistOp) {
+        match op {
+            PlaylistOp::ToggleShuffle => playlist.toggle_shuffle(),
+            PlaylistOp::CycleRepeat => playlist.cycle_repeat(),
+            PlaylistOp::Next => {
+                let _ = playlist.next();
+            }
+            PlaylistOp::Prev => {
+                let _ = playlist.prev();
+            }
+            PlaylistOp::PeekNext => {
+                let before = snapshot(playlist);
+                let _ = playlist.peek_next();
+                assert_eq!(snapshot(playlist), before);
+            }
+            PlaylistOp::SetIndex(idx) => playlist.set_index(idx),
+            PlaylistOp::Queue(idx) => playlist.queue(idx),
+            PlaylistOp::Dequeue(idx) => {
+                let _ = playlist.dequeue(idx);
+            }
         }
     }
 
@@ -544,6 +670,18 @@ mod tests {
         assert_eq!(pl.len(), 0);
         assert!(pl.current().is_none());
         assert!(pl.index().is_none());
+    }
+
+    #[test]
+    fn test_toggle_shuffle_on_empty_playlist_is_safe() {
+        let mut pl = Playlist::new();
+        pl.toggle_shuffle();
+        assert!(pl.shuffled());
+        assert_playlist_invariants(&pl);
+
+        pl.toggle_shuffle();
+        assert!(!pl.shuffled());
+        assert_playlist_invariants(&pl);
     }
 
     #[test]
@@ -770,5 +908,51 @@ mod tests {
 
         pl.cycle_repeat();
         assert_eq!(pl.repeat(), RepeatMode::Off);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn prop_shuffle_round_trips_current_track(
+            track_count in 0usize..20,
+            current_idx in 0usize..64,
+        ) {
+            let mut playlist = Playlist::new();
+            playlist.add(&make_tracks(track_count));
+            if track_count > 0 {
+                playlist.set_index(current_idx % track_count);
+            }
+            let before_idx = playlist.index();
+            let before_repeat = playlist.repeat();
+
+            playlist.toggle_shuffle();
+            assert_playlist_invariants(&playlist);
+            assert_eq!(playlist.repeat(), before_repeat);
+            assert_eq!(playlist.index(), before_idx);
+
+            playlist.toggle_shuffle();
+            assert_playlist_invariants(&playlist);
+            assert_eq!(playlist.repeat(), before_repeat);
+            assert_eq!(playlist.index(), before_idx);
+        }
+
+        #[test]
+        fn prop_playlist_ops_preserve_invariants(
+            track_count in 0usize..20,
+            ops in prop::collection::vec(op_strategy(), 0..128),
+        ) {
+            let mut playlist = Playlist::new();
+            playlist.add(&make_tracks(track_count));
+            assert_playlist_invariants(&playlist);
+
+            for op in ops {
+                apply_op(&mut playlist, op);
+                assert_playlist_invariants(&playlist);
+            }
+        }
     }
 }

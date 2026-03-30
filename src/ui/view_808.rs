@@ -37,6 +37,10 @@ const EQ_LABELS: [&str; 10] = [
 const COVER_ART_GAP_808: u16 = 2;
 const COVER_ART_WIDTH_808: u16 = 24;
 const COVER_ART_WIDTH_808_TALL: u16 = 28;
+const VOLUME_LED_STEPS_808_WIDE: usize = 10;
+const VOLUME_LED_STEPS_808_MEDIUM: usize = 8;
+const VOLUME_LED_STEPS_808_NARROW: usize = 6;
+const VOLUME_FLASH_TICKS_808: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RenderMode808 {
@@ -446,6 +450,7 @@ struct Classic808Colors {
     orange: Color,
     amber: Color,
     yellow: Color,
+    volume: Color,
     grey: Color,
     dim: Color,
     deep_amber: Color,
@@ -463,6 +468,7 @@ impl Classic808Colors {
             orange: C808_ORANGE,
             amber: C808_AMBER,
             yellow: C808_YELLOW,
+            volume: C808_ORANGE,
             grey: C808_GREY,
             dim: C808_DIM,
             deep_amber: C808_DEEP_AMBER,
@@ -480,6 +486,7 @@ impl Classic808Colors {
             orange: palette.playing,
             amber: palette.seek_bar,
             yellow: palette.accent,
+            volume: palette.volume,
             grey: palette.text,
             dim: palette.dim,
             deep_amber: mix_rgb(palette.seek_bar, palette.dim, 0.45),
@@ -559,6 +566,60 @@ impl Classic808Colors {
             mix_rgb(self.grey, self.yellow, 0.24)
         } else {
             self.ivory
+        }
+    }
+
+    fn volume_led_off(self) -> Color {
+        mix_rgb(self.black, self.dim, 0.56)
+    }
+
+    fn control_led_gradient_stop(self, position: f32) -> Color {
+        let position = position.clamp(0.0, 1.0);
+        let (low, mid, high) = if self.themed {
+            let low_target = mix_rgb(self.yellow, self.volume, 0.18);
+            let mid_target = mix_rgb(self.orange, self.volume, 0.28);
+            let high_target = mix_rgb(self.red, self.orange, 0.18);
+            (
+                mix_rgb(C808_YELLOW, low_target, 0.52),
+                mix_rgb(C808_ORANGE, mid_target, 0.62),
+                mix_rgb(C808_RED, high_target, 0.50),
+            )
+        } else {
+            (self.yellow, self.orange, self.red)
+        };
+
+        if position <= 0.5 {
+            mix_rgb(low, mid, position * 2.0)
+        } else {
+            mix_rgb(mid, high, (position - 0.5) * 2.0)
+        }
+    }
+
+    fn volume_led_fill(self, position: f32, pulse: f32) -> Color {
+        let base = self.control_led_gradient_stop(position);
+        let lift_target = if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.28)
+        } else {
+            self.ivory
+        };
+        mix_rgb(base, lift_target, 0.05 + pulse * 0.12)
+    }
+
+    fn volume_led_head(self, position: f32, pulse: f32) -> Color {
+        let base = self.control_led_gradient_stop(position);
+        let lift_target = if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.38)
+        } else {
+            self.ivory
+        };
+        mix_rgb(base, lift_target, 0.18 + pulse * 0.20)
+    }
+
+    fn volume_readout(self, pulse: f32) -> Color {
+        if self.themed {
+            mix_rgb(self.grey, self.yellow, 0.10 + pulse * 0.20)
+        } else {
+            mix_rgb(self.ivory, self.yellow, 0.06 + pulse * 0.18)
         }
     }
 }
@@ -1225,6 +1286,20 @@ impl App {
             BpmDisplayState::Estimating => chip_style_info_808(colors),
             BpmDisplayState::Unavailable => chip_style_inactive_808(colors),
         };
+        let volume_steps = volume_led_steps_808(area.width);
+        let volume_fill = volume_led_fill_808(self.player.volume(), volume_steps);
+        let volume_pulse =
+            volume_meter_pulse_808(self.title_off, self.last_volume_interaction_tick);
+        let volume_label_style = Style::default()
+            .fg(colors.grey)
+            .add_modifier(Modifier::BOLD);
+        let volume_db_style = {
+            let mut style = Style::default().fg(colors.volume_readout(volume_pulse));
+            if volume_pulse > 0.28 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            style
+        };
 
         let mut spans = vec![
             Span::raw(" "),
@@ -1234,13 +1309,37 @@ impl App {
             Span::raw(" "),
             chip_span_808("MONO", mono_style),
             Span::raw(" "),
-            chip_span_808(
-                format!("{:+.1} dB", self.player.volume()),
-                chip_style_info_808(colors),
-            ),
+            Span::styled("LVL ", volume_label_style),
+            Span::raw(" "),
+        ];
+
+        for idx in 0..volume_steps {
+            let position = if volume_steps <= 1 {
+                1.0
+            } else {
+                idx as f32 / (volume_steps - 1) as f32
+            };
+            let style = if idx + 1 == volume_fill && volume_fill > 0 {
+                let mut style = Style::default().fg(colors.volume_led_head(position, volume_pulse));
+                if volume_pulse > 0.18 {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                style
+            } else if idx < volume_fill {
+                Style::default().fg(colors.volume_led_fill(position, volume_pulse))
+            } else {
+                Style::default().fg(colors.volume_led_off())
+            };
+            let symbol = if idx < volume_fill { "●" } else { "·" };
+            spans.push(Span::styled(symbol, style));
+        }
+
+        spans.extend([
+            Span::raw(" "),
+            Span::styled(format!("{:+.1} dB", self.player.volume()), volume_db_style),
             Span::raw(" "),
             chip_span_808(bpm_chip_label_808(&self.bpm.display), bpm_style),
-        ];
+        ]);
 
         let q_len = self.playlist.queue_len();
         if q_len > 0 {
@@ -1833,11 +1932,7 @@ fn render_knob(
     let val_angle = start_angle - value * sweep;
 
     let accent = if selected { colors.yellow } else { colors.grey };
-    let fill_color = if selected {
-        colors.orange
-    } else {
-        colors.amber
-    };
+    let selected_lift = if selected { 0.18 } else { 0.0 };
 
     let canvas = Canvas::default()
         .x_bounds([-5.0, 5.0])
@@ -1861,7 +1956,13 @@ fn render_knob(
                 let angle = start_angle - t * sweep;
                 let px = cx + radius * angle.cos();
                 let py = cy + radius * angle.sin();
-                ctx.print(px, py, Span::styled("●", Style::default().fg(fill_color)));
+                let position = t as f32;
+                let color = if i == active_steps {
+                    colors.volume_led_head(position, selected_lift)
+                } else {
+                    colors.volume_led_fill(position, selected_lift)
+                };
+                ctx.print(px, py, Span::styled("●", Style::default().fg(color)));
             }
 
             // Pointer line from center to current position
@@ -2107,6 +2208,35 @@ fn buffer_badge_pulse_808(frame: usize, chrome: ChromeFxSignature) -> f32 {
     let period = CHROME_MOTION_808.seek_pulse.period(chrome.mode) * 1.35;
     let wave = ((frame as f32 / period) * TAU).sin() * 0.5 + 0.5;
     strength * wave
+}
+
+fn volume_led_steps_808(width: u16) -> usize {
+    if width < 60 {
+        VOLUME_LED_STEPS_808_NARROW
+    } else if width < 72 {
+        VOLUME_LED_STEPS_808_MEDIUM
+    } else {
+        VOLUME_LED_STEPS_808_WIDE
+    }
+}
+
+fn volume_led_fill_808(volume_db: f64, steps: usize) -> usize {
+    let ratio = ((volume_db + 30.0) / 36.0).clamp(0.0, 1.0);
+    (ratio * steps as f64).round().clamp(0.0, steps as f64) as usize
+}
+
+fn volume_meter_pulse_808(frame: usize, last_interaction_tick: Option<usize>) -> f32 {
+    let Some(last_tick) = last_interaction_tick else {
+        return 0.0;
+    };
+
+    let elapsed = frame.saturating_sub(last_tick);
+    if elapsed > VOLUME_FLASH_TICKS_808 {
+        return 0.0;
+    }
+
+    let t = elapsed as f32 / VOLUME_FLASH_TICKS_808 as f32;
+    (1.0 - t).clamp(0.0, 1.0).powf(1.35)
 }
 
 fn chrome_transport_state(
@@ -2726,6 +2856,7 @@ mod tests {
         assert_eq!(themed.orange, palette.playing);
         assert_eq!(themed.amber, palette.seek_bar);
         assert_eq!(themed.yellow, palette.accent);
+        assert_eq!(themed.volume, palette.volume);
         assert_eq!(themed.grey, palette.text);
         assert_eq!(themed.dim, palette.dim);
     }
@@ -2771,6 +2902,42 @@ mod tests {
             themed.seek_dot_color(0.5),
             mix_rgb(themed.grey, themed.yellow, 0.60)
         );
+        assert_eq!(
+            themed.control_led_gradient_stop(0.0),
+            mix_rgb(
+                C808_YELLOW,
+                mix_rgb(themed.yellow, themed.volume, 0.18),
+                0.52
+            )
+        );
+        assert_eq!(
+            themed.control_led_gradient_stop(0.5),
+            mix_rgb(
+                C808_ORANGE,
+                mix_rgb(themed.orange, themed.volume, 0.28),
+                0.62
+            )
+        );
+        assert_eq!(
+            themed.control_led_gradient_stop(1.0),
+            mix_rgb(C808_RED, mix_rgb(themed.red, themed.orange, 0.18), 0.50)
+        );
+        assert_eq!(
+            themed.volume_led_fill(0.75, 0.5),
+            mix_rgb(
+                themed.control_led_gradient_stop(0.75),
+                mix_rgb(themed.grey, themed.yellow, 0.28),
+                0.11
+            )
+        );
+        assert_eq!(
+            themed.volume_led_head(1.0, 0.5),
+            mix_rgb(
+                themed.control_led_gradient_stop(1.0),
+                mix_rgb(themed.grey, themed.yellow, 0.38),
+                0.28
+            )
+        );
     }
 
     #[test]
@@ -2789,6 +2956,17 @@ mod tests {
         assert_eq!(
             classic.seek_tail_color(0.5),
             mix_rgb(classic.amber, classic.orange, 0.40)
+        );
+        assert_eq!(classic.control_led_gradient_stop(0.0), classic.yellow);
+        assert_eq!(classic.control_led_gradient_stop(0.5), classic.orange);
+        assert_eq!(classic.control_led_gradient_stop(1.0), classic.red);
+        assert_eq!(
+            classic.volume_led_fill(0.75, 0.5),
+            mix_rgb(classic.control_led_gradient_stop(0.75), classic.ivory, 0.11)
+        );
+        assert_eq!(
+            classic.volume_led_head(1.0, 0.5),
+            mix_rgb(classic.control_led_gradient_stop(1.0), classic.ivory, 0.28)
         );
     }
 
@@ -2897,6 +3075,29 @@ mod tests {
 
         assert!(playing > paused);
         assert_eq!(stopped, 0.0);
+    }
+
+    #[test]
+    fn volume_meter_steps_compact_on_narrow_widths() {
+        assert_eq!(volume_led_steps_808(80), VOLUME_LED_STEPS_808_WIDE);
+        assert_eq!(volume_led_steps_808(68), VOLUME_LED_STEPS_808_MEDIUM);
+        assert_eq!(volume_led_steps_808(52), VOLUME_LED_STEPS_808_NARROW);
+    }
+
+    #[test]
+    fn volume_meter_fill_tracks_db_range() {
+        assert_eq!(volume_led_fill_808(-30.0, 10), 0);
+        assert_eq!(volume_led_fill_808(6.0, 10), 10);
+        assert!(volume_led_fill_808(-12.0, 10) > volume_led_fill_808(-24.0, 10));
+    }
+
+    #[test]
+    fn volume_meter_pulse_decays_after_recent_adjustment() {
+        assert_eq!(volume_meter_pulse_808(10, None), 0.0);
+        let early = volume_meter_pulse_808(10, Some(10));
+        let later = volume_meter_pulse_808(13, Some(10));
+        assert!(early > later);
+        assert_eq!(volume_meter_pulse_808(16, Some(10)), 0.0);
     }
 
     #[test]

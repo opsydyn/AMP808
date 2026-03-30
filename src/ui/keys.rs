@@ -5,6 +5,14 @@ use super::command::{CommandInputResult, handle_command_input_key};
 use super::eq_presets::EQ_PRESETS;
 
 impl App {
+    fn nudge_volume(&mut self, delta_db: f64) {
+        if let Err(e) = self.player.set_volume(self.player.volume() + delta_db) {
+            self.err = Some(e.to_string());
+        } else {
+            self.last_volume_interaction_tick = Some(self.title_off);
+        }
+    }
+
     /// Process a key event and return whether the app should quit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         // Dismiss keymap overlay on any key
@@ -168,15 +176,11 @@ impl App {
             }
 
             (_, KeyCode::Char('+')) | (_, KeyCode::Char('=')) => {
-                if let Err(e) = self.player.set_volume(self.player.volume() + 1.0) {
-                    self.err = Some(e.to_string());
-                }
+                self.nudge_volume(1.0);
             }
 
             (_, KeyCode::Char('-')) => {
-                if let Err(e) = self.player.set_volume(self.player.volume() - 1.0) {
-                    self.err = Some(e.to_string());
-                }
+                self.nudge_volume(-1.0);
             }
 
             (_, KeyCode::Char('r')) => {
@@ -613,6 +617,19 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
 
         assert_eq!(app.vis.mode, VisMode::BarsGap);
+    }
+
+    #[test]
+    fn volume_keys_mark_recent_interaction() {
+        let mut app = build_test_music_app();
+        app.title_off = 12;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        assert_eq!(app.last_volume_interaction_tick, Some(12));
+
+        app.title_off = 18;
+        app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        assert_eq!(app.last_volume_interaction_tick, Some(18));
     }
 
     #[test]

@@ -3,6 +3,20 @@ name = "amp808"
 version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
+description = "Winamp-inspired terminal music player with streaming, album art, and TR-808 views."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/opsydyn/AMP808"
+homepage = "https://github.com/opsydyn/AMP808"
+keywords = ["music", "terminal", "tui", "audio-player", "ratatui"]
+categories = ["command-line-utilities", "multimedia::audio"]
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -82,3 +96,6 @@ ctrlc = "3"
 # Hashing (Subsonic API auth)
 md5 = "0.7"
 tui-big-text = "0.8.2"
+
+[dev-dependencies]
+proptest = "1.11.0"
