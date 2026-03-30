@@ -18,6 +18,8 @@ pub enum PlaybackBackendKind {
 pub struct MusicAppBackend {
     controller: MusicAppController,
     snapshot: Arc<RwLock<MusicAppSnapshot>>,
+    #[cfg(test)]
+    test_mode: bool,
 }
 
 pub enum PlaybackBackend {
@@ -36,6 +38,8 @@ impl PlaybackBackend {
         Ok(Self::MusicApp(MusicAppBackend {
             controller,
             snapshot: Arc::new(RwLock::new(snapshot)),
+            #[cfg(test)]
+            test_mode: false,
         }))
     }
 
@@ -61,6 +65,11 @@ impl PlaybackBackend {
         let Self::MusicApp(backend) = self else {
             return Ok(());
         };
+
+        #[cfg(test)]
+        if backend.test_mode {
+            return Ok(());
+        }
 
         let snapshot = backend.controller.snapshot()?;
         *backend.snapshot.write().unwrap() = snapshot;
@@ -265,6 +274,12 @@ impl PlaybackBackend {
                 Ok(())
             }
             Self::MusicApp(backend) => {
+                #[cfg(test)]
+                if backend.test_mode {
+                    backend.snapshot.write().unwrap().volume = db_to_music_volume(db);
+                    return Ok(());
+                }
+
                 backend.controller.set_volume(db_to_music_volume(db))?;
                 self.refresh_remote_state()
             }
@@ -337,6 +352,7 @@ impl PlaybackBackend {
         Self::MusicApp(MusicAppBackend {
             controller: MusicAppController::new(),
             snapshot: Arc::new(RwLock::new(snapshot)),
+            test_mode: true,
         })
     }
 }
@@ -410,5 +426,22 @@ mod tests {
             let db = music_volume_to_db(volume);
             assert_eq!(db_to_music_volume(db), volume);
         }
+    }
+
+    #[test]
+    fn test_music_app_backend_updates_cached_volume_in_test_mode() {
+        let backend = remote_backend(MusicAppSnapshot {
+            state: MusicAppPlayerState::Playing,
+            volume: 50,
+            title: "Alive".to_string(),
+            artist: "Daft Punk".to_string(),
+            album: "Homework".to_string(),
+            position_secs: 12.0,
+            duration_secs: 300.0,
+        });
+
+        backend.set_volume(6.0).expect("set volume in test mode");
+
+        assert_eq!(backend.volume(), music_volume_to_db(100));
     }
 }
