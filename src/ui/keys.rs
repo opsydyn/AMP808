@@ -317,20 +317,16 @@ impl App {
                 self.show_themes = false;
             }
 
-            KeyCode::Up => {
-                if self.theme_cursor > 0 {
-                    self.theme_cursor -= 1;
-                    // Live preview
-                    self.apply_theme_from_cursor();
-                }
+            KeyCode::Up if self.theme_cursor > 0 => {
+                self.theme_cursor -= 1;
+                // Live preview
+                self.apply_theme_from_cursor();
             }
 
-            KeyCode::Down => {
-                if self.theme_cursor < count - 1 {
-                    self.theme_cursor += 1;
-                    // Live preview
-                    self.apply_theme_from_cursor();
-                }
+            KeyCode::Down if self.theme_cursor < count - 1 => {
+                self.theme_cursor += 1;
+                // Live preview
+                self.apply_theme_from_cursor();
             }
 
             KeyCode::Enter => {
@@ -369,16 +365,12 @@ impl App {
                 self.focus = Focus::Playlist;
             }
 
-            KeyCode::Up => {
-                if self.search_cursor > 0 {
-                    self.search_cursor -= 1;
-                }
+            KeyCode::Up if self.search_cursor > 0 => {
+                self.search_cursor -= 1;
             }
 
-            KeyCode::Down => {
-                if self.search_cursor < self.search_results.len().saturating_sub(1) {
-                    self.search_cursor += 1;
-                }
+            KeyCode::Down if self.search_cursor < self.search_results.len().saturating_sub(1) => {
+                self.search_cursor += 1;
             }
 
             KeyCode::Backspace => {

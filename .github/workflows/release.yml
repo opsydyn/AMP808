@@ -46,25 +46,9 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run tests with nextest
-        run: cargo nextest run --profile ci --locked
-
-      - name: Run doctests
+      - name: Run release gate checks
         shell: bash
-        run: |
-          set -euo pipefail
-          has_lib=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; meta=json.load(sys.stdin); print("true" if any("lib" in target.get("kind", []) for package in meta["packages"] for target in package.get("targets", [])) else "false")')
-          if [[ "$has_lib" == "true" ]]; then
-            cargo test --doc --quiet --locked
-          else
-            echo "No library target present; skipping doctests."
-          fi
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: bash scripts/check-release-gate.sh
 
   release-plz-pr:
     name: Release-plz PR

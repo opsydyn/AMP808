@@ -278,7 +278,7 @@ pub fn load_all() -> Vec<Theme> {
         }
     }
 
-    themes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    themes.sort_by_key(|theme| theme.name.to_lowercase());
     themes
 }
 

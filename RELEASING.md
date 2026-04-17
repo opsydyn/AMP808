@@ -57,6 +57,8 @@ Without this, release-plz cannot open or update the release PR.
 - The release workflow uploads artifacts to the GitHub release created by release-plz, so the tag and release are the source of truth.
 - The current release name format is `amp808 vX.Y.Z`.
 - Use the GitHub issue template at `.github/ISSUE_TEMPLATE/release-checklist.md` when you want a visible release runbook/checklist attached to the repo.
+- Local Rust tooling is pinned in `rust-toolchain.toml`; run `rustup show active-toolchain` if local lint output looks different from CI.
+- Before pushing release-affecting changes, run `bash scripts/check-release-gate.sh` locally. It uses the same formatter/test/doctest/clippy sequence as the release gate job.
 
 ## What to review in the release PR
 
