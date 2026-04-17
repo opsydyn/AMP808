@@ -61,6 +61,13 @@ pub struct ScotlandFlagWidget<'a> {
     config: ScotlandFlagConfig,
 }
 
+struct BrailleRenderContext<'a> {
+    bands: &'a [f64],
+    phase: f64,
+    bass: f64,
+    config: ScotlandFlagConfig,
+}
+
 impl<'a> ScotlandFlagWidget<'a> {
     pub fn new(bands: &'a [f64], phase: f64) -> Self {
         Self {
@@ -93,19 +100,16 @@ fn render_flag_braille(
     phase: f64,
     config: ScotlandFlagConfig,
 ) {
-    let bass = low_band_energy(bands, config.gain);
+    let context = BrailleRenderContext {
+        bands,
+        phase,
+        bass: low_band_energy(bands, config.gain),
+        config,
+    };
+
     for x in 0..area.width {
         for y in 0..area.height {
-            paint_braille_cell(
-                area,
-                buf,
-                area.x + x,
-                area.y + y,
-                bands,
-                phase,
-                bass,
-                config,
-            );
+            paint_braille_cell(area, buf, area.x + x, area.y + y, &context);
         }
     }
 }
@@ -115,10 +119,7 @@ fn paint_braille_cell(
     buf: &mut Buffer,
     x: u16,
     y: u16,
-    bands: &[f64],
-    phase: f64,
-    bass: f64,
-    config: ScotlandFlagConfig,
+    context: &BrailleRenderContext<'_>,
 ) {
     let mut bits = 0u8;
     let cell_x = x - area.x;
@@ -127,9 +128,23 @@ fn paint_braille_cell(
     let pixel_height = area.height as usize * 4;
     let cell_x_norm = normalized_cell_center(cell_x, area.width);
     let cell_y_norm = normalized_cell_center(cell_y, area.height);
-    let cell_audio = column_level(bands, cell_x_norm, config.gain);
-    let background = field_color(cell_x_norm, cell_y_norm, phase, cell_audio, bass, config);
-    let saltire_color = saltire_color(cell_x_norm, cell_y_norm, phase, cell_audio, bass, config);
+    let cell_audio = column_level(context.bands, cell_x_norm, context.config.gain);
+    let background = field_color(
+        cell_x_norm,
+        cell_y_norm,
+        context.phase,
+        cell_audio,
+        context.bass,
+        context.config,
+    );
+    let saltire_color = saltire_color(
+        cell_x_norm,
+        cell_y_norm,
+        context.phase,
+        cell_audio,
+        context.bass,
+        context.config,
+    );
 
     for sub_row in 0..4 {
         for sub_col in 0..2 {
@@ -137,10 +152,10 @@ fn paint_braille_cell(
             let py = cell_y as usize * 4 + sub_row;
             let x_norm = normalized_position(px, pixel_width);
             let y_norm = normalized_position(py, pixel_height);
-            let audio = column_level(bands, x_norm, config.gain);
-            let ripple = ripple_offset(x_norm, phase, audio, bass, config);
-            let warp = column_audio_warp(x_norm, phase, audio, config);
-            let thickness = saltire_thickness(audio, config);
+            let audio = column_level(context.bands, x_norm, context.config.gain);
+            let ripple = ripple_offset(x_norm, context.phase, audio, context.bass, context.config);
+            let warp = column_audio_warp(x_norm, context.phase, audio, context.config);
+            let thickness = saltire_thickness(audio, context.config);
             let warped_y = y_norm + ripple + warp;
 
             if is_on_saltire(x_norm, warped_y, thickness) {

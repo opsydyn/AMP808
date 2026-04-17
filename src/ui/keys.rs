@@ -204,10 +204,8 @@ impl App {
                 );
             }
 
-            (KeyModifiers::CONTROL, KeyCode::Char('h')) => {
-                if self.focus == Focus::Browser {
-                    self.handle_browser_key(key);
-                }
+            (KeyModifiers::CONTROL, KeyCode::Char('h')) if self.focus == Focus::Browser => {
+                self.handle_browser_key(key);
             }
 
             (_, KeyCode::Char('h')) => {
@@ -246,10 +244,10 @@ impl App {
                 self.show_themes = true;
             }
 
-            (_, KeyCode::Char('a')) => {
-                if self.focus == Focus::Playlist && !self.playlist.dequeue(self.pl_cursor) {
-                    self.playlist.queue(self.pl_cursor);
-                }
+            (_, KeyCode::Char('a'))
+                if self.focus == Focus::Playlist && !self.playlist.dequeue(self.pl_cursor) =>
+            {
+                self.playlist.queue(self.pl_cursor);
             }
 
             (_, KeyCode::Char('S')) => {
@@ -272,10 +270,8 @@ impl App {
                 self.search_cursor = 0;
             }
 
-            (_, KeyCode::Char('L')) => {
-                if self.player.supports_local_playlist() {
-                    self.toggle_playlist_browser();
-                }
+            (_, KeyCode::Char('L')) if self.player.supports_local_playlist() => {
+                self.toggle_playlist_browser();
             }
 
             (_, KeyCode::Char(':')) => {
@@ -283,20 +279,16 @@ impl App {
                 self.command_input.clear();
             }
 
-            (_, KeyCode::Char('v')) => {
-                if self.can_cycle_visualizer() {
-                    if self.player.is_music_app() {
-                        self.vis.cycle_music_app_mode();
-                    } else {
-                        self.vis.cycle_mode();
-                    }
+            (_, KeyCode::Char('v')) if self.can_cycle_visualizer() => {
+                if self.player.is_music_app() {
+                    self.vis.cycle_music_app_mode();
+                } else {
+                    self.vis.cycle_mode();
                 }
             }
 
-            (_, KeyCode::Char('c')) => {
-                if self.player.supports_cover_art() {
-                    self.show_cover_art = !self.show_cover_art;
-                }
+            (_, KeyCode::Char('c')) if self.player.supports_cover_art() => {
+                self.show_cover_art = !self.show_cover_art;
             }
 
             (_, KeyCode::Char('8')) => {
