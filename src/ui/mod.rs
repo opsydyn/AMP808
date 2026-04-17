@@ -3,6 +3,7 @@ pub mod command;
 pub mod eq_presets;
 pub mod explorer;
 pub mod keys;
+pub mod scotland_flag;
 pub mod styles;
 pub mod theme;
 pub mod view;
@@ -114,6 +115,7 @@ pub struct App {
     pub search_query: String,
     pub search_results: Vec<usize>,
     pub search_cursor: usize,
+    scotland_flag_phase: f64,
     pub themes: Vec<Theme>,
     pub theme_idx: Option<usize>,
     pub theme_cursor: usize,
@@ -189,6 +191,7 @@ impl App {
             search_query: String::new(),
             search_results: Vec::new(),
             search_cursor: 0,
+            scotland_flag_phase: 0.0,
             themes,
             theme_idx: None,
             theme_cursor: 0,
@@ -329,6 +332,10 @@ impl App {
                 self.player.is_playing(),
                 self.player.is_paused(),
             );
+        }
+
+        if self.player.is_playing() && !self.player.is_paused() {
+            self.scotland_flag_phase += 0.09;
         }
 
         self.title_off += 1;
@@ -1038,6 +1045,25 @@ mod tests {
         )
     }
 
+    fn build_music_app_phase_test_app(state: MusicAppPlayerState) -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(
+            PlaybackBackend::music_app_for_test(MusicAppSnapshot {
+                state,
+                volume: 50,
+                title: "Alive".into(),
+                artist: "Daft Punk".into(),
+                album: "Homework".into(),
+                position_secs: 12.0,
+                duration_secs: 300.0,
+            }),
+            Playlist::new(),
+            YtdlTempTracker::new(),
+            tx,
+            None,
+        )
+    }
+
     #[test]
     fn apple_music_tracks_message_enters_track_browser() {
         let mut app = build_music_app_test_app();
@@ -1131,6 +1157,25 @@ mod tests {
         assert_eq!(app.palette.title, themed.title);
         assert_eq!(app.palette.text, themed.text);
         assert_eq!(app.palette.spectrum_high, themed.spectrum_high);
+    }
+
+    #[test]
+    fn scotland_flag_phase_advances_only_while_actively_playing() {
+        let mut playing = build_music_app_phase_test_app(MusicAppPlayerState::Playing);
+        let mut paused = build_music_app_phase_test_app(MusicAppPlayerState::Paused);
+        let mut stopped = build_music_app_phase_test_app(MusicAppPlayerState::Stopped);
+
+        let initial_playing = playing.scotland_flag_phase;
+        let initial_paused = paused.scotland_flag_phase;
+        let initial_stopped = stopped.scotland_flag_phase;
+
+        playing.on_tick();
+        paused.on_tick();
+        stopped.on_tick();
+
+        assert!(playing.scotland_flag_phase > initial_playing);
+        assert_eq!(paused.scotland_flag_phase, initial_paused);
+        assert_eq!(stopped.scotland_flag_phase, initial_stopped);
     }
 
     #[test]

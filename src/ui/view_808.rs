@@ -48,6 +48,7 @@ enum RenderMode808 {
     LedColumns,
     Retro,
     Logo,
+    ScotlandFlag,
     Oscilloscope,
 }
 
@@ -133,7 +134,7 @@ impl MotionWeights808 {
     fn mode(self, mode: VisMode) -> f32 {
         match mode {
             VisMode::Scope => self.scope,
-            VisMode::Retro | VisMode::Logo => self.retro,
+            VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag => self.retro,
             VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars,
         }
     }
@@ -270,7 +271,7 @@ impl SeekPulseTuning808 {
     fn period(self, mode: VisMode) -> f32 {
         match mode {
             VisMode::Scope => self.scope_period,
-            VisMode::Retro | VisMode::Logo => self.retro_period,
+            VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag => self.retro_period,
             VisMode::Bars | VisMode::BarsGap | VisMode::VBars | VisMode::Bricks => self.bars_period,
         }
     }
@@ -649,7 +650,7 @@ fn content_height_808(browser_focus: bool, retro_mode: bool, terminal_height: u1
 }
 
 fn tall_visual_scene_808(mode: VisMode) -> bool {
-    matches!(mode, VisMode::Retro | VisMode::Logo)
+    matches!(mode, VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag)
 }
 
 fn browser_panel_min_height_808(browser_focus: bool) -> u16 {
@@ -1396,6 +1397,9 @@ impl App {
                     );
                     self.render_808_visual_lines(frame, area, lines);
                 }
+                RenderMode808::ScotlandFlag => {
+                    self.render_scotland_flag_widget(frame, area, &bands);
+                }
                 RenderMode808::Oscilloscope => {
                     self.render_808_led_columns(frame, area, &bands);
                 }
@@ -1436,6 +1440,10 @@ impl App {
                     animate,
                 );
                 self.render_808_visual_lines(frame, area, lines);
+            }
+            RenderMode808::ScotlandFlag => {
+                let bands = self.vis.analyze(&samples);
+                self.render_scotland_flag_widget(frame, area, &bands);
             }
             RenderMode808::Oscilloscope => {
                 let lines =
@@ -2014,6 +2022,7 @@ fn render_mode_808(mode: VisMode) -> RenderMode808 {
         VisMode::Bricks => RenderMode808::LedColumns,
         VisMode::Retro => RenderMode808::Retro,
         VisMode::Logo => RenderMode808::Logo,
+        VisMode::ScotlandFlag => RenderMode808::ScotlandFlag,
         VisMode::Scope => RenderMode808::Oscilloscope,
     }
 }
@@ -2026,6 +2035,7 @@ fn vis_mode_label(mode: VisMode) -> &'static str {
         VisMode::Bricks => "LEDS",
         VisMode::Retro => "RETRO",
         VisMode::Logo => "LOGO",
+        VisMode::ScotlandFlag => "SCOT",
         VisMode::Scope => "SCOPE",
     }
 }
@@ -2751,6 +2761,19 @@ mod tests {
     }
 
     #[test]
+    fn scotland_flag_mode_uses_tall_visual_scene_height() {
+        assert!(tall_visual_scene_808(VisMode::ScotlandFlag));
+        assert_eq!(
+            content_height_808(false, tall_visual_scene_808(VisMode::ScotlandFlag), 40),
+            31
+        );
+        assert_eq!(
+            content_height_808(true, tall_visual_scene_808(VisMode::ScotlandFlag), 40),
+            34
+        );
+    }
+
+    #[test]
     fn render_mode_mapping_matches_808_design() {
         assert_eq!(
             render_mode_808(VisMode::Bars),
@@ -2764,6 +2787,10 @@ mod tests {
         assert_eq!(render_mode_808(VisMode::Bricks), RenderMode808::LedColumns);
         assert_eq!(render_mode_808(VisMode::Retro), RenderMode808::Retro);
         assert_eq!(render_mode_808(VisMode::Logo), RenderMode808::Logo);
+        assert_eq!(
+            render_mode_808(VisMode::ScotlandFlag),
+            RenderMode808::ScotlandFlag
+        );
         assert_eq!(render_mode_808(VisMode::Scope), RenderMode808::Oscilloscope);
     }
 
@@ -2775,6 +2802,7 @@ mod tests {
         assert_eq!(vis_mode_label(VisMode::Bricks), "LEDS");
         assert_eq!(vis_mode_label(VisMode::Retro), "RETRO");
         assert_eq!(vis_mode_label(VisMode::Logo), "LOGO");
+        assert_eq!(vis_mode_label(VisMode::ScotlandFlag), "SCOT");
         assert_eq!(vis_mode_label(VisMode::Scope), "SCOPE");
     }
 

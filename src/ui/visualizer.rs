@@ -46,6 +46,7 @@ pub enum VisMode {
     Bricks,
     Retro,
     Logo,
+    ScotlandFlag,
     Scope,
 }
 
@@ -93,7 +94,8 @@ impl Visualizer {
             VisMode::VBars => VisMode::Bricks,
             VisMode::Bricks => VisMode::Retro,
             VisMode::Retro => VisMode::Logo,
-            VisMode::Logo => VisMode::Scope,
+            VisMode::Logo => VisMode::ScotlandFlag,
+            VisMode::ScotlandFlag => VisMode::Scope,
             VisMode::Scope => VisMode::Bars,
         };
     }
@@ -104,7 +106,8 @@ impl Visualizer {
             VisMode::BarsGap => VisMode::VBars,
             VisMode::VBars => VisMode::Bricks,
             VisMode::Bricks => VisMode::Logo,
-            VisMode::Logo | VisMode::Retro | VisMode::Scope => VisMode::Bars,
+            VisMode::Logo => VisMode::ScotlandFlag,
+            VisMode::ScotlandFlag | VisMode::Retro | VisMode::Scope => VisMode::Bars,
         };
     }
 
@@ -223,7 +226,7 @@ impl Visualizer {
             VisMode::BarsGap => self.render_bars_solid(bands),
             VisMode::VBars => self.render_vertical_bars_gapped(bands),
             VisMode::Bricks => self.render_bricks(bands),
-            VisMode::Retro | VisMode::Logo | VisMode::Scope => {
+            VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag | VisMode::Scope => {
                 self.render_vertical_bars_gapped(&[0.0; NUM_BANDS])
             }
         }
@@ -231,7 +234,7 @@ impl Visualizer {
 
     pub fn render_synthetic(&self, bands: &[f64; NUM_BANDS]) -> Vec<SpectrumLine> {
         match self.mode {
-            VisMode::Retro | VisMode::Logo | VisMode::Scope => {
+            VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag | VisMode::Scope => {
                 self.render_vertical_bars_gapped(bands)
             }
             _ => self.render(bands),
@@ -1034,6 +1037,8 @@ mod tests {
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Logo);
         vis.cycle_mode();
+        assert_eq!(vis.mode, VisMode::ScotlandFlag);
+        vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Scope);
         vis.cycle_mode();
         assert_eq!(vis.mode, VisMode::Bars);
@@ -1052,6 +1057,8 @@ mod tests {
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Logo);
         vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::ScotlandFlag);
+        vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bars);
 
         vis.mode = VisMode::Retro;
@@ -1059,6 +1066,10 @@ mod tests {
         assert_eq!(vis.mode, VisMode::Bars);
 
         vis.mode = VisMode::Logo;
+        vis.cycle_music_app_mode();
+        assert_eq!(vis.mode, VisMode::ScotlandFlag);
+
+        vis.mode = VisMode::ScotlandFlag;
         vis.cycle_music_app_mode();
         assert_eq!(vis.mode, VisMode::Bars);
 

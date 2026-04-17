@@ -140,8 +140,34 @@ cargo run -- --backend music-app
 
 ### macOS first run for downloaded release binaries
 
-If you download the macOS release tarball and run the unpacked binary directly, the first launch may
-need one-time macOS cleanup before Terminal can execute it:
+For the smoothest first-run flow on macOS, use the installer script. It downloads the latest release,
+installs `amp808`, restores the executable bit, and removes the usual macOS quarantine flag for you:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/opsydyn/AMP808/main/scripts/install-macos.sh | bash
+```
+
+By default it installs to `~/.local/bin`. If that directory is not on your `PATH`, the script prints
+the full command to run.
+
+Useful variants:
+
+```bash
+# Install somewhere else
+curl -fsSL https://raw.githubusercontent.com/opsydyn/AMP808/main/scripts/install-macos.sh \
+  | AMP808_INSTALL_DIR="$PWD" bash
+
+# Install and launch immediately
+curl -fsSL https://raw.githubusercontent.com/opsydyn/AMP808/main/scripts/install-macos.sh \
+  | AMP808_RUN_AFTER_INSTALL=1 bash
+
+# Install and launch with arguments
+curl -fsSL https://raw.githubusercontent.com/opsydyn/AMP808/main/scripts/install-macos.sh \
+  | bash -s -- --backend music-app
+```
+
+If you prefer the manual path, downloading the macOS release tarball and running the unpacked binary
+directly may need one-time cleanup before Terminal can execute it:
 
 ```bash
 chmod +x amp808

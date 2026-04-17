@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, FrameExt as _, Paragraph};
 
 use super::App;
 use super::keys::Focus;
+use super::scotland_flag::ScotlandFlagWidget;
 use super::styles::PANEL_WIDTH;
 use super::theme;
 use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
@@ -14,7 +15,10 @@ impl App {
     /// Render the full TUI frame.
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-        let tall_visual_mode = matches!(self.vis.mode, VisMode::Retro | VisMode::Logo);
+        let tall_visual_mode = matches!(
+            self.vis.mode,
+            VisMode::Retro | VisMode::Logo | VisMode::ScotlandFlag
+        );
 
         if self.show_keymap {
             self.render_keymap(frame, area);
@@ -227,6 +231,23 @@ impl App {
     }
 
     fn render_spectrum(&mut self, frame: &mut Frame, area: Rect) {
+        if self.vis.mode == VisMode::ScotlandFlag {
+            if self.player.is_music_app() {
+                let (pos_secs, _) = self.track_position();
+                let bands = self.vis.synthetic_bands(
+                    pos_secs as f64,
+                    self.player.is_playing(),
+                    self.player.is_paused(),
+                );
+                self.render_scotland_flag_widget(frame, area, &bands);
+            } else {
+                let samples = self.player.samples();
+                let bands = self.vis.analyze(&samples);
+                self.render_scotland_flag_widget(frame, area, &bands);
+            }
+            return;
+        }
+
         let spec_lines = if self.player.is_music_app() {
             let (pos_secs, _) = self.track_position();
             let animate = self.player.is_playing() && !self.player.is_paused();
@@ -279,6 +300,11 @@ impl App {
             let line_area = Rect::new(area.x, y, area.width, 1);
             frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
         }
+    }
+
+    pub fn render_scotland_flag_widget(&self, frame: &mut Frame, area: Rect, bands: &[f64; 10]) {
+        let phase = self.scotland_flag_phase;
+        frame.render_widget(ScotlandFlagWidget::new(bands, phase), area);
     }
 
     pub fn render_cover_art(&self, frame: &mut Frame, area: Rect) {
