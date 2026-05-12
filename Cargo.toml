@@ -1,6 +1,6 @@
 [package]
 name = "amp808"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.85"
 description = "Winamp-inspired terminal music player with streaming, album art, and TR-808 views."
