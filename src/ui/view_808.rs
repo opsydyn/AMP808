@@ -18,20 +18,20 @@ use super::styles::Palette;
 use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
 
 /// 808 color constants.
-const C808_RED: Color = Color::Rgb(0xD7, 0x26, 0x2E);
-const C808_ORANGE: Color = Color::Rgb(0xF0, 0x5A, 0x28);
-const C808_AMBER: Color = Color::Rgb(0xF6, 0xA6, 0x23);
-const C808_YELLOW: Color = Color::Rgb(0xFF, 0xD4, 0x00);
+const C808_RED: Color = Color::Rgb(0xE7, 0x2E, 0x2E);
+const C808_ORANGE: Color = Color::Rgb(0xF8, 0xA1, 0x25);
+const C808_AMBER: Color = Color::Rgb(0xF8, 0xA1, 0x25);
+const C808_YELLOW: Color = Color::Rgb(0xF1, 0xF8, 0x27);
 const C808_GREY: Color = Color::Rgb(0xC9, 0xC9, 0xC9);
 const C808_DIM: Color = Color::Rgb(0x66, 0x66, 0x66);
 const C808_DEEP_AMBER: Color = Color::Rgb(0xB8, 0x6A, 0x1F);
 const C808_SUNSET_ORANGE: Color = Color::Rgb(0xFF, 0x7A, 0x45);
 const C808_HOT_PINK: Color = Color::Rgb(0xFF, 0x4D, 0xB8);
 const C808_IVORY: Color = Color::Rgb(0xEE, 0xEA, 0xD8);
-const C808_BLACK: Color = Color::Rgb(0x12, 0x12, 0x12);
+const C808_BLACK: Color = Color::Rgb(0x20, 0x20, 0x20);
 
 /// EQ frequency labels matching the 10-band EQ.
-const EQ_LABELS: [&str; 10] = [
+pub(super) const EQ_LABELS: [&str; 10] = [
     "70", "180", "320", "600", "1k", "3k", "6k", "12k", "14k", "16k",
 ];
 const COVER_ART_GAP_808: u16 = 2;
@@ -445,7 +445,7 @@ impl ChromeFxSignature {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Classic808Colors {
+pub(super) struct Classic808Colors {
     themed: bool,
     red: Color,
     orange: Color,
@@ -623,6 +623,10 @@ impl Classic808Colors {
             mix_rgb(self.ivory, self.yellow, 0.06 + pulse * 0.18)
         }
     }
+
+    pub(super) fn keycap(self) -> Color {
+        self.ivory
+    }
 }
 
 fn mix_rgb(a: Color, b: Color, ratio_to_b: f32) -> Color {
@@ -639,13 +643,8 @@ fn mix_rgb(a: Color, b: Color, ratio_to_b: f32) -> Color {
 }
 
 fn content_height_808(browser_focus: bool, retro_mode: bool, terminal_height: u16) -> u16 {
-    let target = if retro_mode {
-        if browser_focus { 34 } else { 31 }
-    } else if browser_focus {
-        31
-    } else {
-        28
-    };
+    // Base layout includes two 5-row knob strips: 4 canvas rows + 1 label row each.
+    let target = 32 + if retro_mode { 3 } else { 0 } + if browser_focus { 3 } else { 0 };
     target.min(terminal_height)
 }
 
@@ -700,7 +699,7 @@ fn focus_tag_label_808(
 }
 
 impl App {
-    fn colors_808(&self) -> Classic808Colors {
+    pub(super) fn colors_808(&self) -> Classic808Colors {
         if self.theme_idx.is_some() {
             Classic808Colors::themed(&self.palette)
         } else {
@@ -739,8 +738,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(6),               // header (large-style title)
-                Constraint::Length(3),               // knob row 1 (vol + 5 EQ)
-                Constraint::Length(3),               // knob row 2 (5 EQ)
+                Constraint::Length(5),               // knob row 1 (4 canvas + label)
+                Constraint::Length(5),               // knob row 2 (4 canvas + label)
                 Constraint::Length(1),               // spacer
                 Constraint::Length(2),               // now playing + seek
                 Constraint::Length(1),               // status line (repeat/shuffle/mono)
@@ -1030,7 +1029,7 @@ impl App {
         frame.render_widget(Paragraph::new(line), tag_area);
     }
 
-    fn render_808_header(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn render_808_header(&self, frame: &mut Frame, area: Rect) {
         let colors = self.colors_808();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1052,11 +1051,7 @@ impl App {
 
         let logo = BigText::builder()
             .pixel_size(PixelSize::ThirdHeight)
-            .style(
-                Style::default()
-                    .fg(colors.yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(logo_style_808(colors))
             .centered()
             .lines(vec![Line::from("TR-808")])
             .build();
@@ -1360,7 +1355,7 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn render_808_spectrum(&mut self, frame: &mut Frame, area: Rect) {
+    pub(super) fn render_808_spectrum(&mut self, frame: &mut Frame, area: Rect) {
         if self.player.is_music_app() {
             let (pos_secs, _) = self.track_position();
             let animate = self.player.is_playing() && !self.player.is_paused();
@@ -1808,6 +1803,18 @@ impl App {
             return;
         }
 
+        if !matches!(self.focus, Focus::Browser | Focus::Provider) {
+            let pads = performance_pads_808(
+                self.player.supports_seek(),
+                self.player.supports_local_playlist(),
+                self.playlist.shuffled(),
+                self.playlist.repeat(),
+                self.player.is_playing() && !self.player.is_paused(),
+            );
+            render_pad_bank_808(frame, area, &pads, colors);
+            return;
+        }
+
         let controls = controls_808(
             self.focus,
             self.player.supports_seek(),
@@ -1904,7 +1911,7 @@ impl App {
 ///
 /// `value` is normalized 0.0-1.0.
 /// The knob arc spans from 210deg (min) to -30deg (max), clockwise.
-fn render_knob(
+pub(super) fn render_knob(
     frame: &mut Frame,
     area: Rect,
     value: f64,
@@ -1931,7 +1938,7 @@ fn render_knob(
     // Knob parameters
     let cx = 0.0;
     let cy = 0.0;
-    let radius = 3.0;
+    let radius = 3.5;
     let start_angle: f64 = 210.0_f64.to_radians(); // bottom-left (min)
     let end_angle: f64 = -30.0_f64.to_radians(); // bottom-right (max)
 
@@ -1942,35 +1949,48 @@ fn render_knob(
     let accent = if selected { colors.yellow } else { colors.grey };
     let selected_lift = if selected { 0.18 } else { 0.0 };
 
+    let (x_bounds, y_bounds) = knob_canvas_bounds_808(canvas_area);
+
     let canvas = Canvas::default()
-        .x_bounds([-5.0, 5.0])
-        .y_bounds([-4.0, 4.0])
+        .x_bounds(x_bounds)
+        .y_bounds(y_bounds)
         .marker(ratatui::symbols::Marker::Braille)
         .paint(move |ctx| {
-            // Background arc — draw dots along the full arc
-            let steps = 20;
-            for i in 0..=steps {
-                let t = i as f64 / steps as f64;
-                let angle = start_angle - t * sweep;
-                let px = cx + radius * angle.cos();
-                let py = cy + radius * angle.sin();
-                ctx.print(px, py, Span::styled("·", Style::default().fg(colors.dim)));
+            // Background arc — cream ring (20 short CanvasLine segments)
+            for i in 0..20usize {
+                let t1 = i as f64 / 20.0;
+                let t2 = (i + 1) as f64 / 20.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: cx + radius * a1.cos(),
+                    y1: cy + radius * a1.sin(),
+                    x2: cx + radius * a2.cos(),
+                    y2: cy + radius * a2.sin(),
+                    color: colors.ivory,
+                });
             }
 
-            // Active arc — draw from min to current value
+            // Active arc — warm→hot gradient, overlays the ivory ring
             let active_steps = (value * 20.0) as usize;
-            for i in 0..=active_steps {
-                let t = i as f64 / 20.0;
-                let angle = start_angle - t * sweep;
-                let px = cx + radius * angle.cos();
-                let py = cy + radius * angle.sin();
-                let position = t as f32;
-                let color = if i == active_steps {
-                    colors.volume_led_head(position, selected_lift)
+            for i in 0..active_steps {
+                let t1 = i as f64 / 20.0;
+                let t2 = (i + 1) as f64 / 20.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                let pos = ((t1 + t2) / 2.0) as f32;
+                let color = if i + 1 == active_steps {
+                    colors.volume_led_head(pos, selected_lift)
                 } else {
-                    colors.volume_led_fill(position, selected_lift)
+                    colors.volume_led_fill(pos, selected_lift)
                 };
-                ctx.print(px, py, Span::styled("●", Style::default().fg(color)));
+                ctx.draw(&CanvasLine {
+                    x1: cx + radius * a1.cos(),
+                    y1: cy + radius * a1.sin(),
+                    x2: cx + radius * a2.cos(),
+                    y2: cy + radius * a2.sin(),
+                    color,
+                });
             }
 
             // Pointer line from center to current position
@@ -2004,14 +2024,178 @@ fn render_knob(
     );
 }
 
-fn step_pad_color(idx: usize, colors: Classic808Colors) -> Color {
-    match idx {
-        0 | 1 => colors.red,
-        2 | 3 => colors.orange,
-        4 | 5 => colors.amber,
-        6 | 7 => colors.yellow,
-        _ => colors.ivory,
+fn knob_canvas_bounds_808(area: Rect) -> ([f64; 2], [f64; 2]) {
+    const Y_HALF: f64 = 4.0;
+    let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
+    let x_half = (Y_HALF * visual_ratio).max(3.8);
+    ([-x_half, x_half], [-Y_HALF, Y_HALF])
+}
+
+/// Render the large TEMPO dial — smooth CanvasLine arcs + corrected aspect-ratio bounds so
+/// the circle looks round in a standard 2:1-aspect-ratio terminal font.
+///
+/// Canvas area is DIAL_W(24) cols × (inner_h - 1) rows for the circle, plus 1 row for the label.
+/// For 24 cols × 9 rows with 2:1 cell aspect: x_range/y_range = 24/18 = 4/3 → [-12,12]/[-9,9].
+pub(super) fn render_tempo_dial(
+    frame: &mut Frame,
+    area: Rect,
+    bpm_norm: f64,
+    bpm_label: String,
+    colors: Classic808Colors,
+) {
+    if area.width < 8 || area.height < 4 {
+        return;
     }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .split(area);
+    let (canvas_area, label_area) = (chunks[0], chunks[1]);
+
+    const ARC_SEG: usize = 60; // segments for a smooth circle
+    let geometry = tempo_dial_geometry_808(canvas_area);
+    let cx = 0.0;
+    let cy = 0.0;
+    let radius = geometry.radius;
+    let label_radius = radius + geometry.label_pad;
+    let start_angle = 210.0_f64.to_radians();
+    let end_angle = (-30.0_f64).to_radians();
+    let sweep = start_angle - end_angle; // 240°
+    let val_angle = start_angle - bpm_norm * sweep;
+
+    let canvas = Canvas::default()
+        .x_bounds(geometry.x_bounds)
+        .y_bounds(geometry.y_bounds)
+        .marker(ratatui::symbols::Marker::Braille)
+        .paint(move |ctx| {
+            // Ivory background ring — 60 short CanvasLine segments for a smooth circle
+            for i in 0..ARC_SEG {
+                let t1 = i as f64 / ARC_SEG as f64;
+                let t2 = (i + 1) as f64 / ARC_SEG as f64;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: cx + radius * a1.cos(),
+                    y1: cy + radius * a1.sin(),
+                    x2: cx + radius * a2.cos(),
+                    y2: cy + radius * a2.sin(),
+                    color: colors.ivory,
+                });
+            }
+
+            // Active arc — warm→hot gradient overlays the ivory ring
+            let active_segs = (bpm_norm * ARC_SEG as f64) as usize;
+            for i in 0..active_segs {
+                let t1 = i as f64 / ARC_SEG as f64;
+                let t2 = (i + 1) as f64 / ARC_SEG as f64;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                let pos = ((t1 + t2) / 2.0) as f32;
+                let color = if i + 1 == active_segs {
+                    colors.volume_led_head(pos, 0.0)
+                } else {
+                    colors.volume_led_fill(pos, 0.0)
+                };
+                ctx.draw(&CanvasLine {
+                    x1: cx + radius * a1.cos(),
+                    y1: cy + radius * a1.sin(),
+                    x2: cx + radius * a2.cos(),
+                    y2: cy + radius * a2.sin(),
+                    color,
+                });
+            }
+
+            // Needle — amber CanvasLine from centre to arc
+            ctx.draw(&CanvasLine {
+                x1: cx,
+                y1: cy,
+                x2: cx + radius * 0.72 * val_angle.cos(),
+                y2: cy + radius * 0.72 * val_angle.sin(),
+                color: colors.amber,
+            });
+
+            // Tick marks (short radial lines) + 0–10 scale labels
+            let dial_text_style = tempo_dial_text_style_808(colors);
+            for i in 0u32..=10 {
+                let t = i as f64 / 10.0;
+                let a = start_angle - t * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: cx + (radius + 0.5) * a.cos(),
+                    y1: cy + (radius + 0.5) * a.sin(),
+                    x2: cx + (radius + 1.1) * a.cos(),
+                    y2: cy + (radius + 1.1) * a.sin(),
+                    color: colors.dim,
+                });
+                let lx = cx + label_radius * a.cos();
+                let ly = cy + label_radius * a.sin();
+                ctx.print(lx, ly, Span::styled(i.to_string(), dial_text_style));
+            }
+
+            // BPM readout at centre
+            ctx.print(
+                -1.5,
+                1.6,
+                Span::styled("BPM", tempo_dial_text_style_808(colors)),
+            );
+            ctx.print(
+                -1.8,
+                -0.3,
+                Span::styled(
+                    bpm_label.clone(),
+                    Style::default()
+                        .fg(colors.amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        });
+
+    frame.render_widget(canvas, canvas_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "TEMPO",
+            Style::default().fg(colors.ivory),
+        )))
+        .alignment(Alignment::Center),
+        label_area,
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TempoDialGeometry808 {
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+    radius: f64,
+    label_pad: f64,
+}
+
+fn tempo_dial_geometry_808(area: Rect) -> TempoDialGeometry808 {
+    const Y_HALF: f64 = 9.0;
+    const LABEL_PAD: f64 = 2.3;
+    let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
+    let x_half = (Y_HALF * visual_ratio).max(4.8);
+    let y_half = Y_HALF;
+    let radius = (x_half.min(y_half) - LABEL_PAD - 0.2).clamp(2.8, 6.5);
+    TempoDialGeometry808 {
+        x_bounds: [-x_half, x_half],
+        y_bounds: [-y_half, y_half],
+        radius,
+        label_pad: LABEL_PAD,
+    }
+}
+
+fn tempo_dial_text_style_808(colors: Classic808Colors) -> Style {
+    Style::default().fg(colors.ivory)
+}
+
+fn logo_style_808(colors: Classic808Colors) -> Style {
+    Style::default()
+        .fg(colors.orange)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn step_pad_color(_idx: usize, colors: Classic808Colors) -> Color {
+    colors.ivory
 }
 
 fn render_mode_808(mode: VisMode) -> RenderMode808 {
@@ -2413,11 +2597,187 @@ fn control_action_display_808(action: &'static str) -> &'static str {
 fn control_key_display_808(key: &'static str) -> &'static str {
     match key {
         "Spc" => "SPACE",
+        "Space" => "SPACE",
         "Enter" => "ENTER",
         "Esc" => "ESC",
         "Tab" => "TAB",
         _ => key,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Pad808 {
+    pub(super) label: &'static str,
+    pub(super) key: &'static str,
+    pub(super) enabled: bool,
+    pub(super) active: bool,
+}
+
+pub(super) fn performance_pads_808(
+    supports_seek: bool,
+    supports_local_playlist: bool,
+    shuffled: bool,
+    repeat: crate::playlist::RepeatMode,
+    playing: bool,
+) -> Vec<Pad808> {
+    vec![
+        Pad808 {
+            label: "PLAY",
+            key: "Space",
+            enabled: true,
+            active: playing,
+        },
+        Pad808 {
+            label: "STOP",
+            key: "s",
+            enabled: true,
+            active: false,
+        },
+        Pad808 {
+            label: "PREV",
+            key: "p",
+            enabled: true,
+            active: false,
+        },
+        Pad808 {
+            label: "NEXT",
+            key: "n",
+            enabled: true,
+            active: false,
+        },
+        Pad808 {
+            label: "-5",
+            key: "←",
+            enabled: supports_seek,
+            active: false,
+        },
+        Pad808 {
+            label: "+5",
+            key: "→",
+            enabled: supports_seek,
+            active: false,
+        },
+        Pad808 {
+            label: "SHUF",
+            key: "z",
+            enabled: true,
+            active: shuffled,
+        },
+        Pad808 {
+            label: "RPT",
+            key: "r",
+            enabled: true,
+            active: repeat != crate::playlist::RepeatMode::Off,
+        },
+        Pad808 {
+            label: "LOAD",
+            key: "L",
+            enabled: supports_local_playlist,
+            active: false,
+        },
+        Pad808 {
+            label: "SAVE",
+            key: "S",
+            enabled: supports_local_playlist,
+            active: false,
+        },
+    ]
+}
+
+pub(super) fn render_pad_bank_808(
+    frame: &mut Frame,
+    area: Rect,
+    pads: &[Pad808],
+    colors: Classic808Colors,
+) {
+    if area.width == 0 || area.height == 0 || pads.is_empty() {
+        return;
+    }
+
+    let cell_w = if area.width < 60 { 5usize } else { 6usize };
+    let per_row = ((area.width as usize + 1) / (cell_w + 1)).max(1);
+    let mut y = area.y;
+
+    for row in pads.chunks(per_row) {
+        if y >= area.bottom() {
+            break;
+        }
+
+        let labels = pad_bank_spans_808(row, cell_w, colors, true);
+        frame.render_widget(
+            Paragraph::new(Line::from(labels)),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y = y.saturating_add(1);
+
+        if y >= area.bottom() {
+            break;
+        }
+
+        let keys = pad_bank_spans_808(row, cell_w, colors, false);
+        frame.render_widget(
+            Paragraph::new(Line::from(keys)),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y = y.saturating_add(1);
+    }
+}
+
+fn pad_bank_spans_808(
+    pads: &[Pad808],
+    cell_w: usize,
+    colors: Classic808Colors,
+    labels: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(pads.len().saturating_mul(2));
+    for (idx, pad) in pads.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+
+        let text = if labels {
+            pad.label
+        } else {
+            control_key_display_808(pad.key)
+        };
+        let style = if labels {
+            pad_label_style_808(*pad, colors)
+        } else {
+            pad_key_style_808(*pad, colors)
+        };
+        spans.push(Span::styled(
+            format!("{:^width$}", text, width = cell_w),
+            style,
+        ));
+    }
+    spans
+}
+
+fn pad_label_style_808(pad: Pad808, colors: Classic808Colors) -> Style {
+    if !pad.enabled {
+        return Style::default().fg(colors.dim).bg(colors.black);
+    }
+
+    let bg = if pad.active {
+        colors.orange
+    } else {
+        colors.keycap()
+    };
+    Style::default()
+        .fg(colors.black)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn pad_key_style_808(pad: Pad808, colors: Classic808Colors) -> Style {
+    let fg = if !pad.enabled {
+        colors.dim
+    } else if pad.active {
+        colors.orange
+    } else {
+        colors.grey
+    };
+    Style::default().fg(fg)
 }
 
 fn controls_808(
@@ -2497,6 +2857,15 @@ fn controls_808(
 mod tests {
     use super::*;
     use crate::ui::visualizer::VisMode;
+
+    #[test]
+    fn classic_808_constants_match_canonical_reference_swatches() {
+        assert_eq!(C808_YELLOW, Color::Rgb(0xF1, 0xF8, 0x27));
+        assert_eq!(C808_ORANGE, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(C808_AMBER, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(C808_RED, Color::Rgb(0xE7, 0x2E, 0x2E));
+        assert_eq!(C808_BLACK, Color::Rgb(0x20, 0x20, 0x20));
+    }
 
     #[test]
     fn controls_playlist_seekable_has_seek() {
@@ -2603,6 +2972,83 @@ mod tests {
         assert_eq!(control_key_display_808("Enter"), "ENTER");
         assert_eq!(control_key_display_808("Tab"), "TAB");
         assert_eq!(control_key_display_808("←→"), "←→");
+    }
+
+    #[test]
+    fn performance_pad_bank_maps_player_actions_to_keyboard_controls() {
+        let pads = performance_pads_808(true, true, false, crate::playlist::RepeatMode::Off, false);
+        let summary = pads
+            .iter()
+            .map(|pad| (pad.label, pad.key, pad.enabled, pad.active))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            summary,
+            vec![
+                ("PLAY", "Space", true, false),
+                ("STOP", "s", true, false),
+                ("PREV", "p", true, false),
+                ("NEXT", "n", true, false),
+                ("-5", "←", true, false),
+                ("+5", "→", true, false),
+                ("SHUF", "z", true, false),
+                ("RPT", "r", true, false),
+                ("LOAD", "L", true, false),
+                ("SAVE", "S", true, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn performance_pad_bank_marks_active_and_unavailable_actions() {
+        let pads = performance_pads_808(false, false, true, crate::playlist::RepeatMode::All, true);
+
+        let pad = |label| pads.iter().find(|pad| pad.label == label).unwrap();
+        assert!(!pad("-5").enabled);
+        assert!(!pad("+5").enabled);
+        assert!(!pad("LOAD").enabled);
+        assert!(!pad("SAVE").enabled);
+        assert!(pad("SHUF").active);
+        assert!(pad("RPT").active);
+        assert!(pad("PLAY").active);
+    }
+
+    #[test]
+    fn performance_pad_bank_renders_cream_function_buttons() {
+        let pads = performance_pads_808(true, true, false, crate::playlist::RepeatMode::Off, false);
+        let backend = ratatui::backend::TestBackend::new(72, 2);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test backend should initialize");
+
+        terminal
+            .draw(|frame| {
+                render_pad_bank_808(frame, frame.area(), &pads, Classic808Colors::classic())
+            })
+            .expect("render should succeed");
+
+        let buffer = terminal.backend().buffer();
+        let saw_play_keycap = buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "P" && cell.bg == C808_IVORY);
+
+        assert!(saw_play_keycap);
+    }
+
+    #[test]
+    fn classic_808_help_buttons_use_ivory_keycaps() {
+        let colors = Classic808Colors::classic();
+
+        for idx in 0..9 {
+            assert_eq!(step_pad_color(idx, colors), C808_IVORY);
+        }
+    }
+
+    #[test]
+    fn classic_808_logo_uses_orange_heading() {
+        assert_eq!(
+            logo_style_808(Classic808Colors::classic()).fg,
+            Some(C808_ORANGE)
+        );
     }
 
     #[test]
@@ -2731,20 +3177,20 @@ mod tests {
 
     #[test]
     fn browser_focus_reserves_base_view_browser_height() {
-        assert_eq!(content_height_808(true, false, 40), 31);
+        assert_eq!(content_height_808(true, false, 40), 35);
         assert_eq!(browser_panel_min_height_808(true), 6);
     }
 
     #[test]
-    fn non_browser_focus_keeps_standard_808_height() {
-        assert_eq!(content_height_808(false, false, 40), 28);
+    fn non_browser_focus_reserves_round_compact_knob_height() {
+        assert_eq!(content_height_808(false, false, 40), 32);
         assert_eq!(browser_panel_min_height_808(false), 3);
     }
 
     #[test]
     fn retro_mode_reserves_more_vertical_space() {
-        assert_eq!(content_height_808(false, true, 40), 31);
-        assert_eq!(content_height_808(true, true, 40), 34);
+        assert_eq!(content_height_808(false, true, 40), 35);
+        assert_eq!(content_height_808(true, true, 40), 38);
     }
 
     #[test]
@@ -2752,11 +3198,11 @@ mod tests {
         assert!(tall_visual_scene_808(VisMode::Logo));
         assert_eq!(
             content_height_808(false, tall_visual_scene_808(VisMode::Logo), 40),
-            31
+            35
         );
         assert_eq!(
             content_height_808(true, tall_visual_scene_808(VisMode::Logo), 40),
-            34
+            38
         );
     }
 
@@ -2765,12 +3211,72 @@ mod tests {
         assert!(tall_visual_scene_808(VisMode::ScotlandFlag));
         assert_eq!(
             content_height_808(false, tall_visual_scene_808(VisMode::ScotlandFlag), 40),
-            31
+            35
         );
         assert_eq!(
             content_height_808(true, tall_visual_scene_808(VisMode::ScotlandFlag), 40),
-            34
+            38
         );
+    }
+
+    #[test]
+    fn compact_knob_render_has_round_visual_footprint() {
+        let backend = ratatui::backend::TestBackend::new(13, 5);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test backend should initialize");
+
+        terminal
+            .draw(|frame| {
+                render_knob(
+                    frame,
+                    frame.area(),
+                    0.5,
+                    "70",
+                    false,
+                    Classic808Colors::classic(),
+                )
+            })
+            .expect("render should succeed");
+
+        let buffer = terminal.backend().buffer();
+        let mut min_x = u16::MAX;
+        let mut max_x = 0;
+        let mut min_y = u16::MAX;
+        let mut max_y = 0;
+        for y in 0..4 {
+            for x in 0..13 {
+                if !buffer[(x, y)].symbol().trim().is_empty() {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+
+        let width = max_x - min_x + 1;
+        let height = max_y - min_y + 1;
+        assert!(
+            width <= height * 2 + 1,
+            "knob footprint should be visually round in 2:1 cells, got {width}x{height}"
+        );
+    }
+
+    #[test]
+    fn tempo_dial_text_uses_light_808_grey_for_contrast() {
+        let colors = Classic808Colors::classic();
+        assert_eq!(tempo_dial_text_style_808(colors).fg, Some(colors.ivory));
+    }
+
+    #[test]
+    fn tempo_dial_geometry_matches_render_slot_aspect_ratio() {
+        let geometry = tempo_dial_geometry_808(Rect::new(0, 0, 18, 11));
+
+        let x_range = geometry.x_bounds[1] - geometry.x_bounds[0];
+        let y_range = geometry.y_bounds[1] - geometry.y_bounds[0];
+        let expected = 18.0 / (11.0 * 2.0);
+        assert!(((x_range / y_range) - expected).abs() < 0.01);
+        assert!(geometry.radius + geometry.label_pad < geometry.x_bounds[1]);
+        assert!(geometry.radius + geometry.label_pad < geometry.y_bounds[1]);
     }
 
     #[test]

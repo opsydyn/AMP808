@@ -143,6 +143,25 @@ impl Player {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            gapless: Arc::new(GaplessSource::new()),
+            tap: Arc::new(Tap::new(4096)),
+            state: Arc::new(Mutex::new(PlayerState {
+                volume: 0.0,
+                eq_bands: [0.0; 10],
+                mono: false,
+                playing: false,
+            })),
+            paused: Arc::new(AtomicBool::new(false)),
+            stream_title: Arc::new(RwLock::new(String::new())),
+            cover_art: Arc::new(RwLock::new(None)),
+            _stream: None,
+        }
+    }
+
     /// Start playing an audio file or HTTP stream.
     pub fn play(&self, path: &str) -> anyhow::Result<()> {
         // Clear stream title and cover art for new track

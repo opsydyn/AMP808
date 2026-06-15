@@ -9,6 +9,7 @@ use super::keys::Focus;
 use super::scotland_flag::ScotlandFlagWidget;
 use super::styles::PANEL_WIDTH;
 use super::theme;
+use super::view_mode::ViewMode;
 use super::visualizer::{SpectrumSegment, SpectrumSegmentKind, VisMode};
 
 impl App {
@@ -30,8 +31,18 @@ impl App {
             return;
         }
 
-        if self.mode_808 {
+        if self.view_mode == ViewMode::Drum808 {
             self.render_808(frame);
+            return;
+        }
+
+        if self.view_mode == ViewMode::Expanded {
+            self.render_expanded(frame);
+            return;
+        }
+
+        if self.view_mode == ViewMode::Drum808Expanded {
+            self.render_808_expanded(frame);
             return;
         }
 
@@ -163,7 +174,7 @@ impl App {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn time_string(&self) -> String {
+    pub(super) fn time_string(&self) -> String {
         let (pos_secs, dur_secs) = self.track_position();
         let pos_min = pos_secs / 60;
         let pos_sec = pos_secs % 60;
@@ -183,7 +194,7 @@ impl App {
         }
     }
 
-    fn playback_status(&self) -> (String, Style) {
+    pub(super) fn playback_status(&self) -> (String, Style) {
         if self.buffering {
             ("◌ Buffering...".to_string(), self.palette.status_style())
         } else if self.player.is_playing() && self.player.is_paused() {
@@ -877,7 +888,9 @@ impl App {
 
         for i in scroll..count.min(scroll + max_visible) {
             let name = if i == 0 {
-                if self.mode_808 {
+                if self.view_mode == ViewMode::Drum808
+                    || self.view_mode == ViewMode::Drum808Expanded
+                {
                     "Classic 808 (default)".to_string()
                 } else {
                     theme::DEFAULT_NAME.to_string()

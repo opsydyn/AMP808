@@ -160,10 +160,13 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
         app.theme_idx = idx;
     }
 
-    // Apply 808 mode from config
-    if cfg.mode_808 {
-        app.mode_808 = true;
-    }
+    // Apply view mode from config
+    app.view_mode = match cfg.view_mode.as_str() {
+        "expanded" => ui::view_mode::ViewMode::Expanded,
+        "compact" => ui::view_mode::ViewMode::Compact,
+        "808_expanded" => ui::view_mode::ViewMode::Drum808Expanded,
+        _ => ui::view_mode::ViewMode::Drum808,
+    };
 
     app.refresh_palette();
 
@@ -214,7 +217,7 @@ SoundCloud/YouTube/Bandcamp require yt-dlp (brew install yt-dlp)"
         } else {
             app.player.eq_bands().to_vec()
         },
-        mode_808: app.mode_808,
+        view_mode: app.view_mode.to_string(),
     };
     if let Err(e) = save_cfg.save() {
         eprintln!("warning: failed to save config: {e}");

@@ -8,6 +8,8 @@ pub mod styles;
 pub mod theme;
 pub mod view;
 pub mod view_808;
+pub mod view_expanded;
+pub mod view_mode;
 pub mod visualizer;
 
 use std::io;
@@ -33,6 +35,7 @@ use self::keys::Focus;
 use self::styles::Palette;
 use self::theme::Theme;
 use self::view_808::ChromeFxSignature;
+use self::view_mode::ViewMode;
 use self::visualizer::Visualizer;
 use crate::app_paths;
 use crate::external::apple_music_api::{AppleMusicClient, LibraryTrack};
@@ -121,12 +124,13 @@ pub struct App {
     pub theme_cursor: usize,
     pub show_themes: bool,
     pub theme_idx_before_picker: Option<Option<usize>>,
-    pub mode_808: bool,
+    pub view_mode: ViewMode,
     pub palette: Palette,
     pub stream_title: String,
     pub show_cover_art: bool,
     pub cover_art_proto: Option<ratatui_image::protocol::Protocol>,
     cover_art_proto_808: Option<ratatui_image::protocol::Protocol>,
+    pub cover_art_proto_expanded: Option<ratatui_image::protocol::Protocol>,
     cover_art_loaded: bool,
     image_picker: Option<ratatui_image::picker::Picker>,
     pub provider: Option<std::sync::Arc<dyn Provider>>,
@@ -197,12 +201,13 @@ impl App {
             theme_cursor: 0,
             show_themes: false,
             theme_idx_before_picker: None,
-            mode_808: false,
+            view_mode: ViewMode::Compact,
             palette: Palette::default(),
             stream_title: String::new(),
             show_cover_art: true,
             cover_art_proto: None,
             cover_art_proto_808: None,
+            cover_art_proto_expanded: None,
             cover_art_loaded: false,
             image_picker,
             provider,
@@ -241,7 +246,11 @@ impl App {
     pub fn refresh_palette(&mut self) {
         self.palette = match self.theme_idx {
             Some(i) if i < self.themes.len() => Palette::from_theme(&self.themes[i]),
-            _ if self.mode_808 => Palette::tr808(),
+            _ if self.view_mode == ViewMode::Drum808
+                || self.view_mode == ViewMode::Drum808Expanded =>
+            {
+                Palette::tr808()
+            }
             _ => Palette::default(),
         };
 
@@ -305,8 +314,15 @@ impl App {
                         .ok();
                     self.cover_art_proto_808 = picker
                         .new_protocol(
-                            img,
+                            img.clone(),
                             ratatui::layout::Rect::new(0, 0, 28, 8),
+                            ratatui_image::Resize::Fit(None),
+                        )
+                        .ok();
+                    self.cover_art_proto_expanded = picker
+                        .new_protocol(
+                            img,
+                            ratatui::layout::Rect::new(0, 0, 32, 24),
                             ratatui_image::Resize::Fit(None),
                         )
                         .ok();
@@ -503,6 +519,7 @@ impl App {
         self.stream_title.clear();
         self.cover_art_proto = None;
         self.cover_art_proto_808 = None;
+        self.cover_art_proto_expanded = None;
         self.cover_art_loaded = false;
 
         // Lazy-resolve yt-dlp URLs
@@ -1010,6 +1027,7 @@ pub async fn run(mut app: App, mut msg_rx: mpsc::UnboundedReceiver<AppMsg>) -> a
 mod tests {
     use super::bpm::{BpmDisplayState, BpmState};
     use super::eq_presets::*;
+    use super::view_mode::ViewMode;
     use super::{App, AppMsg, AppleMusicTrackContext};
     use crate::external::apple_music_api::LibraryTrack;
     use crate::external::music_app::{MusicAppPlayerState, MusicAppSnapshot};
@@ -1136,7 +1154,7 @@ mod tests {
     #[test]
     fn refresh_palette_uses_classic_808_when_no_theme_selected() {
         let mut app = build_music_app_test_app();
-        app.mode_808 = true;
+        app.view_mode = ViewMode::Drum808;
         app.refresh_palette();
 
         let classic = Palette::tr808();
@@ -1150,7 +1168,7 @@ mod tests {
         let mut app = build_music_app_test_app();
         let idx = theme::find_by_name(&app.themes, "catppuccin").expect("theme exists");
 
-        app.mode_808 = true;
+        app.view_mode = ViewMode::Drum808;
         app.apply_theme(Some(idx));
 
         let themed = Palette::from_theme(&app.themes[idx]);

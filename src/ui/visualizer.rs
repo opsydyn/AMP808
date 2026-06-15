@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::f64::consts::PI;
 
 use rustfft::FftPlanner;
@@ -69,6 +70,8 @@ pub struct Visualizer {
     scope_trigger_level: f64,
     scope_trigger_debounce: usize,
     planner: FftPlanner<f64>,
+    /// Rolling band history for the heatmap spectrogram in expanded mode.
+    pub spectrogram_history: VecDeque<[f64; NUM_BANDS]>,
 }
 
 impl Visualizer {
@@ -84,6 +87,7 @@ impl Visualizer {
             scope_trigger_level: 0.0,
             scope_trigger_debounce: 2,
             planner: FftPlanner::new(),
+            spectrogram_history: VecDeque::new(),
         }
     }
 

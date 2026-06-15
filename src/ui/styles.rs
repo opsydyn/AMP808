@@ -26,17 +26,17 @@ impl Palette {
     /// 808 color palette (Roland TR-808 inspired).
     pub fn tr808() -> Self {
         Self {
-            title: Color::Rgb(0xFF, 0xD4, 0x00),         // yellow
+            title: Color::Rgb(0xF8, 0xA1, 0x25),         // canonical orange
             text: Color::Rgb(0xC9, 0xC9, 0xC9),          // panel grey
             dim: Color::Rgb(0x66, 0x66, 0x66),           // darker grey
-            accent: Color::Rgb(0xFF, 0xD4, 0x00),        // yellow
-            playing: Color::Rgb(0xF0, 0x5A, 0x28),       // orange
-            seek_bar: Color::Rgb(0xF6, 0xA6, 0x23),      // amber
-            volume: Color::Rgb(0xF0, 0x5A, 0x28),        // orange
-            error: Color::Rgb(0xD7, 0x26, 0x2E),         // red
-            spectrum_low: Color::Rgb(0xFF, 0xD4, 0x00),  // yellow
-            spectrum_mid: Color::Rgb(0xF6, 0xA6, 0x23),  // amber
-            spectrum_high: Color::Rgb(0xD7, 0x26, 0x2E), // red
+            accent: Color::Rgb(0xF8, 0xA1, 0x25),        // canonical orange chrome
+            playing: Color::Rgb(0xF8, 0xA1, 0x25),       // canonical orange
+            seek_bar: Color::Rgb(0xF8, 0xA1, 0x25),      // canonical orange
+            volume: Color::Rgb(0xF8, 0xA1, 0x25),        // canonical orange
+            error: Color::Rgb(0xE7, 0x2E, 0x2E),         // canonical red
+            spectrum_low: Color::Rgb(0xF1, 0xF8, 0x27),  // canonical yellow
+            spectrum_mid: Color::Rgb(0xF8, 0xA1, 0x25),  // canonical orange
+            spectrum_high: Color::Rgb(0xE7, 0x2E, 0x2E), // canonical red
         }
     }
 
@@ -114,7 +114,7 @@ impl Palette {
     }
 
     pub fn help_style(&self) -> Style {
-        Style::default().fg(self.dim)
+        Style::default().fg(self.text)
     }
 
     pub fn error_style(&self) -> Style {
@@ -166,5 +166,24 @@ impl Default for Palette {
             spectrum_mid: Color::LightYellow,
             spectrum_high: Color::LightRed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classic_808_palette_uses_orange_chrome_and_title() {
+        let palette = Palette::tr808();
+
+        assert_eq!(palette.title, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(palette.accent, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(palette.playing, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(palette.seek_bar, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(palette.error, Color::Rgb(0xE7, 0x2E, 0x2E));
+        assert_eq!(palette.spectrum_low, Color::Rgb(0xF1, 0xF8, 0x27));
+        assert_eq!(palette.spectrum_mid, Color::Rgb(0xF8, 0xA1, 0x25));
+        assert_eq!(palette.spectrum_high, Color::Rgb(0xE7, 0x2E, 0x2E));
     }
 }

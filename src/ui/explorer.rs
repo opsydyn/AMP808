@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use crossterm::event::{Event, KeyCode, KeyEvent};
+use ratatui::style::{Color, Style};
 use ratatui_explorer::{File, FileExplorer, FileExplorerBuilder, Theme};
 
 use super::App;
@@ -29,7 +30,7 @@ impl PlaylistExplorer {
     ) -> anyhow::Result<Self> {
         let mut builder = FileExplorerBuilder::default()
             .show_hidden(false)
-            .theme(Theme::default())
+            .theme(playlist_explorer_theme())
             .filter_map(filter_playlist_entry);
 
         if let Some(path) = last_playlist_file.filter(|path| path.exists()) {
@@ -92,14 +93,9 @@ impl PlaylistExplorer {
 }
 
 impl App {
-    pub fn toggle_playlist_browser(&mut self) {
+    pub fn ensure_playlist_browser(&mut self) {
         if !self.player.supports_local_playlist() {
             self.err = Some("music-app backend does not support local playlist browsing".into());
-            return;
-        }
-
-        if self.focus == Focus::Browser {
-            self.focus = Focus::Playlist;
             return;
         }
 
@@ -119,6 +115,20 @@ impl App {
         self.show_themes = false;
         self.focus = Focus::Browser;
         self.err = None;
+    }
+
+    pub fn toggle_playlist_browser(&mut self) {
+        if !self.player.supports_local_playlist() {
+            self.err = Some("music-app backend does not support local playlist browsing".into());
+            return;
+        }
+
+        if self.focus == Focus::Browser {
+            self.focus = Focus::Playlist;
+            return;
+        }
+
+        self.ensure_playlist_browser();
     }
 
     pub fn handle_browser_key(&mut self, key: KeyEvent) {
@@ -145,6 +155,20 @@ impl App {
             }
         }
     }
+}
+
+fn explorer_808_cream() -> Color {
+    Color::Rgb(0xEE, 0xEA, 0xD8)
+}
+
+fn playlist_explorer_theme() -> Theme {
+    let cream = explorer_808_cream();
+    let highlight_bg = Color::Rgb(0x5D, 0x63, 0x72);
+    Theme::default()
+        .with_item_style(Style::default().fg(cream))
+        .with_dir_style(Style::default().fg(cream))
+        .with_highlight_item_style(Style::default().fg(cream).bg(highlight_bg))
+        .with_highlight_dir_style(Style::default().fg(cream).bg(highlight_bg))
 }
 
 fn default_playlist_dir() -> PathBuf {
@@ -195,6 +219,10 @@ fn is_hidden_path(path: &Path) -> bool {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::widgets::FrameExt as _;
 
     #[test]
     fn filters_to_directories_and_playlist_files() {
@@ -279,6 +307,34 @@ mod tests {
                 panic!("expected playlist selection")
             }
         }
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn explorer_theme_renders_directories_in_808_cream_not_blue() {
+        let tmp = std::env::temp_dir().join("amp808-test-explorer-theme");
+        let playlists = tmp.join("playlists");
+        std::fs::create_dir_all(&playlists).unwrap();
+
+        let explorer = PlaylistExplorer::from_paths(Some(&tmp), None).unwrap();
+        let backend = TestBackend::new(32, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget_ref(explorer.widget(), frame.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cream = explorer_808_cream();
+        let mut saw_cream = false;
+        for cell in buffer.content() {
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            assert_ne!(cell.fg, Color::LightBlue);
+            saw_cream |= cell.fg == cream;
+        }
+        assert!(saw_cream);
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

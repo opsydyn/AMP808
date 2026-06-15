@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::App;
 use super::command::{CommandInputResult, handle_command_input_key};
 use super::eq_presets::EQ_PRESETS;
+use super::view_mode::ViewMode;
 
 impl App {
     fn nudge_volume(&mut self, delta_db: f64) {
@@ -66,6 +67,14 @@ impl App {
             }
 
             (_, KeyCode::Char('<')) | (_, KeyCode::Char(',')) => {
+                self.prev_track();
+            }
+
+            (_, KeyCode::Char('n')) => {
+                self.next_track();
+            }
+
+            (_, KeyCode::Char('p')) => {
                 self.prev_track();
             }
 
@@ -196,12 +205,18 @@ impl App {
             }
 
             (_, KeyCode::Tab) => {
-                self.focus = next_focus(
-                    self.focus,
-                    self.has_provider_pane(),
-                    self.explorer.is_some() && self.player.supports_local_playlist(),
-                    self.player.supports_eq(),
-                );
+                self.focus = if self.view_mode == ViewMode::Expanded
+                    || self.view_mode == ViewMode::Drum808Expanded
+                {
+                    next_focus_expanded(self.focus, self.player.supports_eq())
+                } else {
+                    next_focus(
+                        self.focus,
+                        self.has_provider_pane(),
+                        self.explorer.is_some() && self.player.supports_local_playlist(),
+                        self.player.supports_eq(),
+                    )
+                };
             }
 
             (KeyModifiers::CONTROL, KeyCode::Char('h')) if self.focus == Focus::Browser => {
@@ -271,7 +286,15 @@ impl App {
             }
 
             (_, KeyCode::Char('L')) if self.player.supports_local_playlist() => {
-                self.toggle_playlist_browser();
+                if self.view_mode == ViewMode::Expanded
+                    || self.view_mode == ViewMode::Drum808Expanded
+                {
+                    // In expanded modes the browser is a permanent column, but it
+                    // may still need to be initialized if expanded is the startup view.
+                    self.ensure_playlist_browser();
+                } else {
+                    self.toggle_playlist_browser();
+                }
             }
 
             (_, KeyCode::Char(':')) => {
@@ -291,8 +314,31 @@ impl App {
                 self.show_cover_art = !self.show_cover_art;
             }
 
+            (_, KeyCode::Char('w')) => {
+                self.view_mode = match self.view_mode {
+                    ViewMode::Expanded => ViewMode::Compact,
+                    ViewMode::Drum808Expanded => ViewMode::Drum808,
+                    ViewMode::Compact => ViewMode::Expanded,
+                    ViewMode::Drum808 => ViewMode::Drum808Expanded,
+                };
+                self.refresh_palette();
+                let entering_expanded = self.view_mode == ViewMode::Expanded
+                    || self.view_mode == ViewMode::Drum808Expanded;
+                if entering_expanded
+                    && self.explorer.is_none()
+                    && self.player.supports_local_playlist()
+                {
+                    self.ensure_playlist_browser();
+                }
+            }
+
             (_, KeyCode::Char('8')) => {
-                self.mode_808 = !self.mode_808;
+                self.view_mode = match self.view_mode {
+                    ViewMode::Compact => ViewMode::Drum808,
+                    ViewMode::Drum808 => ViewMode::Compact,
+                    ViewMode::Expanded => ViewMode::Drum808Expanded,
+                    ViewMode::Drum808Expanded => ViewMode::Expanded,
+                };
                 self.refresh_palette();
             }
 
@@ -445,6 +491,21 @@ fn next_focus(current: Focus, has_provider: bool, has_browser: bool, has_eq: boo
     }
 }
 
+/// Tab cycle for expanded mode: Browser → Playlist → EQ → Browser.
+fn next_focus_expanded(current: Focus, has_eq: bool) -> Focus {
+    match current {
+        Focus::Browser => Focus::Playlist,
+        Focus::Playlist => {
+            if has_eq {
+                Focus::EQ
+            } else {
+                Focus::Browser
+            }
+        }
+        Focus::EQ | Focus::Provider => Focus::Browser,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "macos")]
@@ -457,13 +518,15 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
 
+    use super::super::view_mode::ViewMode;
     use super::{Focus, next_focus};
     use crate::external::apple_music_api::{AppleMusicClient, AppleMusicConfig, LibraryTrack};
     use crate::external::music_app::{MusicAppPlayerState, MusicAppSnapshot};
+    use crate::player::Player;
     use crate::ui::{styles::Palette, theme};
     use crate::{
         playback_backend::PlaybackBackend,
-        playlist::{Playlist, PlaylistInfo},
+        playlist::{Playlist, PlaylistInfo, Track},
         resolve::ytdl::YtdlTempTracker,
         ui::{App, AppleMusicTrackContext, visualizer::VisMode},
     };
@@ -516,6 +579,19 @@ mod tests {
             tx,
             None,
         )
+    }
+
+    fn build_test_local_app(view_mode: ViewMode) -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new(
+            PlaybackBackend::local(Player::for_test()),
+            Playlist::new(),
+            YtdlTempTracker::new(),
+            tx,
+            None,
+        );
+        app.view_mode = view_mode;
+        app
     }
 
     fn dummy_apple_music_client() -> AppleMusicClient {
@@ -595,7 +671,7 @@ mod tests {
     #[test]
     fn v_cycles_visualizer_in_808_music_app_mode() {
         let mut app = build_test_music_app();
-        app.mode_808 = true;
+        app.view_mode = ViewMode::Drum808;
         assert_eq!(app.vis.mode, VisMode::Bars);
 
         app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
@@ -625,10 +701,96 @@ mod tests {
         app.apply_theme(Some(idx));
         app.handle_key(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
 
-        assert!(app.mode_808);
+        assert!(app.view_mode == ViewMode::Drum808);
         assert_eq!(app.palette.title, themed.title);
         assert_eq!(app.palette.text, themed.text);
         assert_eq!(app.palette.spectrum_high, themed.spectrum_high);
+    }
+
+    #[test]
+    fn l_opens_and_focuses_browser_when_expanded_browser_is_uninitialized() {
+        let mut app = build_test_local_app(ViewMode::Expanded);
+        app.focus = Focus::Playlist;
+        app.explorer = None;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        assert!(app.explorer.is_some());
+        assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn l_opens_and_focuses_browser_when_808_expanded_browser_is_uninitialized() {
+        let mut app = build_test_local_app(ViewMode::Drum808Expanded);
+        app.focus = Focus::Playlist;
+        app.explorer = None;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        assert!(app.explorer.is_some());
+        assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn l_recovers_expanded_browser_focus_when_browser_is_uninitialized() {
+        let mut app = build_test_local_app(ViewMode::Expanded);
+        app.focus = Focus::Browser;
+        app.explorer = None;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        assert!(app.explorer.is_some());
+        assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn n_key_advances_to_next_track_for_808_pad_bank() {
+        let mut app = build_test_local_app(ViewMode::Drum808Expanded);
+        app.playlist.add(&[
+            Track {
+                path: "/tmp/one.mp3".into(),
+                title: "One".into(),
+                artist: String::new(),
+                stream: false,
+            },
+            Track {
+                path: "/tmp/two.mp3".into(),
+                title: "Two".into(),
+                artist: String::new(),
+                stream: false,
+            },
+        ]);
+        app.playlist.set_index(0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(app.playlist.index(), Some(1));
+        assert_eq!(app.pl_cursor, 1);
+    }
+
+    #[test]
+    fn p_key_returns_to_previous_track_for_808_pad_bank() {
+        let mut app = build_test_local_app(ViewMode::Drum808Expanded);
+        app.playlist.add(&[
+            Track {
+                path: "/tmp/one.mp3".into(),
+                title: "One".into(),
+                artist: String::new(),
+                stream: false,
+            },
+            Track {
+                path: "/tmp/two.mp3".into(),
+                title: "Two".into(),
+                artist: String::new(),
+                stream: false,
+            },
+        ]);
+        app.playlist.set_index(1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        assert_eq!(app.playlist.index(), Some(0));
+        assert_eq!(app.pl_cursor, 0);
     }
 
     #[cfg(target_os = "macos")]

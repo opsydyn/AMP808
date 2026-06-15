@@ -38,9 +38,9 @@ pub struct Config {
     #[serde(default = "default_eq")]
     pub eq: Vec<f64>,
 
-    /// Whether 808 mode (Roland TR-808 layout) is active.
-    #[serde(default = "default_mode_808")]
-    pub mode_808: bool,
+    /// Active layout mode: "808", "expanded", or "compact".
+    #[serde(default = "default_view_mode")]
+    pub view_mode: String,
 }
 
 fn default_repeat() -> String {
@@ -51,8 +51,8 @@ fn default_eq() -> Vec<f64> {
     vec![0.0; 10]
 }
 
-fn default_mode_808() -> bool {
-    true
+fn default_view_mode() -> String {
+    "808".to_string()
 }
 
 impl Default for Config {
@@ -65,7 +65,7 @@ impl Default for Config {
             theme: String::new(),
             eq_preset: String::new(),
             eq: vec![0.0; 10],
-            mode_808: true,
+            view_mode: "808".to_string(),
         }
     }
 }
@@ -124,6 +124,13 @@ impl Config {
         for band in &mut self.eq {
             *band = band.clamp(-12.0, 12.0);
         }
+        // Normalize view_mode
+        self.view_mode = match self.view_mode.to_lowercase().as_str() {
+            "expanded" => "expanded".to_string(),
+            "compact" => "compact".to_string(),
+            "808_expanded" => "808_expanded".to_string(),
+            _ => "808".to_string(),
+        };
     }
 
     /// Parse repeat string to RepeatMode enum.
@@ -157,7 +164,7 @@ mod tests {
         assert!(!cfg.mono);
         assert_eq!(cfg.eq.len(), 10);
         assert!(cfg.eq.iter().all(|&v| v == 0.0));
-        assert!(cfg.mode_808);
+        assert_eq!(cfg.view_mode, "808");
     }
 
     #[test]
@@ -188,13 +195,38 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
         assert_eq!(cfg.volume, 0.0);
         assert_eq!(cfg.repeat, "off");
         assert!(!cfg.shuffle);
-        assert!(cfg.mode_808);
+        assert_eq!(cfg.view_mode, "808");
     }
 
     #[test]
-    fn test_explicit_mode_808_false_is_respected() {
-        let cfg = Config::from_str("mode_808 = false").unwrap();
-        assert!(!cfg.mode_808);
+    fn test_view_mode_expanded() {
+        let cfg = Config::from_str(r#"view_mode = "expanded""#).unwrap();
+        assert_eq!(cfg.view_mode, "expanded");
+    }
+
+    #[test]
+    fn test_view_mode_compact() {
+        let cfg = Config::from_str(r#"view_mode = "compact""#).unwrap();
+        assert_eq!(cfg.view_mode, "compact");
+    }
+
+    #[test]
+    fn test_view_mode_808_expanded() {
+        let cfg = Config::from_str(r#"view_mode = "808_expanded""#).unwrap();
+        assert_eq!(cfg.view_mode, "808_expanded");
+    }
+
+    #[test]
+    fn test_unknown_view_mode_defaults_to_808() {
+        let cfg = Config::from_str(r#"view_mode = "banana""#).unwrap();
+        assert_eq!(cfg.view_mode, "808");
+    }
+
+    #[test]
+    fn test_old_mode_808_field_is_ignored_gracefully() {
+        // Old config files have mode_808 = true/false — serde ignores unknown fields
+        let cfg = Config::from_str("mode_808 = true").unwrap();
+        assert_eq!(cfg.view_mode, "808"); // gets the default
     }
 
     #[test]
@@ -248,7 +280,7 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
             theme: "dracula".to_string(),
             eq_preset: "Jazz".to_string(),
             eq: vec![1.0, 2.0, 3.0, 4.0, 5.0, -1.0, -2.0, -3.0, -4.0, -5.0],
-            mode_808: true,
+            view_mode: "808".to_string(),
         };
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
@@ -256,5 +288,6 @@ eq = [3.0, 2.0, -1.0, 0.0, 1.0, 4.0, 5.0, 3.0, 2.0, 1.0]
         assert_eq!(deserialized.repeat, cfg.repeat);
         assert_eq!(deserialized.shuffle, cfg.shuffle);
         assert_eq!(deserialized.eq, cfg.eq);
+        assert_eq!(deserialized.view_mode, cfg.view_mode);
     }
 }
