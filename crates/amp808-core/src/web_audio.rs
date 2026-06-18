@@ -65,6 +65,24 @@ pub fn analyser_bins_to_bands(bins: &[u8], band_count: usize) -> Vec<f32> {
     bands
 }
 
+/// Scales normalized analyser bands into terminal row heights.
+///
+/// Non-finite values and values below zero render as silence. Values above one
+/// are capped at the available visual height.
+pub fn analyser_bands_to_heights(bands: &[f32], max_height: u16) -> Vec<u16> {
+    bands
+        .iter()
+        .map(|band| {
+            let normalized = if band.is_finite() {
+                band.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (normalized * f32::from(max_height)).round() as u16
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HostedAudioIssue, WebAudioSource};
@@ -127,5 +145,14 @@ mod tests {
         let bands = super::analyser_bins_to_bands(&[], 3);
 
         assert_eq!(bands, vec![0.0; 3]);
+    }
+
+    #[test]
+    fn analyser_bands_scale_to_clamped_visual_heights() {
+        let bands = [-0.5, 0.0, 0.49, 0.5, 1.0, 1.5, f32::NAN];
+
+        let heights = super::analyser_bands_to_heights(&bands, 8);
+
+        assert_eq!(heights, vec![0, 0, 4, 4, 8, 8, 0]);
     }
 }
