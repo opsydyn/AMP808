@@ -38,6 +38,11 @@ impl WebAudioSource {
     }
 }
 
+/// Converts analyser byte bins into normalized visual bands.
+///
+/// The output length always equals `band_count`. Empty input fills the requested
+/// bands with zeroes. When there are fewer bins than bands, the nearest
+/// available bins are reused to preserve the requested visual band count.
 pub fn analyser_bins_to_bands(bins: &[u8], band_count: usize) -> Vec<f32> {
     if band_count == 0 {
         return Vec::new();
@@ -99,5 +104,28 @@ mod tests {
         assert_eq!(bands.len(), 2);
         assert!((bands[0] - 0.1254902).abs() < 0.0001);
         assert!((bands[1] - 0.7509804).abs() < 0.0001);
+    }
+
+    #[test]
+    fn analyser_bins_reuse_nearest_bins_when_more_bands_than_bins() {
+        let bins = [0, 255];
+
+        let bands = super::analyser_bins_to_bands(&bins, 4);
+
+        assert_eq!(bands, vec![0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn analyser_bins_return_empty_when_no_bands_requested() {
+        let bands = super::analyser_bins_to_bands(&[1, 2], 0);
+
+        assert!(bands.is_empty());
+    }
+
+    #[test]
+    fn analyser_bins_fill_zeroes_when_input_is_empty() {
+        let bands = super::analyser_bins_to_bands(&[], 3);
+
+        assert_eq!(bands, vec![0.0; 3]);
     }
 }
