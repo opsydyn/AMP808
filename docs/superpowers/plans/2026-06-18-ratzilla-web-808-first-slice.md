@@ -446,18 +446,21 @@ Add this section near the build/run documentation:
 ## AMP808 Web 808
 
 The first web slice lives in `apps/web` and is designed for static hosting on GitHub Pages.
-It uses Ratzilla with `WebGl2Backend`; browser playback is owned by `HTMLAudioElement`, with
-Web Audio analysis planned for the 808 visualizer path.
+The current slice renders the Ratzilla `WebGl2Backend` shell with static source/status text.
+It does not create an `HTMLAudioElement`, file picker, or playback wiring yet.
 
-Local file playback is the reliable phase-one path. External hosted URLs are in scope only when
-the host allows CORS for browser media and Web Audio analysis. If a hosted URL does not allow
-CORS, AMP808 Web shows: "This hosted audio URL must allow CORS for AMP808 web playback."
+Browser playback is planned around `HTMLAudioElement`, with Web Audio analysis planned for the
+808 visualizer path. Local files are intended to be the reliable first playback path once playback
+wiring lands. External hosted URLs are in scope only when the host allows CORS for browser media
+and Web Audio analysis. If a hosted URL does not allow CORS, AMP808 Web shows: "This hosted audio
+URL must allow CORS for AMP808 web playback."
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
 cd apps/web
 trunk serve
+trunk build
 ```
 ```
 
@@ -474,7 +477,10 @@ Expected: PASS.
 
 ## Final Verification
 
-- [ ] `cargo test` passes.
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo check -p amp808_web --target wasm32-unknown-unknown` passes.
-- [ ] `git status --short` shows only intended files.
+- [x] `cargo test --workspace --locked` passes.
+- [x] `cargo fmt --all --check` passes.
+- [x] `cargo check --locked -p amp808_web --target wasm32-unknown-unknown` passes.
+- [x] `cargo check --locked` passes.
+- [x] `git status --short` showed only intended files before final review fixes.
+- [ ] `trunk build --release` from `apps/web` remains unverified in this environment because
+      `trunk` is not installed on PATH.

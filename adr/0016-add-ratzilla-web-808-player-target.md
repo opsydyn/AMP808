@@ -18,10 +18,11 @@ native app to:
 - synthetic visualizers only where real samples are unavailable, such as `Music.app` mode
   (ADR-0014)
 
-We want a first AMP808 web slice that can be hosted on GitHub Pages and feels like the 808 view,
-similar in deployment shape to the existing Tech Radar Ratzilla web app. The web target must play
-real browser audio, not just render a static demo, but it must not weaken or replace the native
-terminal architecture.
+We want an AMP808 web target that can be hosted on GitHub Pages and feels like the 808 view,
+similar in deployment shape to the existing Tech Radar Ratzilla web app. The target architecture
+must support real browser audio, not settle for a static demo as the final web surface, but it must
+not weaken or replace the native terminal architecture. The first committed slice may establish the
+Ratzilla shell, shared core, and static-hosting boundary before playback wiring lands.
 
 The question is: how should AMP808 add a GitHub Pages-hosted Ratzilla web player while respecting
 the native audio/TUI decisions and browser security constraints?
@@ -30,7 +31,7 @@ the native audio/TUI decisions and browser security constraints?
 
 - Keep the native player architecture intact.
 - Ship the web surface from static assets only, suitable for GitHub Pages.
-- Support real browser playback in phase 1.
+- Support real browser playback in the first playback phase after the shell/core foundation.
 - Preserve the 808 visual identity and use real analyser data when audio is playable.
 - Make browser CORS limits explicit instead of silently showing fake visualizer data for external
   URLs that cannot be analysed.
@@ -46,18 +47,18 @@ the native audio/TUI decisions and browser security constraints?
 ## Decision Outcome
 
 Chosen option: "Add a separate Ratzilla web target with `HTMLAudioElement` playback and Web Audio
-analysis", because it gives phase 1 real browser playback while keeping native-only dependencies
-out of the wasm build.
+analysis", because it gives the web playback phase real browser playback while keeping native-only
+dependencies out of the wasm build.
 
-The web target will:
+The web target architecture will:
 
 1. Add a new `apps/web` Ratzilla app.
-2. Use Ratzilla `WebGl2Backend` as the phase 1 renderer.
+2. Use Ratzilla `WebGl2Backend` as the primary renderer.
 3. Use `HTMLAudioElement` as the browser playback owner for play, pause, seek, duration, buffering,
    selected local files, and hosted URLs.
 4. Connect the audio element to a Web Audio `AudioContext` through `createMediaElementSource()`.
 5. Use an `AnalyserNode` for real visualizer data in the 808 UI.
-6. Support phase 1 playback from:
+6. Support the first playback phase from:
    - browser-selected local audio files, using object URLs
    - external hosted audio URLs, when browser media loading and CORS allow Web Audio analysis
 7. Show a clear error for external URLs that cannot satisfy the browser's media/CORS requirements
@@ -75,8 +76,8 @@ The web target will:
 - Good, because `WebGl2Backend` is the right primary renderer for a frequently changing 808
   terminal grid.
 - Bad, because arbitrary external URLs will not always work from GitHub Pages.
-- Bad, because phase 1 cannot proxy audio or fix CORS without adding a backend, which is out of
-  scope.
+- Bad, because the static web target cannot proxy audio or fix CORS without adding a backend, which
+  is out of scope.
 - Neutral, because the codebase needs a web-safe shared core boundary before UI rendering can be
   reused cleanly.
 
@@ -88,11 +89,11 @@ The web target will:
 - No GitHub Pages audio proxy or server-side URL resolver.
 - No arbitrary external URL guarantee. Hosted URLs are supported only when the browser can load and
   analyse them under CORS.
-- No web implementation of the full native playlist resolver in phase 1.
-- No album art protocol parity in phase 1.
-- No custom Web Audio sample scheduler in phase 1.
-- No Canvas or DOM rendering fallback in phase 1. If WebGL2 is unavailable, show an unsupported
-  browser/runtime error.
+- No web implementation of the full native playlist resolver in the first web phases.
+- No album art protocol parity in the first web phases.
+- No custom Web Audio sample scheduler in the first web phases.
+- No Canvas or DOM rendering fallback in the first web phases. If WebGL2 is unavailable, show an
+  unsupported browser/runtime error.
 
 ## Implementation Plan
 
@@ -143,7 +144,7 @@ The web target will:
   - Do not make the existing native `App` compile to wasm by feature-gating large parts of it.
   - Do not let `apps/web` depend on the native `amp808` binary crate.
   - Do not show synthetic visualizer data when an external URL fails CORS analysis.
-  - Do not add a backend service or proxy as part of phase 1.
+  - Do not add a backend service or proxy as part of the static web target.
   - Do not regress native `cargo run`, native playback, or existing ADR-governed behavior.
 - **Configuration**:
   - Add a Trunk configuration under `apps/web/`.
@@ -161,6 +162,8 @@ The web target will:
 
 ### Verification
 
+These criteria cover the full web playback decision, not only the first shell/core foundation slice.
+
 - [ ] `cargo test` passes for the native package and `amp808-core`.
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes for native code that remains
       in the root package.
@@ -176,6 +179,13 @@ The web target will:
 - [ ] The web build output can be served as static files with no server-side code.
 - [ ] No `cpal`, `crossterm`, `ratatui-image`, `ffmpeg`, `yt-dlp`, `ctrlc`, or native filesystem
       dependencies are pulled into the `apps/web` wasm dependency graph.
+
+## More Information
+
+- 2026-06-18: First implementation slice establishes the workspace boundary, `amp808-core`
+  CORS/source policy and analyser band mapping, and a minimal Ratzilla `WebGl2Backend` shell in
+  `apps/web`. It intentionally does not create an `HTMLAudioElement`, file picker, hosted URL input,
+  or playback wiring yet.
 
 ## Pros and Cons of the Options
 
@@ -207,7 +217,7 @@ This option decodes and schedules audio through Web Audio directly instead of us
 element.
 
 - Good, because it could eventually provide deeper DSP control.
-- Bad, because it is too large for phase 1.
+- Bad, because it is too large for the first browser playback phase.
 - Bad, because it would reimplement browser media loading, seeking, buffering, and error behavior.
 - Bad, because it does not remove the CORS limits for external hosted audio.
 
@@ -216,7 +226,7 @@ element.
 This option renders the 808 UI in the browser without real audio.
 
 - Good, because it would be the fastest visual prototype.
-- Bad, because it does not satisfy the phase 1 requirement for real browser playback.
+- Bad, because it does not satisfy the web target requirement for real browser playback.
 - Bad, because synthetic visuals would hide the important browser audio/CORS constraints until
   later.
 
