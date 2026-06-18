@@ -38,6 +38,28 @@ impl WebAudioSource {
     }
 }
 
+pub fn analyser_bins_to_bands(bins: &[u8], band_count: usize) -> Vec<f32> {
+    if band_count == 0 {
+        return Vec::new();
+    }
+
+    if bins.is_empty() {
+        return vec![0.0; band_count];
+    }
+
+    let mut bands = Vec::with_capacity(band_count);
+    for band in 0..band_count {
+        let start = band * bins.len() / band_count;
+        let end = ((band + 1) * bins.len() / band_count).max(start + 1);
+        let end = end.min(bins.len());
+        let slice = &bins[start..end];
+        let sum: u32 = slice.iter().map(|value| u32::from(*value)).sum();
+        let average = sum as f32 / slice.len() as f32;
+        bands.push(average / 255.0);
+    }
+    bands
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HostedAudioIssue, WebAudioSource};
@@ -66,5 +88,16 @@ mod tests {
 
         assert!(source.is_hosted_url());
         assert_eq!(source.label(), "https://example.com/audio.mp3");
+    }
+
+    #[test]
+    fn analyser_bins_are_averaged_into_normalized_bands() {
+        let bins = [0, 64, 128, 255];
+
+        let bands = super::analyser_bins_to_bands(&bins, 2);
+
+        assert_eq!(bands.len(), 2);
+        assert!((bands[0] - 0.1254902).abs() < 0.0001);
+        assert!((bands[1] - 0.7509804).abs() < 0.0001);
     }
 }
