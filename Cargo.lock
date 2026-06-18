@@ -107,6 +107,7 @@ name = "amp808_web"
 version = "0.1.0"
 dependencies = [
  "amp808-core",
+ "critical-section",
  "js-sys",
  "ratzilla",
  "wasm-bindgen",
