@@ -253,6 +253,25 @@ Invalid usage:
 
 That fails by design because `music-app` mode is a remote-control backend, not a local file player.
 
+## AMP808 Web 808
+
+The first web slice lives in `apps/web` and is designed for static hosting on GitHub Pages.
+The current slice renders the Ratzilla `WebGl2Backend` shell with static source/status text.
+It does not create an `HTMLAudioElement`, file picker, or playback wiring yet.
+
+Browser playback is planned around `HTMLAudioElement`, with Web Audio analysis planned for the
+808 visualizer path. Local files are intended to be the reliable first playback path once playback
+wiring lands. External hosted URLs are in scope only when the host allows CORS for browser media
+and Web Audio analysis. If a hosted URL does not allow CORS, AMP808 Web shows: "This hosted audio URL must allow CORS for AMP808 web playback."
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install --locked trunk
+cd apps/web
+trunk serve
+trunk build
+```
+
 ## Development
 
 Maintainers: the GitHub release process is documented in [`RELEASING.md`](RELEASING.md).
