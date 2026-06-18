@@ -1,6 +1,7 @@
 use std::io;
 
 use amp808_core::web_audio::{HostedAudioIssue, WebAudioSource};
+use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -11,7 +12,7 @@ use ratzilla::ratatui::{
 use ratzilla::{WebGl2Backend, WebRenderer};
 
 fn main() -> io::Result<()> {
-    let backend = WebGl2Backend::new()?;
+    let backend = WebGl2Backend::new_with_options(WebGl2BackendOptions::new().grid_id("app"))?;
     let terminal = Terminal::new(backend)?;
     let source = WebAudioSource::hosted_url("https://example.com/audio.mp3");
     let cors_message = HostedAudioIssue::CorsRequired.user_message();
