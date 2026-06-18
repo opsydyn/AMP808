@@ -101,6 +101,6 @@ tui-big-text = "0.8.2"
 proptest = "1.11.0"
 
 [workspace]
-members = [".", "crates/amp808-core"]
+members = [".", "crates/amp808-core", "apps/web"]
 default-members = [".", "crates/amp808-core"]
 resolver = "2"
