@@ -6,9 +6,7 @@ pub enum HostedAudioIssue {
 impl HostedAudioIssue {
     pub fn user_message(self) -> &'static str {
         match self {
-            Self::CorsRequired => {
-                "This hosted audio URL must allow CORS for AMP808 web playback."
-            }
+            Self::CorsRequired => "This hosted audio URL must allow CORS for AMP808 web playback.",
         }
     }
 }
