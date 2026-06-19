@@ -7,8 +7,12 @@ use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{
+        canvas::{Canvas, Line as CanvasLine},
+        Block, Borders, Paragraph,
+    },
     Frame, Terminal,
 };
 use ratzilla::{WebGl2Backend, WebRenderer};
@@ -20,6 +24,79 @@ use web_sys::{
 };
 
 const BAND_COUNT: usize = 24;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClassicColor {
+    red: u8,
+    green: u8,
+    blue: u8,
+}
+
+impl ClassicColor {
+    const fn new(red: u8, green: u8, blue: u8) -> Self {
+        Self { red, green, blue }
+    }
+
+    const fn ratatui(self) -> Color {
+        Color::Rgb(self.red, self.green, self.blue)
+    }
+}
+
+struct Classic808Palette;
+
+impl Classic808Palette {
+    const FACEPLATE: ClassicColor = ClassicColor::new(0x09, 0x0a, 0x08);
+    const IVORY: ClassicColor = ClassicColor::new(0xee, 0xea, 0xdc);
+    const ORANGE: ClassicColor = ClassicColor::new(0xf0, 0x5a, 0x28);
+    const AMBER: ClassicColor = ClassicColor::new(0xf6, 0xa6, 0x23);
+    const YELLOW: ClassicColor = ClassicColor::new(0xff, 0xd4, 0x00);
+    const RED: ClassicColor = ClassicColor::new(0xd7, 0x26, 0x2e);
+    const RED_TEXT: ClassicColor = ClassicColor::new(0xff, 0x5a, 0x45);
+    const GREY: ClassicColor = ClassicColor::new(0xc9, 0xc9, 0xc9);
+    const DIM: ClassicColor = ClassicColor::new(0x66, 0x66, 0x66);
+    const LABEL: ClassicColor = ClassicColor::new(0xa7, 0xaa, 0x7a);
+    const OLIVE: ClassicColor = ClassicColor::new(0x48, 0x4b, 0x30);
+}
+
+#[cfg(test)]
+fn contrast_ratio(foreground: ClassicColor, background: ClassicColor) -> f64 {
+    let foreground = relative_luminance(foreground);
+    let background = relative_luminance(background);
+    let lighter = foreground.max(background);
+    let darker = foreground.min(background);
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+#[cfg(test)]
+fn relative_luminance(color: ClassicColor) -> f64 {
+    fn channel(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.03928 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassicPadFamily {
+    Red,
+    Orange,
+    Yellow,
+    Ivory,
+}
+
+fn classic_pad_family(step_index: usize) -> ClassicPadFamily {
+    match step_index / 4 {
+        0 => ClassicPadFamily::Red,
+        1 => ClassicPadFamily::Orange,
+        2 => ClassicPadFamily::Yellow,
+        _ => ClassicPadFamily::Ivory,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportState {
@@ -369,14 +446,15 @@ fn sample_analyser(graph: &AudioGraph, state: &Rc<RefCell<WebAppState>>) {
 fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
     let area = frame.area();
     let block = Block::default()
-        .title("AMP808 WEB 808")
+        .title(" AMP808 WEB ")
         .title_style(
             Style::default()
-                .fg(Color::Rgb(0xff, 0x7a, 0x45))
+                .fg(Classic808Palette::ORANGE.ratatui())
                 .add_modifier(Modifier::BOLD),
         )
+        .style(classic_faceplate_style())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(0xf6, 0xa6, 0x23)));
+        .border_style(classic_line_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -384,61 +462,514 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Min(6),
+            Constraint::Length(3),
+            Constraint::Min(14),
             Constraint::Length(2),
         ])
         .split(inner);
 
-    let source_label = state
-        .source
-        .as_ref()
-        .map(WebAudioSource::label)
-        .unwrap_or("No audio loaded");
-    let source = Paragraph::new(Text::from(Line::from(vec![
-        Span::styled("Source: ", Style::default().fg(Color::Gray)),
-        Span::styled(source_label, Style::default().fg(Color::White)),
-    ])))
-    .alignment(Alignment::Center);
-    frame.render_widget(source, rows[0]);
+    render_machine_header(frame, rows[0], state);
 
-    let transport = Paragraph::new(Text::from(Line::from(vec![
-        Span::styled(
-            format!("{} ", state.transport.label()),
-            Style::default()
-                .fg(transport_color(state.transport))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format_time_status(state.current_time, state.duration),
-            Style::default().fg(Color::Rgb(0xc9, 0xc9, 0xc9)),
-        ),
-    ])))
-    .alignment(Alignment::Center);
-    frame.render_widget(transport, rows[1]);
-
-    render_visualizer(frame, rows[2], &state.bands);
-
-    let footer_text = state.error.as_deref().unwrap_or(&state.status);
-    let footer_color = if state.error.is_some() {
-        Color::Red
+    if rows[1].width < 90 {
+        let deck_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(12),
+                Constraint::Length(7),
+                Constraint::Min(7),
+                Constraint::Length(5),
+            ])
+            .split(rows[1]);
+        render_left_control_panel(frame, deck_rows[0], state);
+        render_knob_bank(frame, deck_rows[1]);
+        render_visualizer(frame, deck_rows[2], &state.bands);
+        render_step_strip(frame, deck_rows[3], &state.bands);
     } else {
-        Color::Rgb(0xc9, 0xc9, 0xc9)
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(28), Constraint::Min(24)])
+            .split(rows[1]);
+        render_left_control_panel(frame, body[0], state);
+
+        let deck_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Min(7),
+                Constraint::Length(5),
+            ])
+            .split(body[1]);
+        render_knob_bank(frame, deck_rows[0]);
+        render_visualizer(frame, deck_rows[1], &state.bands);
+        render_step_strip(frame, deck_rows[2], &state.bands);
+    }
+
+    let compact_status = "Load audio or CORS URL";
+    let footer_text = match state.error.as_deref() {
+        Some(error) => error,
+        None if rows[2].width < 70 => compact_status,
+        None => &state.status,
+    };
+    let footer_color = if state.error.is_some() {
+        Classic808Palette::RED_TEXT.ratatui()
+    } else {
+        Classic808Palette::IVORY.ratatui()
     };
     let footer = Paragraph::new(Text::from(Line::from(Span::styled(
         footer_text,
         Style::default().fg(footer_color),
     ))))
     .alignment(Alignment::Center);
-    frame.render_widget(footer, rows[3]);
+    frame.render_widget(footer, rows[2]);
+}
+
+fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let source_label = state
+        .source
+        .as_ref()
+        .map(WebAudioSource::label)
+        .unwrap_or("No audio loaded");
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "AMP808 ",
+                Style::default()
+                    .fg(Classic808Palette::ORANGE.ratatui())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Rhythm Composer ",
+                Style::default().fg(Classic808Palette::AMBER.ratatui()),
+            ),
+            Span::styled(
+                "TR-808 WEB",
+                Style::default()
+                    .fg(Classic808Palette::ORANGE.ratatui())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "SOURCE ",
+                Style::default().fg(Classic808Palette::YELLOW.ratatui()),
+            ),
+            Span::styled(
+                source_label,
+                Style::default().fg(Classic808Palette::IVORY.ratatui()),
+            ),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_left_control_panel(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let block = Block::default()
+        .title(" BASIC RHYTHM ")
+        .title_style(classic_label_style())
+        .style(classic_faceplate_style())
+        .borders(Borders::ALL)
+        .border_style(classic_line_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 18 || inner.height < 8 {
+        render_left_control_fallback(frame, inner, state);
+        return;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .split(inner);
+
+    let status_lines = vec![
+        Line::from(vec![
+            Span::styled("MODE     ", classic_small_label_style()),
+            Span::styled("WEB AUDIO", classic_value_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("STATE    ", classic_small_label_style()),
+            Span::styled(
+                state.transport.label(),
+                Style::default()
+                    .fg(transport_color(state.transport))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("TIME     ", classic_small_label_style()),
+            Span::styled(
+                format_time_status(state.current_time, state.duration),
+                classic_value_style(),
+            ),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(Text::from(status_lines)), rows[0]);
+
+    render_tempo_dial(frame, rows[1], 0.5, "120");
+
+    let control_lines = vec![
+        Line::from(vec![
+            Span::styled("MASTER VOL ", classic_small_label_style()),
+            Span::styled("O", classic_knob_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("PATTERN A/B ", classic_small_label_style()),
+            Span::styled("A ", active_lamp_style()),
+            Span::styled("B", inactive_lamp_style()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(Text::from(control_lines)), rows[2]);
+}
+
+fn render_left_control_fallback(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("STATE ", classic_small_label_style()),
+            Span::styled(
+                state.transport.label(),
+                Style::default().fg(transport_color(state.transport)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("TIME  ", classic_small_label_style()),
+            Span::styled(
+                format_time_status(state.current_time, state.duration),
+                classic_value_style(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("TEMPO ", classic_small_label_style()),
+            Span::styled("120 BPM", classic_value_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("PATTERN ", classic_small_label_style()),
+            Span::styled("A ", active_lamp_style()),
+            Span::styled("B", inactive_lamp_style()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn render_tempo_dial(frame: &mut Frame<'_>, area: Rect, bpm_norm: f64, bpm_label: &str) {
+    if area.width < 8 || area.height < 4 {
+        let fallback = Line::from(vec![
+            Span::styled("TEMPO ", classic_small_label_style()),
+            Span::styled(format!("{bpm_label} BPM"), classic_value_style()),
+        ]);
+        frame.render_widget(Paragraph::new(fallback).alignment(Alignment::Center), area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .split(area);
+    let (canvas_area, label_area) = (chunks[0], chunks[1]);
+    let geometry = tempo_dial_geometry_808(canvas_area);
+    let start_angle = 210.0_f64.to_radians();
+    let end_angle = (-30.0_f64).to_radians();
+    let sweep = start_angle - end_angle;
+    let val_angle = start_angle - bpm_norm.clamp(0.0, 1.0) * sweep;
+    let bpm_label = bpm_label.to_string();
+
+    let canvas = Canvas::default()
+        .x_bounds(geometry.x_bounds)
+        .y_bounds(geometry.y_bounds)
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for i in 0..60usize {
+                let t1 = i as f64 / 60.0;
+                let t2 = (i + 1) as f64 / 60.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: geometry.radius * a1.cos(),
+                    y1: geometry.radius * a1.sin(),
+                    x2: geometry.radius * a2.cos(),
+                    y2: geometry.radius * a2.sin(),
+                    color: Classic808Palette::IVORY.ratatui(),
+                });
+            }
+
+            let active_segs = (bpm_norm.clamp(0.0, 1.0) * 60.0) as usize;
+            for i in 0..active_segs {
+                let t1 = i as f64 / 60.0;
+                let t2 = (i + 1) as f64 / 60.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: geometry.radius * a1.cos(),
+                    y1: geometry.radius * a1.sin(),
+                    x2: geometry.radius * a2.cos(),
+                    y2: geometry.radius * a2.sin(),
+                    color: dial_arc_color((t1 + t2) / 2.0),
+                });
+            }
+
+            ctx.draw(&CanvasLine {
+                x1: 0.0,
+                y1: 0.0,
+                x2: geometry.radius * 0.72 * val_angle.cos(),
+                y2: geometry.radius * 0.72 * val_angle.sin(),
+                color: Classic808Palette::AMBER.ratatui(),
+            });
+
+            for i in 0u32..=10 {
+                let t = i as f64 / 10.0;
+                let angle = start_angle - t * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: (geometry.radius + 0.35) * angle.cos(),
+                    y1: (geometry.radius + 0.35) * angle.sin(),
+                    x2: (geometry.radius + 0.9) * angle.cos(),
+                    y2: (geometry.radius + 0.9) * angle.sin(),
+                    color: Classic808Palette::DIM.ratatui(),
+                });
+            }
+
+            ctx.print(
+                -1.4,
+                1.1,
+                Span::styled(
+                    "BPM",
+                    Style::default().fg(Classic808Palette::IVORY.ratatui()),
+                ),
+            );
+            ctx.print(
+                -1.7,
+                -0.5,
+                Span::styled(
+                    bpm_label.clone(),
+                    Style::default()
+                        .fg(Classic808Palette::AMBER.ratatui())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        });
+
+    frame.render_widget(canvas, canvas_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "TEMPO",
+            classic_small_label_style(),
+        )))
+        .alignment(Alignment::Center),
+        label_area,
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TempoDialGeometry808 {
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+    radius: f64,
+}
+
+fn tempo_dial_geometry_808(area: Rect) -> TempoDialGeometry808 {
+    const Y_HALF: f64 = 9.0;
+    const LABEL_PAD: f64 = 1.5;
+    let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
+    let x_half = (Y_HALF * visual_ratio).max(4.8);
+    let radius = (x_half.min(Y_HALF) - LABEL_PAD - 0.2).clamp(2.2, 6.2);
+    TempoDialGeometry808 {
+        x_bounds: [-x_half, x_half],
+        y_bounds: [-Y_HALF, Y_HALF],
+        radius,
+    }
+}
+
+fn dial_arc_color(position: f64) -> Color {
+    if position > 0.72 {
+        Classic808Palette::RED.ratatui()
+    } else if position > 0.36 {
+        Classic808Palette::ORANGE.ratatui()
+    } else {
+        Classic808Palette::AMBER.ratatui()
+    }
+}
+
+fn render_knob_bank(frame: &mut Frame<'_>, area: Rect) {
+    let block = Block::default()
+        .title(" INSTRUMENT SELECT / LEVEL ")
+        .title_style(classic_label_style())
+        .style(classic_faceplate_style())
+        .borders(Borders::ALL)
+        .border_style(classic_line_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let labels = [
+        "AC", "BD", "SD", "LT", "MT", "HT", "CL", "RS", "CP", "CB", "CY", "OH",
+    ];
+    let visible = (usize::from(inner.width) / 6).clamp(1, labels.len());
+    let labels = &labels[..visible];
+
+    let caption = if inner.width < 60 {
+        "LEVEL   TONE    DECAY   TUNING"
+    } else {
+        "LEVEL   TONE    DECAY   TUNING   SNAPPY   ATTACK"
+    };
+
+    if inner.height < 4 {
+        let mut knob_row = Vec::with_capacity(labels.len());
+        let mut label_row = Vec::with_capacity(labels.len());
+        for label in labels {
+            knob_row.push(Span::styled(" (@) ", classic_knob_style()));
+            label_row.push(Span::styled(format!("{label:^5}"), classic_strip_style()));
+        }
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![
+                Line::from(knob_row),
+                Line::from(label_row),
+            ]))
+            .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+    let knob_cells = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
+        .split(rows[0]);
+
+    for (index, (cell, label)) in knob_cells.iter().zip(labels.iter()).enumerate() {
+        render_canvas_knob(frame, *cell, web_knob_value(index), label, index == 1);
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            caption,
+            classic_small_label_style(),
+        )))
+        .alignment(Alignment::Center),
+        rows[1],
+    );
+}
+
+fn render_canvas_knob(frame: &mut Frame<'_>, area: Rect, value: f64, label: &str, selected: bool) {
+    if area.width < 5 || area.height < 3 {
+        let fallback = vec![
+            Line::from(Span::styled("(@)", classic_knob_style())),
+            Line::from(Span::styled(label, classic_strip_style())),
+        ];
+        frame.render_widget(
+            Paragraph::new(Text::from(fallback)).alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .split(area);
+    let canvas_area = chunks[0];
+    let label_area = chunks[1];
+    let (x_bounds, y_bounds) = knob_canvas_bounds_808(canvas_area);
+    let value = value.clamp(0.0, 1.0);
+    let start_angle = 210.0_f64.to_radians();
+    let end_angle = (-30.0_f64).to_radians();
+    let sweep = start_angle - end_angle;
+    let val_angle = start_angle - value * sweep;
+    let radius = 3.5;
+    let accent = if selected {
+        Classic808Palette::YELLOW.ratatui()
+    } else {
+        Classic808Palette::GREY.ratatui()
+    };
+
+    let canvas = Canvas::default()
+        .x_bounds(x_bounds)
+        .y_bounds(y_bounds)
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for i in 0..24usize {
+                let t1 = i as f64 / 24.0;
+                let t2 = (i + 1) as f64 / 24.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: radius * a1.cos(),
+                    y1: radius * a1.sin(),
+                    x2: radius * a2.cos(),
+                    y2: radius * a2.sin(),
+                    color: Classic808Palette::IVORY.ratatui(),
+                });
+            }
+
+            let active_steps = (value * 24.0) as usize;
+            for i in 0..active_steps {
+                let t1 = i as f64 / 24.0;
+                let t2 = (i + 1) as f64 / 24.0;
+                let a1 = start_angle - t1 * sweep;
+                let a2 = start_angle - t2 * sweep;
+                ctx.draw(&CanvasLine {
+                    x1: radius * a1.cos(),
+                    y1: radius * a1.sin(),
+                    x2: radius * a2.cos(),
+                    y2: radius * a2.sin(),
+                    color: dial_arc_color((t1 + t2) / 2.0),
+                });
+            }
+
+            ctx.draw(&CanvasLine {
+                x1: 0.0,
+                y1: 0.0,
+                x2: radius * 0.68 * val_angle.cos(),
+                y2: radius * 0.68 * val_angle.sin(),
+                color: accent,
+            });
+        });
+
+    frame.render_widget(canvas, canvas_area);
+    let label_style = if selected {
+        classic_strip_style()
+            .fg(Classic808Palette::YELLOW.ratatui())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        classic_strip_style()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(label, label_style))).alignment(Alignment::Center),
+        label_area,
+    );
+}
+
+fn knob_canvas_bounds_808(area: Rect) -> ([f64; 2], [f64; 2]) {
+    const Y_HALF: f64 = 4.0;
+    let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
+    let x_half = (Y_HALF * visual_ratio).max(3.8);
+    ([-x_half, x_half], [-Y_HALF, Y_HALF])
+}
+
+fn web_knob_value(index: usize) -> f64 {
+    const VALUES: [f64; 12] = [
+        0.72, 0.62, 0.55, 0.48, 0.58, 0.66, 0.35, 0.44, 0.7, 0.5, 0.77, 0.68,
+    ];
+    VALUES[index % VALUES.len()]
 }
 
 fn render_visualizer(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
     let block = Block::default()
-        .title(" REAL ANALYSER ")
+        .title(" SCOPE / ANALYSER ")
+        .title_style(classic_label_style())
+        .style(classic_faceplate_style())
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(0xff, 0x7a, 0x45)));
+        .border_style(classic_line_style());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -466,24 +997,142 @@ fn render_visualizer(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
     frame.render_widget(visualizer, inner);
 }
 
+fn render_step_strip(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
+    let block = Block::default()
+        .title(" BASIC RHYTHM STEP BUTTONS ")
+        .title_style(classic_label_style())
+        .style(classic_faceplate_style())
+        .borders(Borders::ALL)
+        .border_style(classic_line_style());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width < 32 {
+        return;
+    }
+
+    let step_count = (usize::from(inner.width) / 4).clamp(1, 16);
+    let mut numbers = Vec::with_capacity(step_count);
+    let mut pads = Vec::with_capacity(step_count);
+    for step in 0..step_count {
+        numbers.push(Span::styled(
+            format!("{:^4}", step + 1),
+            classic_small_label_style(),
+        ));
+        let energy = bands.get(step).copied().unwrap_or_default();
+        let active = energy > 0.08;
+        pads.push(Span::styled(
+            " ## ",
+            Style::default()
+                .fg(classic_pad_color(classic_pad_family(step), active))
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
+
+    let lines = vec![
+        Line::from(numbers),
+        Line::from(pads),
+        Line::from(vec![
+            Span::styled("START / STOP  ", classic_small_label_style()),
+            Span::styled("TAP  ", classic_pad_style(ClassicPadFamily::Ivory)),
+            Span::styled("A", active_lamp_style()),
+            Span::styled(" B", inactive_lamp_style()),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        inner,
+    );
+}
+
 fn transport_color(transport: TransportState) -> Color {
     match transport {
-        TransportState::Playing => Color::Rgb(0xf1, 0xf8, 0x27),
-        TransportState::Ready | TransportState::Paused => Color::Rgb(0xf8, 0xa1, 0x25),
-        TransportState::Error => Color::Red,
-        TransportState::Idle | TransportState::Ended => Color::Gray,
+        TransportState::Playing => Classic808Palette::YELLOW.ratatui(),
+        TransportState::Ready | TransportState::Paused => Classic808Palette::AMBER.ratatui(),
+        TransportState::Error => Classic808Palette::RED_TEXT.ratatui(),
+        TransportState::Idle | TransportState::Ended => Classic808Palette::GREY.ratatui(),
     }
 }
 
 fn spectrum_style(row_ratio: f64) -> Style {
     let color = if row_ratio > 0.66 {
-        Color::Rgb(0xe7, 0x2e, 0x2e)
+        Classic808Palette::RED.ratatui()
     } else if row_ratio > 0.33 {
-        Color::Rgb(0xf8, 0xa1, 0x25)
+        Classic808Palette::AMBER.ratatui()
     } else {
-        Color::Rgb(0xf1, 0xf8, 0x27)
+        Classic808Palette::YELLOW.ratatui()
     };
     Style::default().fg(color)
+}
+
+fn classic_faceplate_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::IVORY.ratatui())
+        .bg(Classic808Palette::FACEPLATE.ratatui())
+}
+
+fn classic_line_style() -> Style {
+    Style::default().fg(Classic808Palette::ORANGE.ratatui())
+}
+
+fn classic_label_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::YELLOW.ratatui())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn classic_small_label_style() -> Style {
+    Style::default().fg(Classic808Palette::LABEL.ratatui())
+}
+
+fn classic_value_style() -> Style {
+    Style::default().fg(Classic808Palette::IVORY.ratatui())
+}
+
+fn classic_knob_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::IVORY.ratatui())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn classic_strip_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::IVORY.ratatui())
+        .bg(Classic808Palette::OLIVE.ratatui())
+}
+
+fn active_lamp_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::RED_TEXT.ratatui())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn inactive_lamp_style() -> Style {
+    Style::default().fg(Classic808Palette::DIM.ratatui())
+}
+
+fn classic_pad_style(family: ClassicPadFamily) -> Style {
+    Style::default()
+        .fg(classic_pad_color(family, true))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn classic_pad_color(family: ClassicPadFamily, active: bool) -> Color {
+    match (family, active) {
+        (ClassicPadFamily::Red, true) => Classic808Palette::RED.ratatui(),
+        (ClassicPadFamily::Orange, true) => Classic808Palette::ORANGE.ratatui(),
+        (ClassicPadFamily::Yellow, true) => Classic808Palette::YELLOW.ratatui(),
+        (ClassicPadFamily::Ivory, true) => Classic808Palette::IVORY.ratatui(),
+        (ClassicPadFamily::Red, false) => Color::Rgb(0xa4, 0x21, 0x1a),
+        (ClassicPadFamily::Orange, false) => Color::Rgb(0xb8, 0x56, 0x19),
+        (ClassicPadFamily::Yellow, false) => Color::Rgb(0xa4, 0xaa, 0x24),
+        (ClassicPadFamily::Ivory, false) => Color::Rgb(0xb4, 0xae, 0x92),
+    }
 }
 
 fn format_time_status(current_time: f64, duration: Option<f64>) -> String {
@@ -567,4 +1216,80 @@ fn add_event_listener(
 
 fn js_to_io_error(error: JsValue) -> io::Error {
     io::Error::other(format!("{error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classic_pad_family, contrast_ratio, Classic808Palette, ClassicPadFamily};
+
+    #[test]
+    fn classic_pad_family_matches_tr_808_step_groups() {
+        let families = (0..16).map(classic_pad_family).collect::<Vec<_>>();
+
+        assert_eq!(
+            families,
+            vec![
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Ivory,
+                ClassicPadFamily::Ivory,
+                ClassicPadFamily::Ivory,
+                ClassicPadFamily::Ivory,
+            ]
+        );
+    }
+
+    #[test]
+    fn classic_palette_keeps_normal_text_at_aa_contrast() {
+        let faceplate = Classic808Palette::FACEPLATE;
+        let normal_text = [
+            ("ivory", Classic808Palette::IVORY),
+            ("orange", Classic808Palette::ORANGE),
+            ("amber", Classic808Palette::AMBER),
+            ("yellow", Classic808Palette::YELLOW),
+            ("grey", Classic808Palette::GREY),
+            ("label", Classic808Palette::LABEL),
+        ];
+
+        for (name, color) in normal_text {
+            assert!(
+                contrast_ratio(color, faceplate) >= 4.5,
+                "{name} should pass AA contrast on the 808 faceplate"
+            );
+        }
+
+        assert!(
+            contrast_ratio(Classic808Palette::RED, faceplate) < 4.5,
+            "hardware red should stay reserved for lamps/buttons, not normal text"
+        );
+    }
+
+    #[test]
+    fn classic_palette_keeps_controls_and_borders_at_aa_contrast() {
+        let faceplate = Classic808Palette::FACEPLATE;
+        let pairs = [
+            ("orange border", Classic808Palette::ORANGE, faceplate),
+            ("error text", Classic808Palette::RED_TEXT, faceplate),
+            ("orange button text", faceplate, Classic808Palette::ORANGE),
+            ("yellow button text", faceplate, Classic808Palette::YELLOW),
+            ("ivory button text", faceplate, Classic808Palette::IVORY),
+        ];
+
+        for (name, foreground, background) in pairs {
+            assert!(
+                contrast_ratio(foreground, background) >= 4.5,
+                "{name} should pass AA contrast"
+            );
+        }
+    }
 }

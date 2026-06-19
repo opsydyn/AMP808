@@ -64,6 +64,17 @@
 - [x] TR-808 tempo readout (`TMP`) using shared BPM state
 - [x] Mode persisted in config
 
+### Ratzilla Web 808
+
+- [x] Dedicated Ratzilla `WebGl2Backend` web target
+- [x] Browser-selected local audio playback
+- [x] Hosted URL input with explicit CORS constraints
+- [x] Web Audio analyser data mapped through `amp808-core`
+- [x] Initial TR-808-inspired web faceplate
+- [ ] Exabind-grade panel fidelity, Canvas/Braille knobs, accessibility contract, TachyonFX motion,
+      and GitHub Pages deployment polish tracked in
+      [docs/ratzilla-web-808-roadmap.md](docs/ratzilla-web-808-roadmap.md)
+
 ### Config & Persistence
 
 - [x] `~/.config/amp808/config.toml` with serde
