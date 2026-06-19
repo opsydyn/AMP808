@@ -20,7 +20,8 @@ use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     window, AnalyserNode, AudioContext, Document, Event, EventTarget, HtmlAudioElement,
-    HtmlButtonElement, HtmlElement, HtmlInputElement, MediaElementAudioSourceNode, Url,
+    HtmlButtonElement, HtmlElement, HtmlInputElement, KeyboardEvent, MediaElementAudioSourceNode,
+    Url,
 };
 
 const BAND_COUNT: usize = 24;
@@ -184,6 +185,43 @@ fn instrument_control_specs() -> &'static [InstrumentControlSpec; 12] {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebFocus {
+    Transport,
+    LocalFile,
+    HostedUrl,
+    Analyser,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebAction {
+    TogglePlayback,
+    FocusLocalFile,
+    FocusHostedUrl,
+    CycleVisualMode,
+    ClearFocus,
+}
+
+fn web_action_for_key(key: &str) -> Option<WebAction> {
+    match key {
+        " " | "Spacebar" | "Space" => Some(WebAction::TogglePlayback),
+        "l" | "L" => Some(WebAction::FocusLocalFile),
+        "u" | "U" => Some(WebAction::FocusHostedUrl),
+        "v" | "V" => Some(WebAction::CycleVisualMode),
+        "Escape" => Some(WebAction::ClearFocus),
+        _ => None,
+    }
+}
+
+fn web_focus_after_action(_current: WebFocus, action: WebAction) -> WebFocus {
+    match action {
+        WebAction::TogglePlayback | WebAction::ClearFocus => WebFocus::Transport,
+        WebAction::FocusLocalFile => WebFocus::LocalFile,
+        WebAction::FocusHostedUrl => WebFocus::HostedUrl,
+        WebAction::CycleVisualMode => WebFocus::Analyser,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PanelRole {
     Transport,
     Instrument,
@@ -207,17 +245,30 @@ struct WebPanelSpec {
 }
 
 fn web_panel_spec(role: PanelRole, state: &WebAppState) -> WebPanelSpec {
-    let panel_state = match (role, state.transport) {
-        (_, TransportState::Error) => PanelState::Error,
-        (PanelRole::Transport, TransportState::Playing) => PanelState::Active,
-        (PanelRole::Transport, TransportState::Ready | TransportState::Paused) => PanelState::Armed,
-        (PanelRole::Analyser | PanelRole::Steps, TransportState::Playing) => PanelState::Active,
+    let focused = matches!(
+        (role, state.focus),
+        (
+            PanelRole::Transport,
+            WebFocus::Transport | WebFocus::LocalFile | WebFocus::HostedUrl
+        ) | (PanelRole::Analyser, WebFocus::Analyser)
+    );
+    let panel_state = match (role, state.transport, focused) {
+        (_, TransportState::Error, _) => PanelState::Error,
+        (_, _, true) => PanelState::Active,
+        (PanelRole::Transport, TransportState::Playing, _) => PanelState::Active,
+        (PanelRole::Transport, TransportState::Ready | TransportState::Paused, _) => {
+            PanelState::Armed
+        }
+        (PanelRole::Analyser | PanelRole::Steps, TransportState::Playing, _) => PanelState::Active,
         (
             PanelRole::Analyser | PanelRole::Steps,
             TransportState::Ready | TransportState::Paused,
+            _,
         ) => PanelState::Armed,
-        (PanelRole::Instrument, TransportState::Idle | TransportState::Ended) => PanelState::Idle,
-        (PanelRole::Instrument, _) => PanelState::Armed,
+        (PanelRole::Instrument, TransportState::Idle | TransportState::Ended, _) => {
+            PanelState::Idle
+        }
+        (PanelRole::Instrument, _, _) => PanelState::Armed,
         _ => PanelState::Idle,
     };
 
@@ -274,6 +325,7 @@ impl TransportState {
 struct WebAppState {
     source: Option<WebAudioSource>,
     transport: TransportState,
+    focus: WebFocus,
     status: String,
     error: Option<String>,
     current_time: f64,
@@ -286,6 +338,7 @@ impl Default for WebAppState {
         Self {
             source: None,
             transport: TransportState::Idle,
+            focus: WebFocus::Transport,
             status: "Load a local audio file or a CORS-enabled hosted URL".to_string(),
             error: None,
             current_time: 0.0,
@@ -445,47 +498,131 @@ fn wire_controls(
         let toggle_button = toggle_button.clone();
         let control_status = control_status.clone();
         add_event_listener(toggle_button.clone().as_ref(), "click", move |_| {
-            if graph.audio.paused() {
-                let resume = graph.context.resume().ok();
-                match graph.audio.play() {
-                    Ok(play) => {
-                        let state = Rc::clone(&state);
-                        let toggle_button = toggle_button.clone();
-                        let control_status = control_status.clone();
-                        spawn_local(async move {
-                            if let Some(resume) = resume {
-                                let _ = JsFuture::from(resume).await;
-                            }
-                            if let Err(error) = JsFuture::from(play).await {
-                                set_error(
-                                    &state,
-                                    &toggle_button,
-                                    &control_status,
-                                    format!("Browser refused playback: {error:?}"),
-                                );
-                            }
-                        });
-                    }
-                    Err(error) => set_error(
-                        &state,
-                        &toggle_button,
-                        &control_status,
-                        format!("Browser refused playback: {error:?}"),
-                    ),
-                }
-            } else if let Err(error) = graph.audio.pause() {
-                set_error(
-                    &state,
-                    &toggle_button,
-                    &control_status,
-                    format!("Could not pause playback: {error:?}"),
-                );
-            }
+            toggle_browser_playback(
+                Rc::clone(&graph),
+                Rc::clone(&state),
+                toggle_button.clone(),
+                control_status.clone(),
+            );
         })?;
     }
 
+    wire_keyboard_events(
+        document,
+        Rc::clone(&graph),
+        Rc::clone(&state),
+        toggle_button.clone(),
+        control_status.clone(),
+        file_input,
+        url_input,
+    )?;
+
     wire_audio_events(&graph.audio, state, toggle_button, control_status)?;
     Ok(())
+}
+
+fn wire_keyboard_events(
+    document: &Document,
+    graph: Rc<AudioGraph>,
+    state: Rc<RefCell<WebAppState>>,
+    toggle_button: HtmlButtonElement,
+    control_status: HtmlElement,
+    file_input: HtmlInputElement,
+    url_input: HtmlInputElement,
+) -> Result<(), JsValue> {
+    add_event_listener(document.as_ref(), "keydown", move |event| {
+        let Ok(keyboard_event) = event.dyn_into::<KeyboardEvent>() else {
+            return;
+        };
+        if keyboard_event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|element| element.id() == "amp808-url" && keyboard_event.key() != "Escape")
+        {
+            return;
+        }
+        let Some(action) = web_action_for_key(&keyboard_event.key()) else {
+            return;
+        };
+        keyboard_event.prevent_default();
+
+        {
+            let focus = state.borrow().focus;
+            state.borrow_mut().focus = web_focus_after_action(focus, action);
+        }
+
+        match action {
+            WebAction::TogglePlayback => toggle_browser_playback(
+                Rc::clone(&graph),
+                Rc::clone(&state),
+                toggle_button.clone(),
+                control_status.clone(),
+            ),
+            WebAction::FocusLocalFile => {
+                file_input.click();
+                let state_ref = state.borrow();
+                sync_controls(&toggle_button, &control_status, &state_ref);
+            }
+            WebAction::FocusHostedUrl => {
+                let _ = url_input.focus();
+                let state_ref = state.borrow();
+                sync_controls(&toggle_button, &control_status, &state_ref);
+            }
+            WebAction::CycleVisualMode => {
+                {
+                    let mut state = state.borrow_mut();
+                    state.status = "Visualizer focus selected".to_string();
+                }
+                let state_ref = state.borrow();
+                sync_controls(&toggle_button, &control_status, &state_ref);
+            }
+            WebAction::ClearFocus => {
+                let state_ref = state.borrow();
+                sync_controls(&toggle_button, &control_status, &state_ref);
+            }
+        }
+    })
+}
+
+fn toggle_browser_playback(
+    graph: Rc<AudioGraph>,
+    state: Rc<RefCell<WebAppState>>,
+    toggle_button: HtmlButtonElement,
+    control_status: HtmlElement,
+) {
+    if graph.audio.paused() {
+        let resume = graph.context.resume().ok();
+        match graph.audio.play() {
+            Ok(play) => {
+                spawn_local(async move {
+                    if let Some(resume) = resume {
+                        let _ = JsFuture::from(resume).await;
+                    }
+                    if let Err(error) = JsFuture::from(play).await {
+                        set_error(
+                            &state,
+                            &toggle_button,
+                            &control_status,
+                            format!("Browser refused playback: {error:?}"),
+                        );
+                    }
+                });
+            }
+            Err(error) => set_error(
+                &state,
+                &toggle_button,
+                &control_status,
+                format!("Browser refused playback: {error:?}"),
+            ),
+        }
+    } else if let Err(error) = graph.audio.pause() {
+        set_error(
+            &state,
+            &toggle_button,
+            &control_status,
+            format!("Could not pause playback: {error:?}"),
+        );
+    }
 }
 
 fn wire_audio_events(
@@ -664,12 +801,39 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
     } else {
         Classic808Palette::IVORY.ratatui()
     };
-    let footer = Paragraph::new(Text::from(Line::from(Span::styled(
-        footer_text,
-        Style::default().fg(footer_color),
-    ))))
+    let footer = Paragraph::new(Text::from(vec![
+        command_strip_line(state),
+        Line::from(Span::styled(footer_text, Style::default().fg(footer_color))),
+    ]))
     .alignment(Alignment::Center);
     frame.render_widget(footer, rows[2]);
+}
+
+fn command_strip_line(state: &WebAppState) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("SPC", command_key_style(state.focus == WebFocus::Transport)),
+        Span::styled(" PLAY  ", classic_small_label_style()),
+        Span::styled("L", command_key_style(state.focus == WebFocus::LocalFile)),
+        Span::styled(" FILE  ", classic_small_label_style()),
+        Span::styled("U", command_key_style(state.focus == WebFocus::HostedUrl)),
+        Span::styled(" URL  ", classic_small_label_style()),
+        Span::styled("V", command_key_style(state.focus == WebFocus::Analyser)),
+        Span::styled(" VIS  ", classic_small_label_style()),
+        Span::styled("ESC", command_key_style(false)),
+        Span::styled(" HOME", classic_small_label_style()),
+    ])
+}
+
+fn command_key_style(active: bool) -> Style {
+    let color = if active {
+        Classic808Palette::YELLOW.ratatui()
+    } else {
+        Classic808Palette::IVORY.ratatui()
+    };
+    Style::default()
+        .fg(color)
+        .bg(Classic808Palette::OLIVE.ratatui())
+        .add_modifier(Modifier::BOLD)
 }
 
 fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
@@ -1489,8 +1653,9 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 mod tests {
     use super::{
         analyser_empty_state_text, classic_pad_family, contrast_ratio, instrument_control_specs,
-        instrument_family_bg, instrument_family_fg, web_panel_spec, Classic808Palette,
-        ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState, WebAppState,
+        instrument_family_bg, instrument_family_fg, web_action_for_key, web_focus_after_action,
+        web_panel_spec, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState,
+        TransportState, WebAction, WebAppState, WebFocus,
     };
     use ratzilla::ratatui::style::Color;
 
@@ -1627,6 +1792,68 @@ mod tests {
         assert_eq!(
             web_panel_spec(PanelRole::Analyser, &state).state,
             PanelState::Error
+        );
+    }
+
+    #[test]
+    fn web_panel_specs_reflect_terminal_focus() {
+        let mut state = WebAppState {
+            focus: WebFocus::HostedUrl,
+            ..WebAppState::default()
+        };
+
+        assert_eq!(
+            web_panel_spec(PanelRole::Transport, &state).state,
+            PanelState::Active
+        );
+        assert_eq!(
+            web_panel_spec(PanelRole::Analyser, &state).state,
+            PanelState::Idle
+        );
+
+        state.focus = WebFocus::Analyser;
+        assert_eq!(
+            web_panel_spec(PanelRole::Analyser, &state).state,
+            PanelState::Active
+        );
+    }
+
+    #[test]
+    fn web_keyboard_shortcuts_map_to_terminal_actions() {
+        assert_eq!(web_action_for_key(" "), Some(WebAction::TogglePlayback));
+        assert_eq!(
+            web_action_for_key("Spacebar"),
+            Some(WebAction::TogglePlayback)
+        );
+        assert_eq!(web_action_for_key("l"), Some(WebAction::FocusLocalFile));
+        assert_eq!(web_action_for_key("L"), Some(WebAction::FocusLocalFile));
+        assert_eq!(web_action_for_key("u"), Some(WebAction::FocusHostedUrl));
+        assert_eq!(web_action_for_key("v"), Some(WebAction::CycleVisualMode));
+        assert_eq!(web_action_for_key("Escape"), Some(WebAction::ClearFocus));
+        assert_eq!(web_action_for_key("x"), None);
+    }
+
+    #[test]
+    fn web_keyboard_actions_update_terminal_focus() {
+        assert_eq!(
+            web_focus_after_action(WebFocus::Transport, WebAction::FocusLocalFile),
+            WebFocus::LocalFile
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::Transport, WebAction::FocusHostedUrl),
+            WebFocus::HostedUrl
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::HostedUrl, WebAction::CycleVisualMode),
+            WebFocus::Analyser
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::LocalFile, WebAction::TogglePlayback),
+            WebFocus::Transport
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::Analyser, WebAction::ClearFocus),
+            WebFocus::Transport
         );
     }
 
