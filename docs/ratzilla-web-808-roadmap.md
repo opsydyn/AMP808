@@ -115,9 +115,9 @@ Goal: move from “plays a single source” to a lightweight web player.
 - [x] Add recent source list in memory for the browser session.
 - [x] Add analyser-driven BPM estimation for the tempo gauge.
 - [ ] Add static demo/sample source support only if legally distributable and same-origin.
-- [ ] Improve hosted URL error states:
-  - media load failed
-  - CORS/analyser unavailable
+- [x] Improve hosted URL error copy:
+  - media/network load failed
+  - CORS/analyser unavailable or unsupported source
   - browser autoplay refused
   - unsupported codec/container
 - [ ] Add explicit visual state for CORS-blocked hosted URLs without fake analyser motion.

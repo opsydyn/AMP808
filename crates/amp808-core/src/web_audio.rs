@@ -20,6 +20,48 @@ impl HostedAudioIssue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMediaError {
+    Aborted,
+    Network,
+    Decode,
+    SourceNotSupported,
+    Unknown,
+}
+
+impl BrowserMediaError {
+    pub fn from_code(code: u16) -> Self {
+        match code {
+            1 => Self::Aborted,
+            2 => Self::Network,
+            3 => Self::Decode,
+            4 => Self::SourceNotSupported,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn user_message(self, is_hosted_url: bool) -> &'static str {
+        match (self, is_hosted_url) {
+            (Self::Aborted, _) => "Browser audio loading was aborted.",
+            (Self::Network, true) => {
+                "Hosted audio network load failed. Check the URL and server availability."
+            }
+            (Self::Network, false) => "Browser could not read this local audio file.",
+            (Self::Decode, _) => {
+                "Browser could not decode this audio. Try a supported codec or container."
+            }
+            (Self::SourceNotSupported, true) => {
+                "Hosted audio must be a browser-supported media file and allow CORS for AMP808 web playback."
+            }
+            (Self::SourceNotSupported, false) => {
+                "This local audio codec or container is not supported by the browser."
+            }
+            (Self::Unknown, true) => HostedAudioIssue::CorsRequired.user_message(),
+            (Self::Unknown, false) => "Browser could not load this audio file.",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebAudioSource {
     LocalFile { name: String },
@@ -105,6 +147,7 @@ pub struct WebBpmState {
     envelope: VecDeque<f64>,
     previous_energy: Option<f64>,
     last_candidate: Option<u16>,
+    smoothed_candidate: Option<f64>,
     stable_candidate_count: u8,
 }
 
@@ -115,6 +158,7 @@ impl WebBpmState {
             envelope: VecDeque::with_capacity(WEB_BPM_MAX_ENVELOPE_POINTS),
             previous_energy: None,
             last_candidate: None,
+            smoothed_candidate: None,
             stable_candidate_count: 0,
         }
     }
@@ -125,12 +169,23 @@ impl WebBpmState {
             envelope: VecDeque::with_capacity(WEB_BPM_MAX_ENVELOPE_POINTS),
             previous_energy: None,
             last_candidate: None,
+            smoothed_candidate: None,
             stable_candidate_count: 0,
         }
     }
 
     pub fn display_state(&self) -> WebBpmDisplayState {
         self.display
+    }
+
+    pub fn provisional_bpm(&self) -> Option<u16> {
+        match self.display {
+            WebBpmDisplayState::Locked(bpm) => Some(bpm),
+            WebBpmDisplayState::Estimating => self
+                .smoothed_candidate
+                .map(|candidate| candidate.round() as u16),
+            WebBpmDisplayState::Unavailable => None,
+        }
     }
 
     pub fn update_from_time_domain_bytes(
@@ -173,10 +228,17 @@ impl WebBpmState {
         self.envelope.clear();
         self.previous_energy = None;
         self.last_candidate = None;
+        self.smoothed_candidate = None;
         self.stable_candidate_count = 0;
     }
 
     fn accept_candidate(&mut self, candidate: u16) {
+        self.smoothed_candidate = Some(
+            self.smoothed_candidate
+                .map(|previous| previous.mul_add(0.82, f64::from(candidate) * 0.18))
+                .unwrap_or(f64::from(candidate)),
+        );
+
         let stable = self.last_candidate.is_some_and(|last| {
             (i32::from(last) - i32::from(candidate)).abs() <= WEB_BPM_LOCK_TOLERANCE
         });
@@ -251,7 +313,9 @@ fn estimate_bpm_from_envelope(envelope: &VecDeque<f64>, hop_seconds: f64) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{HostedAudioIssue, WebAudioSource, WebBpmDisplayState, WebBpmState};
+    use super::{
+        BrowserMediaError, HostedAudioIssue, WebAudioSource, WebBpmDisplayState, WebBpmState,
+    };
 
     #[test]
     fn hosted_url_cors_error_names_amp808_web_playback() {
@@ -260,6 +324,22 @@ mod tests {
         assert_eq!(
             message,
             "This hosted audio URL must allow CORS for AMP808 web playback."
+        );
+    }
+
+    #[test]
+    fn browser_media_error_messages_distinguish_hosted_url_failures() {
+        assert_eq!(
+            BrowserMediaError::from_code(2).user_message(true),
+            "Hosted audio network load failed. Check the URL and server availability."
+        );
+        assert_eq!(
+            BrowserMediaError::from_code(3).user_message(true),
+            "Browser could not decode this audio. Try a supported codec or container."
+        );
+        assert_eq!(
+            BrowserMediaError::from_code(4).user_message(true),
+            "Hosted audio must be a browser-supported media file and allow CORS for AMP808 web playback."
         );
     }
 
@@ -335,6 +415,36 @@ mod tests {
         }
 
         assert_eq!(bpm.display_state(), WebBpmDisplayState::Locked(120));
+    }
+
+    #[test]
+    fn web_bpm_exposes_provisional_number_before_locking() {
+        let mut bpm = WebBpmState::estimating();
+        let hop_seconds = 0.05;
+
+        for frame in 0..48 {
+            let on_beat = frame % 10 == 0;
+            let byte = if on_beat { 255 } else { 128 };
+            let frame = vec![byte; 512];
+            bpm.update_from_time_domain_bytes(&frame, hop_seconds, true);
+        }
+
+        assert_eq!(bpm.display_state(), WebBpmDisplayState::Estimating);
+        assert_eq!(bpm.provisional_bpm(), Some(120));
+    }
+
+    #[test]
+    fn web_bpm_smooths_provisional_candidate_jumps() {
+        let mut bpm = WebBpmState::estimating();
+
+        bpm.accept_candidate(120);
+        bpm.accept_candidate(180);
+
+        assert!(
+            bpm.provisional_bpm()
+                .is_some_and(|candidate| candidate < 140),
+            "provisional display should not jump straight to a single noisy candidate"
+        );
     }
 
     #[test]

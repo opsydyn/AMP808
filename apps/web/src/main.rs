@@ -1,7 +1,7 @@
 use std::{cell::RefCell, io, rc::Rc};
 
 use amp808_core::web_audio::{
-    analyser_bands_to_heights, analyser_bins_to_bands, HostedAudioIssue, WebAudioSource,
+    analyser_bands_to_heights, analyser_bins_to_bands, BrowserMediaError, WebAudioSource,
     WebBpmDisplayState, WebBpmState, WEB_BPM_MAX, WEB_BPM_MIN,
 };
 use ratzilla::backend::webgl2::WebGl2BackendOptions;
@@ -283,14 +283,21 @@ struct WebTempoDisplay {
     label: String,
 }
 
-fn web_tempo_display(state: WebBpmDisplayState) -> WebTempoDisplay {
-    match state {
-        WebBpmDisplayState::Locked(bpm) => {
-            let normalized =
-                ((f64::from(bpm) - WEB_BPM_MIN) / (WEB_BPM_MAX - WEB_BPM_MIN)).clamp(0.0, 1.0);
+fn bpm_to_normalized(bpm: u16) -> f64 {
+    ((f64::from(bpm) - WEB_BPM_MIN) / (WEB_BPM_MAX - WEB_BPM_MIN)).clamp(0.0, 1.0)
+}
+
+fn web_tempo_display(state: &WebBpmState) -> WebTempoDisplay {
+    match state.display_state() {
+        WebBpmDisplayState::Locked(bpm) => WebTempoDisplay {
+            normalized: bpm_to_normalized(bpm),
+            label: bpm.to_string(),
+        },
+        WebBpmDisplayState::Estimating if state.provisional_bpm().is_some() => {
+            let bpm = state.provisional_bpm().unwrap();
             WebTempoDisplay {
-                normalized,
-                label: bpm.to_string(),
+                normalized: bpm_to_normalized(bpm),
+                label: format!("~{bpm}"),
             }
         }
         WebBpmDisplayState::Estimating => WebTempoDisplay {
@@ -725,6 +732,15 @@ fn analyser_empty_state_text(state: &WebAppState) -> Option<&'static str> {
         TransportState::Error => Some("CHECK SOURCE / CORS"),
         TransportState::Playing => None,
     }
+}
+
+fn browser_media_error_message(source: Option<&WebAudioSource>, error_code: Option<u16>) -> String {
+    let is_hosted_url = source.is_some_and(WebAudioSource::is_hosted_url);
+    error_code
+        .map(BrowserMediaError::from_code)
+        .unwrap_or(BrowserMediaError::Unknown)
+        .user_message(is_hosted_url)
+        .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1346,16 +1362,16 @@ fn wire_audio_events(
     }
 
     {
+        let audio = audio.clone();
         let state = Rc::clone(&state);
         let toggle_button = toggle_button.clone();
         let control_status = control_status.clone();
-        add_event_listener(audio.as_ref(), "error", move |_| {
+        add_event_listener(audio.clone().as_ref(), "error", move |_| {
             let source = state.borrow().source.clone();
-            let message = if source.as_ref().is_some_and(WebAudioSource::is_hosted_url) {
-                HostedAudioIssue::CorsRequired.user_message().to_string()
-            } else {
-                "Browser could not load this audio file.".to_string()
-            };
+            let message = browser_media_error_message(
+                source.as_ref(),
+                audio.error().as_ref().map(|error| error.code()),
+            );
             set_error(&state, &toggle_button, &control_status, message);
         })?;
     }
@@ -1725,7 +1741,7 @@ fn render_left_control_panel(
         (rows[1], rows[2])
     };
 
-    let tempo = web_tempo_display(state.bpm.display_state());
+    let tempo = web_tempo_display(&state.bpm);
     render_tempo_dial(frame, dial_area, tempo.normalized, &tempo.label);
 
     let control_lines = vec![
@@ -1798,7 +1814,7 @@ fn render_left_control_fallback(frame: &mut Frame<'_>, area: Rect, state: &WebAp
         Line::from(vec![
             Span::styled("TEMPO ", classic_small_label_style()),
             Span::styled(
-                format!("{} BPM", web_tempo_display(state.bpm.display_state()).label),
+                format!("{} BPM", web_tempo_display(&state.bpm).label),
                 classic_value_style(),
             ),
         ]),
@@ -2638,19 +2654,19 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        analyser_bands_for_scope_width, analyser_empty_state_text, classic_pad_family,
-        contrast_ratio, hosted_recent_urls, instrument_control_specs, instrument_family_bg,
-        instrument_family_fg, knob_canvas_bounds_808, playback_progress_fraction,
-        recent_source_display_label, remember_recent_source, step_glow_intensity,
-        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
-        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
-        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
-        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
-        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
-        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
-        WebAction, WebAppState, WebAudioSource, WebFocus,
+        analyser_bands_for_scope_width, analyser_empty_state_text, browser_media_error_message,
+        classic_pad_family, contrast_ratio, hosted_recent_urls, instrument_control_specs,
+        instrument_family_bg, instrument_family_fg, knob_canvas_bounds_808,
+        playback_progress_fraction, recent_source_display_label, remember_recent_source,
+        step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
+        waveform_bytes_to_samples, web_action_for_key, web_compact_deck_layout,
+        web_desktop_body_layout, web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms,
+        web_header_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
+        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
+        web_transition_fx_signature, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
+        PanelState, TransportState, WebAction, WebAppState, WebAudioSource, WebFocus,
     };
-    use amp808_core::web_audio::WebBpmDisplayState;
+    use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{layout::Rect, style::Color};
 
     #[test]
@@ -2795,17 +2811,30 @@ mod tests {
 
     #[test]
     fn web_tempo_display_maps_bpm_state_to_dial_label_and_position() {
-        let locked = web_tempo_display(WebBpmDisplayState::Locked(120));
+        let mut locked_state = WebBpmState::estimating();
+        feed_synthetic_bpm_frames(&mut locked_state, 180);
+        let locked = web_tempo_display(&locked_state);
         assert_eq!(locked.label, "120");
         assert!((locked.normalized - 0.4167).abs() < 0.01);
 
-        let estimating = web_tempo_display(WebBpmDisplayState::Estimating);
-        assert_eq!(estimating.label, "EST");
-        assert_eq!(estimating.normalized, 0.5);
+        let mut estimating_state = WebBpmState::estimating();
+        feed_synthetic_bpm_frames(&mut estimating_state, 48);
+        let estimating = web_tempo_display(&estimating_state);
+        assert_eq!(estimating.label, "~120");
+        assert!((estimating.normalized - 0.4167).abs() < 0.01);
 
-        let unavailable = web_tempo_display(WebBpmDisplayState::Unavailable);
+        let unavailable_state = WebBpmState::unavailable();
+        let unavailable = web_tempo_display(&unavailable_state);
         assert_eq!(unavailable.label, "--");
         assert_eq!(unavailable.normalized, 0.5);
+    }
+
+    fn feed_synthetic_bpm_frames(bpm: &mut WebBpmState, frame_count: usize) {
+        for frame in 0..frame_count {
+            let on_beat = frame % 10 == 0;
+            let byte = if on_beat { 255 } else { 128 };
+            bpm.update_from_time_domain_bytes(&vec![byte; 512], 0.05, true);
+        }
     }
 
     fn color_to_classic(color: Color) -> ClassicColor {
@@ -3152,6 +3181,29 @@ mod tests {
         state.transport = TransportState::Playing;
         state.error = None;
         assert_eq!(analyser_empty_state_text(&state), None);
+    }
+
+    #[test]
+    fn browser_media_error_messages_keep_hosted_and_local_failures_clear() {
+        let hosted = WebAudioSource::hosted_url("https://example.com/audio.mp3");
+        assert_eq!(
+            browser_media_error_message(Some(&hosted), Some(2)),
+            "Hosted audio network load failed. Check the URL and server availability."
+        );
+        assert_eq!(
+            browser_media_error_message(Some(&hosted), Some(4)),
+            "Hosted audio must be a browser-supported media file and allow CORS for AMP808 web playback."
+        );
+
+        let local = WebAudioSource::local_file("bad.flac");
+        assert_eq!(
+            browser_media_error_message(Some(&local), Some(4)),
+            "This local audio codec or container is not supported by the browser."
+        );
+        assert_eq!(
+            browser_media_error_message(None, None),
+            "Browser could not load this audio file."
+        );
     }
 
     #[test]
