@@ -1,0 +1,82 @@
+name: Deploy AMP808 Web
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/pages.yml'
+      - 'apps/web/**'
+      - 'crates/amp808-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+    inputs:
+      public_url:
+        description: Trunk public URL for the deployed site
+        required: false
+        default: /AMP808/
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build AMP808 Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Check web crate for wasm
+        run: cargo check --locked -p amp808_web --target wasm32-unknown-unknown
+
+      - name: Build web bundle
+        working-directory: apps/web
+        env:
+          PUBLIC_URL_INPUT: ${{ github.event.inputs.public_url }}
+        run: |
+          public_url="${PUBLIC_URL_INPUT:-/AMP808/}"
+          NO_COLOR=false trunk build --release --public-url "${public_url}"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

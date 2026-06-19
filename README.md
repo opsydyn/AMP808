@@ -255,22 +255,48 @@ That fails by design because `music-app` mode is a remote-control backend, not a
 
 ## AMP808 Web 808
 
-The first web slice lives in `apps/web` and is designed for static hosting on GitHub Pages.
-The current slice renders the Ratzilla `WebGl2Backend` shell with static source/status text.
-It does not create an `HTMLAudioElement`, file picker, or playback wiring yet.
+The browser 808 player lives in `apps/web` and is designed for static hosting on GitHub Pages.
+It is a Ratzilla `WebGl2Backend` app with browser-owned audio playback:
 
-Browser playback is planned around `HTMLAudioElement`, with Web Audio analysis planned for the
-808 visualizer path. Local files are intended to be the reliable first playback path once playback
-wiring lands. External hosted URLs are in scope only when the host allows CORS for browser media
-and Web Audio analysis. If a hosted URL does not allow CORS, AMP808 Web shows: "This hosted audio URL must allow CORS for AMP808 web playback."
+- local audio files through the browser file picker
+- hosted audio URLs through `HTMLAudioElement`
+- Web Audio analyser data for spectrum, waveform, step glow, and BPM estimation
+- seek controls, progress, recent hosted URL suggestions, keyboard shortcuts, and a reduced-motion
+  toggle
+
+Local file playback stays private to the browser. AMP808 Web creates an object URL for the selected
+file; it does not upload the file anywhere.
+
+Hosted URLs are supported only when the remote server allows browser media loading and Web Audio
+analysis under CORS. For GitHub Pages there is no backend proxy, so AMP808 Web cannot fix a remote
+server that blocks CORS. If a hosted source fails, the app shows a visible browser media/CORS error
+instead of fake analyser motion.
+
+Browser support is intentionally modern: WebAssembly, WebGL2, `HTMLAudioElement`, and Web Audio are
+required. If WebGL2 is unavailable, use the native terminal app instead.
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install --locked trunk
+
+# Local development
 cd apps/web
-trunk serve
-trunk build
+trunk serve --public-url / --open
+
+# GitHub project Pages build for https://<owner>.github.io/AMP808/
+NO_COLOR=false trunk build --release --public-url /AMP808/
+
+# Root-domain or custom-domain static build
+NO_COLOR=false trunk build --release --public-url /
 ```
+
+The static output is written to `apps/web/dist/`. That directory is generated and intentionally
+ignored by git.
+
+The `Deploy AMP808 Web` GitHub Actions workflow builds the same static output, uploads the Pages
+artifact, and deploys it to GitHub Pages from `main`. It uses `/AMP808/` as the project Pages public
+URL by default; run the workflow manually with a different `public_url` for a custom domain or root
+deployment.
 
 ## Development
 

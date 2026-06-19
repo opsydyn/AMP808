@@ -132,10 +132,10 @@ Acceptance:
 
 Goal: make the web target easy to ship.
 
-- [ ] Add a documented Trunk build command for GitHub Pages.
-- [ ] Add GitHub Actions build artifact for `apps/web/dist`.
-- [ ] Add optional Pages publish workflow once the repository target URL is chosen.
-- [ ] Add README section for local development, local files, hosted URL CORS, and browser support.
+- [x] Add a documented Trunk build command for GitHub Pages.
+- [x] Add GitHub Actions build artifact for `apps/web/dist`.
+- [x] Add optional Pages publish workflow once the repository target URL is chosen.
+- [x] Add README section for local development, local files, hosted URL CORS, and browser support.
 - [ ] Add screenshot artifacts for desktop and mobile QA.
 
 Acceptance:
