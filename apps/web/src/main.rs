@@ -298,6 +298,7 @@ struct WebPanelFx {
 
 #[derive(Default)]
 struct WebFxRuntime {
+    header_panel: Option<WebPanelFx>,
     transport_panel: Option<WebPanelFx>,
     instrument_panel: Option<WebPanelFx>,
     analyser_panel: Option<WebPanelFx>,
@@ -323,6 +324,26 @@ impl WebFxRuntime {
         slot.as_mut().map(|panel_fx| &mut panel_fx.effect)
     }
 
+    fn header_effect(&mut self, transport: TransportState) -> Option<&mut tachyonfx::Effect> {
+        let Some(cycle_ms) = web_header_fx_signature(transport) else {
+            self.header_panel = None;
+            return None;
+        };
+        let should_rebuild = self
+            .header_panel
+            .as_ref()
+            .is_none_or(|panel_fx| panel_fx.cycle_ms != cycle_ms);
+        if should_rebuild {
+            self.header_panel = Some(WebPanelFx {
+                cycle_ms,
+                effect: make_web_header_effect(transport),
+            });
+        }
+        self.header_panel
+            .as_mut()
+            .map(|panel_fx| &mut panel_fx.effect)
+    }
+
     fn clear_panel(&mut self, role: PanelRole) {
         *self.panel_slot(role) = None;
     }
@@ -343,6 +364,60 @@ fn web_panel_fx_signature(state: PanelState) -> Option<u32> {
         PanelState::Error => Some(520),
         PanelState::Idle | PanelState::Armed => None,
     }
+}
+
+fn web_header_fx_signature(transport: TransportState) -> Option<u32> {
+    match transport {
+        TransportState::Playing => Some(1400),
+        TransportState::Error => Some(600),
+        TransportState::Idle
+        | TransportState::Ready
+        | TransportState::Paused
+        | TransportState::Ended => None,
+    }
+}
+
+fn make_web_header_effect(transport: TransportState) -> tachyonfx::Effect {
+    let cycle_ms = web_header_fx_signature(transport).unwrap_or(1400);
+    let trace = match transport {
+        TransportState::Error => WebHeaderTrace {
+            dim: Classic808Palette::RED_TEXT.ratatui(),
+            accent: Classic808Palette::YELLOW.ratatui(),
+            warm: Classic808Palette::RED.ratatui(),
+        },
+        _ => WebHeaderTrace {
+            dim: Classic808Palette::DIM.ratatui(),
+            accent: Classic808Palette::YELLOW.ratatui(),
+            warm: Classic808Palette::ORANGE.ratatui(),
+        },
+    };
+
+    fx::repeating(fx::effect_fn(
+        trace,
+        (cycle_ms, Interpolation::SineInOut),
+        |state, ctx, cells| {
+            let width = ctx.area.width.max(1) as f32;
+            cells.for_each_cell(|pos, cell| {
+                if cell.symbol().trim().is_empty() {
+                    return;
+                }
+
+                let offset = pos.x.saturating_sub(ctx.area.x) as f32 / width;
+                let wave = (ctx.alpha() * std::f32::consts::TAU + offset * 6.0).sin() * 0.5 + 0.5;
+                let base = cell.fg;
+                let glow = mix_rgb(state.warm, state.accent, wave);
+                let lift = if base == state.dim { 0.28 } else { 0.14 };
+                cell.set_fg(mix_rgb(base, glow, lift));
+            });
+        },
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct WebHeaderTrace {
+    dim: Color,
+    accent: Color,
+    warm: Color,
 }
 
 fn make_web_panel_trace_effect(state: PanelState) -> tachyonfx::Effect {
@@ -910,6 +985,9 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
         .split(inner);
 
     render_machine_header(frame, rows[0], state);
+    if let Some(effect) = fx.header_effect(state.transport) {
+        frame.render_effect(effect, rows[0], tachyonfx::Duration::from_millis(50));
+    }
 
     if rows[1].width < 90 {
         let deck_rows = Layout::default()
@@ -1836,8 +1914,9 @@ mod tests {
     use super::{
         analyser_empty_state_text, classic_pad_family, contrast_ratio, instrument_control_specs,
         instrument_family_bg, instrument_family_fg, web_action_for_key, web_focus_after_action,
-        web_panel_fx_signature, web_panel_spec, Classic808Palette, ClassicColor, ClassicPadFamily,
-        PanelRole, PanelState, TransportState, WebAction, WebAppState, WebFocus,
+        web_header_fx_signature, web_panel_fx_signature, web_panel_spec, Classic808Palette,
+        ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction,
+        WebAppState, WebFocus,
     };
     use ratzilla::ratatui::style::Color;
 
@@ -2006,6 +2085,16 @@ mod tests {
         assert_eq!(web_panel_fx_signature(PanelState::Armed), None);
         assert_eq!(web_panel_fx_signature(PanelState::Active), Some(900));
         assert_eq!(web_panel_fx_signature(PanelState::Error), Some(520));
+    }
+
+    #[test]
+    fn web_header_fx_signature_tracks_motion_worthy_transport_states() {
+        assert_eq!(web_header_fx_signature(TransportState::Idle), None);
+        assert_eq!(web_header_fx_signature(TransportState::Ready), None);
+        assert_eq!(web_header_fx_signature(TransportState::Paused), None);
+        assert_eq!(web_header_fx_signature(TransportState::Ended), None);
+        assert_eq!(web_header_fx_signature(TransportState::Playing), Some(1400));
+        assert_eq!(web_header_fx_signature(TransportState::Error), Some(600));
     }
 
     #[test]
