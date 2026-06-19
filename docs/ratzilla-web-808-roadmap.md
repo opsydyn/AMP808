@@ -92,10 +92,10 @@ Acceptance:
 
 Goal: introduce motion like Exabind without compromising readability or playback.
 
-- [ ] Add `tachyonfx` to `apps/web` only after confirming wasm target compatibility in CI/local
+- [x] Add `tachyonfx` to `apps/web` only after confirming wasm target compatibility in CI/local
   checks.
 - [ ] Port or adapt native 808 header/panel trace effects from `src/ui/view_808.rs`.
-- [ ] Add active-panel border trace for the currently relevant area.
+- [x] Add active-panel border trace for the currently relevant area.
 - [ ] Add short load/play/error transition effects using fades or color shifts.
 - [ ] Add analyser-reactive glow for step keys and LEDs.
 - [ ] Add a reduced-motion switch or compile/runtime guard if motion becomes distracting.

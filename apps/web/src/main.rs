@@ -5,7 +5,7 @@ use amp808_core::web_audio::{
 };
 use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span, Text},
@@ -16,6 +16,7 @@ use ratzilla::ratatui::{
     Frame, Terminal,
 };
 use ratzilla::{WebGl2Backend, WebRenderer};
+use tachyonfx::{fx, EffectRenderer, Interpolation};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
@@ -239,6 +240,7 @@ enum PanelState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WebPanelSpec {
+    role: PanelRole,
     title: &'static str,
     state: PanelState,
     lamp: Option<PanelState>,
@@ -273,6 +275,7 @@ fn web_panel_spec(role: PanelRole, state: &WebAppState) -> WebPanelSpec {
     };
 
     WebPanelSpec {
+        role,
         title: match role {
             PanelRole::Transport => " BASIC RHYTHM ",
             PanelRole::Instrument => " INSTRUMENT SELECT / LEVEL ",
@@ -285,6 +288,156 @@ fn web_panel_spec(role: PanelRole, state: &WebAppState) -> WebPanelSpec {
             PanelRole::Transport | PanelRole::Analyser | PanelRole::Steps
         )
         .then_some(panel_state),
+    }
+}
+
+struct WebPanelFx {
+    cycle_ms: u32,
+    effect: tachyonfx::Effect,
+}
+
+#[derive(Default)]
+struct WebFxRuntime {
+    transport_panel: Option<WebPanelFx>,
+    instrument_panel: Option<WebPanelFx>,
+    analyser_panel: Option<WebPanelFx>,
+    steps_panel: Option<WebPanelFx>,
+}
+
+impl WebFxRuntime {
+    fn panel_effect(&mut self, spec: WebPanelSpec) -> Option<&mut tachyonfx::Effect> {
+        let Some(cycle_ms) = web_panel_fx_signature(spec.state) else {
+            self.clear_panel(spec.role);
+            return None;
+        };
+        let slot = self.panel_slot(spec.role);
+        let should_rebuild = slot
+            .as_ref()
+            .is_none_or(|panel_fx| panel_fx.cycle_ms != cycle_ms);
+        if should_rebuild {
+            *slot = Some(WebPanelFx {
+                cycle_ms,
+                effect: make_web_panel_trace_effect(spec.state),
+            });
+        }
+        slot.as_mut().map(|panel_fx| &mut panel_fx.effect)
+    }
+
+    fn clear_panel(&mut self, role: PanelRole) {
+        *self.panel_slot(role) = None;
+    }
+
+    fn panel_slot(&mut self, role: PanelRole) -> &mut Option<WebPanelFx> {
+        match role {
+            PanelRole::Transport => &mut self.transport_panel,
+            PanelRole::Instrument => &mut self.instrument_panel,
+            PanelRole::Analyser => &mut self.analyser_panel,
+            PanelRole::Steps => &mut self.steps_panel,
+        }
+    }
+}
+
+fn web_panel_fx_signature(state: PanelState) -> Option<u32> {
+    match state {
+        PanelState::Active => Some(900),
+        PanelState::Error => Some(520),
+        PanelState::Idle | PanelState::Armed => None,
+    }
+}
+
+fn make_web_panel_trace_effect(state: PanelState) -> tachyonfx::Effect {
+    let cycle_ms = web_panel_fx_signature(state).unwrap_or(900);
+    let trace = match state {
+        PanelState::Error => WebPanelTrace {
+            base: Classic808Palette::RED_TEXT.ratatui(),
+            head: Classic808Palette::YELLOW.ratatui(),
+            tail: Classic808Palette::RED.ratatui(),
+        },
+        _ => WebPanelTrace {
+            base: Classic808Palette::YELLOW.ratatui(),
+            head: Classic808Palette::IVORY.ratatui(),
+            tail: Classic808Palette::AMBER.ratatui(),
+        },
+    };
+
+    fx::repeating(fx::effect_fn(
+        trace,
+        (cycle_ms, Interpolation::Linear),
+        |state, ctx, cells| {
+            if ctx.area.width < 2 || ctx.area.height < 2 {
+                return;
+            }
+
+            let perimeter = panel_perimeter_len(ctx.area);
+            if perimeter == 0 {
+                return;
+            }
+
+            let head = ctx.alpha() * perimeter as f32;
+            let tail_len = (perimeter as f32 * 0.18).max(5.0);
+            cells.for_each_cell(|pos, cell| {
+                let Some(index) = panel_perimeter_index(ctx.area, pos) else {
+                    return;
+                };
+
+                let distance = (head - index as f32).rem_euclid(perimeter as f32);
+                if distance <= tail_len {
+                    let hotspot = (1.0 - distance / tail_len).powf(1.8);
+                    let accent = mix_rgb(state.tail, state.head, hotspot);
+                    cell.set_fg(mix_rgb(state.base, accent, 0.32 + hotspot * 0.48));
+                }
+            });
+        },
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct WebPanelTrace {
+    base: Color,
+    head: Color,
+    tail: Color,
+}
+
+fn panel_perimeter_len(area: Rect) -> u16 {
+    area.width
+        .saturating_mul(2)
+        .saturating_add(area.height.saturating_mul(2))
+        .saturating_sub(4)
+}
+
+fn panel_perimeter_index(area: Rect, pos: Position) -> Option<u16> {
+    if area.width < 2 || area.height < 2 {
+        return None;
+    }
+
+    let left = area.x;
+    let right = area.right().saturating_sub(1);
+    let top = area.y;
+    let bottom = area.bottom().saturating_sub(1);
+
+    if pos.y == top && pos.x >= left && pos.x <= right {
+        Some(pos.x - left)
+    } else if pos.x == right && pos.y > top && pos.y <= bottom {
+        Some(area.width + (pos.y - top - 1))
+    } else if pos.y == bottom && pos.x >= left && pos.x < right {
+        Some(area.width + (area.height - 1) + (right - pos.x - 1))
+    } else if pos.x == left && pos.y > top && pos.y < bottom {
+        Some(area.width + (area.height - 1) + (area.width - 1) + (bottom - pos.y - 1))
+    } else {
+        None
+    }
+}
+
+fn mix_rgb(a: Color, b: Color, ratio_to_b: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let t = ratio_to_b.clamp(0.0, 1.0);
+            let lerp = |lhs: u8, rhs: u8| -> u8 {
+                ((lhs as f32 * (1.0 - t)) + (rhs as f32 * t)).round() as u8
+            };
+            Color::Rgb(lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
+        }
+        _ => a,
     }
 }
 
@@ -359,12 +512,14 @@ fn main() -> io::Result<()> {
     let backend = WebGl2Backend::new_with_options(WebGl2BackendOptions::new().grid_id("app"))?;
     let terminal = Terminal::new(backend)?;
     let state = Rc::new(RefCell::new(WebAppState::default()));
+    let fx_runtime = Rc::new(RefCell::new(WebFxRuntime::default()));
     let graph = install_audio_graph(Rc::clone(&state)).map_err(js_to_io_error)?;
 
     terminal.draw_web(move |frame| {
         sample_analyser(&graph, &state);
         let snapshot = state.borrow().clone();
-        render_web_808(frame, &snapshot);
+        let mut fx_runtime = fx_runtime.borrow_mut();
+        render_web_808(frame, &snapshot, &mut fx_runtime);
     });
 
     Ok(())
@@ -729,7 +884,7 @@ fn sample_analyser(graph: &AudioGraph, state: &Rc<RefCell<WebAppState>>) {
     state.borrow_mut().bands = bands;
 }
 
-fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
+fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRuntime) {
     let area = frame.area();
     let block = Block::default()
         .title(" AMP808 WEB ")
@@ -766,16 +921,16 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
                 Constraint::Length(5),
             ])
             .split(rows[1]);
-        render_left_control_panel(frame, deck_rows[0], state);
-        render_knob_bank(frame, deck_rows[1], state);
-        render_visualizer(frame, deck_rows[2], state);
-        render_step_strip(frame, deck_rows[3], state);
+        render_left_control_panel(frame, deck_rows[0], state, fx);
+        render_knob_bank(frame, deck_rows[1], state, fx);
+        render_visualizer(frame, deck_rows[2], state, fx);
+        render_step_strip(frame, deck_rows[3], state, fx);
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(28), Constraint::Min(24)])
             .split(rows[1]);
-        render_left_control_panel(frame, body[0], state);
+        render_left_control_panel(frame, body[0], state, fx);
 
         let deck_rows = Layout::default()
             .direction(Direction::Vertical)
@@ -785,9 +940,9 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
                 Constraint::Length(5),
             ])
             .split(body[1]);
-        render_knob_bank(frame, deck_rows[0], state);
-        render_visualizer(frame, deck_rows[1], state);
-        render_step_strip(frame, deck_rows[2], state);
+        render_knob_bank(frame, deck_rows[0], state, fx);
+        render_visualizer(frame, deck_rows[1], state, fx);
+        render_step_strip(frame, deck_rows[2], state, fx);
     }
 
     let compact_status = "Load audio or CORS URL";
@@ -880,7 +1035,12 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
     );
 }
 
-fn render_808_panel(frame: &mut Frame<'_>, area: Rect, spec: WebPanelSpec) -> Rect {
+fn render_808_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    spec: WebPanelSpec,
+    effect: Option<&mut tachyonfx::Effect>,
+) -> Rect {
     let block = Block::default()
         .title(panel_title(spec))
         .style(classic_faceplate_style())
@@ -888,6 +1048,9 @@ fn render_808_panel(frame: &mut Frame<'_>, area: Rect, spec: WebPanelSpec) -> Re
         .border_style(panel_border_style(spec.state));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if let Some(effect) = effect {
+        frame.render_effect(effect, area, tachyonfx::Duration::from_millis(50));
+    }
     inner
 }
 
@@ -932,8 +1095,14 @@ fn panel_border_style(state: PanelState) -> Style {
     })
 }
 
-fn render_left_control_panel(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
-    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Transport, state));
+fn render_left_control_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &WebAppState,
+    fx: &mut WebFxRuntime,
+) {
+    let spec = web_panel_spec(PanelRole::Transport, state);
+    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
 
     if inner.width < 18 || inner.height < 8 {
         render_left_control_fallback(frame, inner, state);
@@ -1155,8 +1324,9 @@ fn dial_arc_color(position: f64) -> Color {
     }
 }
 
-fn render_knob_bank(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
-    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Instrument, state));
+fn render_knob_bank(frame: &mut Frame<'_>, area: Rect, state: &WebAppState, fx: &mut WebFxRuntime) {
+    let spec = web_panel_spec(PanelRole::Instrument, state);
+    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
     let specs = instrument_control_specs();
     let visible = (usize::from(inner.width) / 6).clamp(1, specs.len());
     let specs = &specs[..visible];
@@ -1344,8 +1514,14 @@ fn web_knob_value(index: usize) -> f64 {
     VALUES[index % VALUES.len()]
 }
 
-fn render_visualizer(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
-    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Analyser, state));
+fn render_visualizer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &WebAppState,
+    fx: &mut WebFxRuntime,
+) {
+    let spec = web_panel_spec(PanelRole::Analyser, state);
+    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
     let bands = &state.bands;
 
     if inner.height == 0 || inner.width < 2 || bands.is_empty() {
@@ -1410,8 +1586,14 @@ fn render_analyser_empty_state(
     );
 }
 
-fn render_step_strip(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
-    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Steps, state));
+fn render_step_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &WebAppState,
+    fx: &mut WebFxRuntime,
+) {
+    let spec = web_panel_spec(PanelRole::Steps, state);
+    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
     let bands = &state.bands;
 
     if inner.width < 32 {
@@ -1654,8 +1836,8 @@ mod tests {
     use super::{
         analyser_empty_state_text, classic_pad_family, contrast_ratio, instrument_control_specs,
         instrument_family_bg, instrument_family_fg, web_action_for_key, web_focus_after_action,
-        web_panel_spec, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState,
-        TransportState, WebAction, WebAppState, WebFocus,
+        web_panel_fx_signature, web_panel_spec, Classic808Palette, ClassicColor, ClassicPadFamily,
+        PanelRole, PanelState, TransportState, WebAction, WebAppState, WebFocus,
     };
     use ratzilla::ratatui::style::Color;
 
@@ -1816,6 +1998,14 @@ mod tests {
             web_panel_spec(PanelRole::Analyser, &state).state,
             PanelState::Active
         );
+    }
+
+    #[test]
+    fn web_panel_fx_signature_only_traces_active_or_error_panels() {
+        assert_eq!(web_panel_fx_signature(PanelState::Idle), None);
+        assert_eq!(web_panel_fx_signature(PanelState::Armed), None);
+        assert_eq!(web_panel_fx_signature(PanelState::Active), Some(900));
+        assert_eq!(web_panel_fx_signature(PanelState::Error), Some(520));
     }
 
     #[test]

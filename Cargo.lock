@@ -110,6 +110,7 @@ dependencies = [
  "critical-section",
  "js-sys",
  "ratzilla",
+ "tachyonfx",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
