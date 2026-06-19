@@ -2,12 +2,13 @@ use std::{cell::RefCell, io, rc::Rc};
 
 use amp808_core::web_audio::{
     analyser_bands_to_heights, analyser_bins_to_bands, HostedAudioIssue, WebAudioSource,
+    WebBpmDisplayState, WebBpmState, WEB_BPM_MAX, WEB_BPM_MIN,
 };
 use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
-    symbols::Marker,
+    symbols::{border, Marker},
     text::{Line, Span, Text},
     widgets::{
         canvas::{Canvas, Line as CanvasLine},
@@ -26,6 +27,11 @@ use web_sys::{
 };
 
 const BAND_COUNT: usize = 24;
+const WEB_SEEK_STEP_SECONDS: f64 = 15.0;
+const WAVEFORM_SAMPLE_COUNT: usize = 96;
+const WEB_PANE_GAP: u16 = 1;
+const RECENT_SOURCE_LIMIT: usize = 4;
+const WEB_BPM_DEFAULT_HOP_SECONDS: f64 = 1.0 / 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClassicColor {
@@ -191,6 +197,7 @@ enum WebFocus {
     LocalFile,
     HostedUrl,
     Analyser,
+    Motion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +206,9 @@ enum WebAction {
     FocusLocalFile,
     FocusHostedUrl,
     CycleVisualMode,
+    ToggleMotion,
+    SeekBack,
+    SeekForward,
     ClearFocus,
 }
 
@@ -208,6 +218,9 @@ fn web_action_for_key(key: &str) -> Option<WebAction> {
         "l" | "L" => Some(WebAction::FocusLocalFile),
         "u" | "U" => Some(WebAction::FocusHostedUrl),
         "v" | "V" => Some(WebAction::CycleVisualMode),
+        "m" | "M" => Some(WebAction::ToggleMotion),
+        "ArrowLeft" => Some(WebAction::SeekBack),
+        "ArrowRight" => Some(WebAction::SeekForward),
         "Escape" => Some(WebAction::ClearFocus),
         _ => None,
     }
@@ -215,10 +228,104 @@ fn web_action_for_key(key: &str) -> Option<WebAction> {
 
 fn web_focus_after_action(_current: WebFocus, action: WebAction) -> WebFocus {
     match action {
-        WebAction::TogglePlayback | WebAction::ClearFocus => WebFocus::Transport,
+        WebAction::TogglePlayback
+        | WebAction::SeekBack
+        | WebAction::SeekForward
+        | WebAction::ClearFocus => WebFocus::Transport,
         WebAction::FocusLocalFile => WebFocus::LocalFile,
         WebAction::FocusHostedUrl => WebFocus::HostedUrl,
         WebAction::CycleVisualMode => WebFocus::Analyser,
+        WebAction::ToggleMotion => WebFocus::Motion,
+    }
+}
+
+fn web_seek_target_seconds(current_time: f64, duration: Option<f64>, delta_seconds: f64) -> f64 {
+    let current_time = if current_time.is_finite() {
+        current_time.max(0.0)
+    } else {
+        0.0
+    };
+    let target = (current_time + delta_seconds).max(0.0);
+    duration
+        .filter(|duration| duration.is_finite() && *duration >= 0.0)
+        .map(|duration| target.min(duration))
+        .unwrap_or(target)
+}
+
+fn analyser_bands_for_scope_width(bands: &[f32], width: u16) -> Vec<f32> {
+    if bands.is_empty() || width < 2 {
+        return Vec::new();
+    }
+
+    let slots = (usize::from(width) / 2).max(1);
+    resample_f32(bands, slots)
+}
+
+fn waveform_bytes_to_samples(bytes: &[u8], sample_count: usize) -> Vec<f32> {
+    if sample_count == 0 {
+        return Vec::new();
+    }
+    if bytes.is_empty() {
+        return vec![0.0; sample_count];
+    }
+
+    let samples = bytes
+        .iter()
+        .map(|byte| (f32::from(*byte) - 128.0) / 128.0)
+        .map(|sample| sample.clamp(-1.0, 1.0))
+        .collect::<Vec<_>>();
+    resample_f32(&samples, sample_count)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WebTempoDisplay {
+    normalized: f64,
+    label: String,
+}
+
+fn web_tempo_display(state: WebBpmDisplayState) -> WebTempoDisplay {
+    match state {
+        WebBpmDisplayState::Locked(bpm) => {
+            let normalized =
+                ((f64::from(bpm) - WEB_BPM_MIN) / (WEB_BPM_MAX - WEB_BPM_MIN)).clamp(0.0, 1.0);
+            WebTempoDisplay {
+                normalized,
+                label: bpm.to_string(),
+            }
+        }
+        WebBpmDisplayState::Estimating => WebTempoDisplay {
+            normalized: 0.5,
+            label: "EST".to_string(),
+        },
+        WebBpmDisplayState::Unavailable => WebTempoDisplay {
+            normalized: 0.5,
+            label: "--".to_string(),
+        },
+    }
+}
+
+fn resample_f32(values: &[f32], target_len: usize) -> Vec<f32> {
+    if values.is_empty() || target_len == 0 {
+        return Vec::new();
+    }
+    if target_len == 1 {
+        return vec![values[0]];
+    }
+
+    let last = values.len().saturating_sub(1) as f64;
+    (0..target_len)
+        .map(|index| {
+            let source = ((index as f64 / (target_len - 1) as f64) * last).round() as usize;
+            values[source.min(values.len() - 1)]
+        })
+        .collect()
+}
+
+fn web_motion_enabled_after_action(current: bool, action: WebAction) -> bool {
+    if action == WebAction::ToggleMotion {
+        !current
+    } else {
+        current
     }
 }
 
@@ -298,6 +405,9 @@ struct WebPanelFx {
 
 #[derive(Default)]
 struct WebFxRuntime {
+    last_frame_ms: Option<f64>,
+    last_transition_transport: Option<TransportState>,
+    transition_panel: Option<WebPanelFx>,
     header_panel: Option<WebPanelFx>,
     transport_panel: Option<WebPanelFx>,
     instrument_panel: Option<WebPanelFx>,
@@ -306,6 +416,15 @@ struct WebFxRuntime {
 }
 
 impl WebFxRuntime {
+    fn next_tick(&mut self, now_ms: f64) -> tachyonfx::Duration {
+        let tick_ms = self
+            .last_frame_ms
+            .map(|last_frame_ms| web_fx_tick_ms(now_ms - last_frame_ms))
+            .unwrap_or(16);
+        self.last_frame_ms = Some(now_ms);
+        tachyonfx::Duration::from_millis(tick_ms)
+    }
+
     fn panel_effect(&mut self, spec: WebPanelSpec) -> Option<&mut tachyonfx::Effect> {
         let Some(cycle_ms) = web_panel_fx_signature(spec.state) else {
             self.clear_panel(spec.role);
@@ -344,8 +463,41 @@ impl WebFxRuntime {
             .map(|panel_fx| &mut panel_fx.effect)
     }
 
+    fn transition_effect(&mut self, transport: TransportState) -> Option<&mut tachyonfx::Effect> {
+        if self.last_transition_transport == Some(transport) {
+            return self
+                .transition_panel
+                .as_mut()
+                .map(|panel_fx| &mut panel_fx.effect);
+        }
+        self.last_transition_transport = Some(transport);
+
+        let Some(cycle_ms) = web_transition_fx_signature(transport) else {
+            self.transition_panel = None;
+            return None;
+        };
+
+        self.transition_panel = Some(WebPanelFx {
+            cycle_ms,
+            effect: make_web_transition_effect(transport),
+        });
+        self.transition_panel
+            .as_mut()
+            .map(|panel_fx| &mut panel_fx.effect)
+    }
+
     fn clear_panel(&mut self, role: PanelRole) {
         *self.panel_slot(role) = None;
+    }
+
+    fn clear_effects(&mut self) {
+        self.last_transition_transport = None;
+        self.transition_panel = None;
+        self.header_panel = None;
+        self.transport_panel = None;
+        self.instrument_panel = None;
+        self.analyser_panel = None;
+        self.steps_panel = None;
     }
 
     fn panel_slot(&mut self, role: PanelRole) -> &mut Option<WebPanelFx> {
@@ -360,9 +512,25 @@ impl WebFxRuntime {
 
 fn web_panel_fx_signature(state: PanelState) -> Option<u32> {
     match state {
-        PanelState::Active => Some(900),
-        PanelState::Error => Some(520),
+        PanelState::Active => Some(1800),
+        PanelState::Error => Some(900),
         PanelState::Idle | PanelState::Armed => None,
+    }
+}
+
+fn web_fx_tick_ms(delta_ms: f64) -> u32 {
+    if !delta_ms.is_finite() {
+        return 16;
+    }
+    delta_ms.round().clamp(12.0, 80.0) as u32
+}
+
+fn web_transition_fx_signature(transport: TransportState) -> Option<u32> {
+    match transport {
+        TransportState::Ready => Some(360),
+        TransportState::Playing => Some(320),
+        TransportState::Error => Some(520),
+        TransportState::Idle | TransportState::Paused | TransportState::Ended => None,
     }
 }
 
@@ -375,6 +543,39 @@ fn web_header_fx_signature(transport: TransportState) -> Option<u32> {
         | TransportState::Paused
         | TransportState::Ended => None,
     }
+}
+
+fn make_web_transition_effect(transport: TransportState) -> tachyonfx::Effect {
+    let cycle_ms = web_transition_fx_signature(transport).unwrap_or(320);
+    let flash = WebTransitionFlash {
+        accent: match transport {
+            TransportState::Ready => Classic808Palette::AMBER.ratatui(),
+            TransportState::Playing => Classic808Palette::YELLOW.ratatui(),
+            TransportState::Error => Classic808Palette::RED_TEXT.ratatui(),
+            TransportState::Idle | TransportState::Paused | TransportState::Ended => {
+                Classic808Palette::IVORY.ratatui()
+            }
+        },
+    };
+
+    fx::run_once(fx::effect_fn(
+        flash,
+        (cycle_ms, Interpolation::SineOut),
+        |state, ctx, cells| {
+            let intensity = 1.0 - ctx.alpha();
+            cells.for_each_cell(|_pos, cell| {
+                if cell.symbol().trim().is_empty() {
+                    return;
+                }
+                cell.set_fg(mix_rgb(cell.fg, state.accent, intensity * 0.58));
+            });
+        },
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct WebTransitionFlash {
+    accent: Color,
 }
 
 fn make_web_header_effect(transport: TransportState) -> tachyonfx::Effect {
@@ -559,6 +760,11 @@ struct WebAppState {
     current_time: f64,
     duration: Option<f64>,
     bands: Vec<f32>,
+    waveform: Vec<f32>,
+    bpm: WebBpmState,
+    last_bpm_sample_ms: Option<f64>,
+    motion_enabled: bool,
+    recent_sources: Vec<WebAudioSource>,
 }
 
 impl Default for WebAppState {
@@ -572,6 +778,58 @@ impl Default for WebAppState {
             current_time: 0.0,
             duration: None,
             bands: vec![0.0; BAND_COUNT],
+            waveform: vec![0.0; WAVEFORM_SAMPLE_COUNT],
+            bpm: WebBpmState::unavailable(),
+            last_bpm_sample_ms: None,
+            motion_enabled: true,
+            recent_sources: Vec::new(),
+        }
+    }
+}
+
+fn remember_recent_source(recent_sources: &mut Vec<WebAudioSource>, source: WebAudioSource) {
+    recent_sources.retain(|existing| existing != &source);
+    recent_sources.insert(0, source);
+    recent_sources.truncate(RECENT_SOURCE_LIMIT);
+}
+
+fn hosted_recent_urls(recent_sources: &[WebAudioSource]) -> Vec<String> {
+    recent_sources
+        .iter()
+        .filter_map(|source| match source {
+            WebAudioSource::HostedUrl { url } => Some(url.clone()),
+            WebAudioSource::LocalFile { .. } => None,
+        })
+        .collect()
+}
+
+fn recent_source_display_label(source: &WebAudioSource, max_width: usize) -> String {
+    let prefix = if source.is_hosted_url() { "U " } else { "F " };
+    let max_width = max_width.max(prefix.len());
+    let label_width = max_width.saturating_sub(prefix.len());
+    let label = source.label();
+    let mut clipped = label.chars().take(label_width).collect::<String>();
+    if label.chars().count() > label_width && label_width >= 1 {
+        clipped.pop();
+        clipped.push('~');
+    }
+    format!("{prefix}{clipped}")
+}
+
+fn sync_recent_url_options(
+    document: &Document,
+    list: &HtmlElement,
+    recent_sources: &[WebAudioSource],
+) {
+    while let Some(child) = list.first_child() {
+        let _ = list.remove_child(&child);
+    }
+
+    for url in hosted_recent_urls(recent_sources) {
+        if let Ok(option) = document.create_element("option") {
+            let _ = option.set_attribute("value", &url);
+            option.set_text_content(Some(&url));
+            let _ = list.append_child(&option);
         }
     }
 }
@@ -581,6 +839,15 @@ struct AudioGraph {
     context: AudioContext,
     _source: MediaElementAudioSourceNode,
     analyser: AnalyserNode,
+}
+
+#[derive(Clone)]
+struct WebKeyboardControls {
+    toggle_button: HtmlButtonElement,
+    control_status: HtmlElement,
+    file_input: HtmlInputElement,
+    url_input: HtmlInputElement,
+    motion_input: HtmlInputElement,
 }
 
 fn main() -> io::Result<()> {
@@ -634,8 +901,12 @@ fn wire_controls(
     let file_input: HtmlInputElement = element_by_id(document, "amp808-file")?;
     let url_input: HtmlInputElement = element_by_id(document, "amp808-url")?;
     let toggle_button: HtmlButtonElement = element_by_id(document, "amp808-toggle")?;
+    let seek_back_button: HtmlButtonElement = element_by_id(document, "amp808-seek-back")?;
+    let seek_forward_button: HtmlButtonElement = element_by_id(document, "amp808-seek-forward")?;
     let load_url_button: HtmlButtonElement = element_by_id(document, "amp808-load-url")?;
+    let motion_input: HtmlInputElement = element_by_id(document, "amp808-motion")?;
     let control_status: HtmlElement = element_by_id(document, "amp808-control-status")?;
+    let recent_url_list: HtmlElement = element_by_id(document, "amp808-recent-urls")?;
     let object_url: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     {
@@ -663,13 +934,18 @@ fn wire_controls(
 
                     {
                         let mut state = state.borrow_mut();
-                        state.source = Some(WebAudioSource::local_file(file.name()));
+                        let source = WebAudioSource::local_file(file.name());
+                        state.source = Some(source.clone());
+                        remember_recent_source(&mut state.recent_sources, source);
                         state.transport = TransportState::Ready;
                         state.status = "Local audio loaded".to_string();
                         state.error = None;
                         state.current_time = 0.0;
                         state.duration = None;
                         state.bands = vec![0.0; BAND_COUNT];
+                        state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
+                        state.bpm = WebBpmState::estimating();
+                        state.last_bpm_sample_ms = None;
                     }
                     sync_controls(&toggle_button, &control_status, &state.borrow());
                 }
@@ -690,6 +966,8 @@ fn wire_controls(
         let control_status = control_status.clone();
         let object_url = Rc::clone(&object_url);
         let url_input = url_input.clone();
+        let recent_url_list = recent_url_list.clone();
+        let document = document.clone();
         add_event_listener(load_url_button.as_ref(), "click", move |_| {
             let url = url_input.value().trim().to_string();
             if url.is_empty() {
@@ -709,7 +987,9 @@ fn wire_controls(
 
             {
                 let mut state = state.borrow_mut();
-                state.source = Some(WebAudioSource::hosted_url(url));
+                let source = WebAudioSource::hosted_url(url);
+                state.source = Some(source.clone());
+                remember_recent_source(&mut state.recent_sources, source);
                 state.transport = TransportState::Ready;
                 state.status =
                     "Hosted audio loaded; CORS must allow AMP808 web playback.".to_string();
@@ -717,6 +997,10 @@ fn wire_controls(
                 state.current_time = 0.0;
                 state.duration = None;
                 state.bands = vec![0.0; BAND_COUNT];
+                state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
+                state.bpm = WebBpmState::estimating();
+                state.last_bpm_sample_ms = None;
+                sync_recent_url_options(&document, &recent_url_list, &state.recent_sources);
             }
             sync_controls(&toggle_button, &control_status, &state.borrow());
         })?;
@@ -737,14 +1021,66 @@ fn wire_controls(
         })?;
     }
 
+    {
+        let graph = Rc::clone(&graph);
+        let state = Rc::clone(&state);
+        let toggle_button = toggle_button.clone();
+        let control_status = control_status.clone();
+        add_event_listener(seek_back_button.as_ref(), "click", move |_| {
+            seek_browser_audio(
+                &graph,
+                &state,
+                -WEB_SEEK_STEP_SECONDS,
+                &toggle_button,
+                &control_status,
+            );
+        })?;
+    }
+
+    {
+        let graph = Rc::clone(&graph);
+        let state = Rc::clone(&state);
+        let toggle_button = toggle_button.clone();
+        let control_status = control_status.clone();
+        add_event_listener(seek_forward_button.as_ref(), "click", move |_| {
+            seek_browser_audio(
+                &graph,
+                &state,
+                WEB_SEEK_STEP_SECONDS,
+                &toggle_button,
+                &control_status,
+            );
+        })?;
+    }
+
+    {
+        let state = Rc::clone(&state);
+        let toggle_button = toggle_button.clone();
+        let control_status = control_status.clone();
+        let motion_input = motion_input.clone();
+        add_event_listener(motion_input.clone().as_ref(), "change", move |_| {
+            {
+                let mut state = state.borrow_mut();
+                state.motion_enabled = motion_input.checked();
+                state.focus = WebFocus::Motion;
+                state.status = motion_status_text(state.motion_enabled).to_string();
+            }
+            let state_ref = state.borrow();
+            sync_controls(&toggle_button, &control_status, &state_ref);
+        })?;
+    }
+
     wire_keyboard_events(
         document,
         Rc::clone(&graph),
         Rc::clone(&state),
-        toggle_button.clone(),
-        control_status.clone(),
-        file_input,
-        url_input,
+        WebKeyboardControls {
+            toggle_button: toggle_button.clone(),
+            control_status: control_status.clone(),
+            file_input,
+            url_input,
+            motion_input,
+        },
     )?;
 
     wire_audio_events(&graph.audio, state, toggle_button, control_status)?;
@@ -755,10 +1091,7 @@ fn wire_keyboard_events(
     document: &Document,
     graph: Rc<AudioGraph>,
     state: Rc<RefCell<WebAppState>>,
-    toggle_button: HtmlButtonElement,
-    control_status: HtmlElement,
-    file_input: HtmlInputElement,
-    url_input: HtmlInputElement,
+    controls: WebKeyboardControls,
 ) -> Result<(), JsValue> {
     add_event_listener(document.as_ref(), "keydown", move |event| {
         let Ok(keyboard_event) = event.dyn_into::<KeyboardEvent>() else {
@@ -767,7 +1100,10 @@ fn wire_keyboard_events(
         if keyboard_event
             .target()
             .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-            .is_some_and(|element| element.id() == "amp808-url" && keyboard_event.key() != "Escape")
+            .is_some_and(|element| {
+                matches!(element.id().as_str(), "amp808-url" | "amp808-motion")
+                    && keyboard_event.key() != "Escape"
+            })
         {
             return;
         }
@@ -785,18 +1121,26 @@ fn wire_keyboard_events(
             WebAction::TogglePlayback => toggle_browser_playback(
                 Rc::clone(&graph),
                 Rc::clone(&state),
-                toggle_button.clone(),
-                control_status.clone(),
+                controls.toggle_button.clone(),
+                controls.control_status.clone(),
             ),
             WebAction::FocusLocalFile => {
-                file_input.click();
+                controls.file_input.click();
                 let state_ref = state.borrow();
-                sync_controls(&toggle_button, &control_status, &state_ref);
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
             }
             WebAction::FocusHostedUrl => {
-                let _ = url_input.focus();
+                let _ = controls.url_input.focus();
                 let state_ref = state.borrow();
-                sync_controls(&toggle_button, &control_status, &state_ref);
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
             }
             WebAction::CycleVisualMode => {
                 {
@@ -804,14 +1148,81 @@ fn wire_keyboard_events(
                     state.status = "Visualizer focus selected".to_string();
                 }
                 let state_ref = state.borrow();
-                sync_controls(&toggle_button, &control_status, &state_ref);
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
             }
+            WebAction::ToggleMotion => {
+                {
+                    let mut state = state.borrow_mut();
+                    state.motion_enabled =
+                        web_motion_enabled_after_action(state.motion_enabled, action);
+                    state.status = motion_status_text(state.motion_enabled).to_string();
+                    controls.motion_input.set_checked(state.motion_enabled);
+                }
+                let state_ref = state.borrow();
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
+            }
+            WebAction::SeekBack => seek_browser_audio(
+                &graph,
+                &state,
+                -WEB_SEEK_STEP_SECONDS,
+                &controls.toggle_button,
+                &controls.control_status,
+            ),
+            WebAction::SeekForward => seek_browser_audio(
+                &graph,
+                &state,
+                WEB_SEEK_STEP_SECONDS,
+                &controls.toggle_button,
+                &controls.control_status,
+            ),
             WebAction::ClearFocus => {
                 let state_ref = state.borrow();
-                sync_controls(&toggle_button, &control_status, &state_ref);
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
             }
         }
     })
+}
+
+fn seek_browser_audio(
+    graph: &AudioGraph,
+    state: &Rc<RefCell<WebAppState>>,
+    delta_seconds: f64,
+    toggle_button: &HtmlButtonElement,
+    control_status: &HtmlElement,
+) {
+    if state.borrow().source.is_none() {
+        {
+            let mut state = state.borrow_mut();
+            state.status = "Load audio before seeking".to_string();
+        }
+        let state_ref = state.borrow();
+        sync_controls(toggle_button, control_status, &state_ref);
+        return;
+    }
+
+    let duration = finite_duration(&graph.audio);
+    let target = web_seek_target_seconds(graph.audio.current_time(), duration, delta_seconds);
+    graph.audio.set_current_time(target);
+    {
+        let mut state = state.borrow_mut();
+        state.current_time = target;
+        state.duration = duration;
+        state.status = format!("Seeked to {}", format_seconds(target));
+    }
+    let state_ref = state.borrow();
+    sync_controls(toggle_button, control_status, &state_ref);
 }
 
 fn toggle_browser_playback(
@@ -898,6 +1309,7 @@ fn wire_audio_events(
             state.transport = TransportState::Playing;
             state.status = "Playback running from browser audio".to_string();
             state.error = None;
+            state.last_bpm_sample_ms = None;
             sync_controls(&toggle_button, &control_status, &state);
         })?;
     }
@@ -926,6 +1338,9 @@ fn wire_audio_events(
             state.transport = TransportState::Ended;
             state.status = "Playback ended".to_string();
             state.bands = vec![0.0; BAND_COUNT];
+            state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
+            state.bpm = WebBpmState::unavailable();
+            state.last_bpm_sample_ms = None;
             sync_controls(&toggle_button, &control_status, &state);
         })?;
     }
@@ -956,10 +1371,28 @@ fn sample_analyser(graph: &AudioGraph, state: &Rc<RefCell<WebAppState>>) {
     let mut bins = vec![0; graph.analyser.frequency_bin_count() as usize];
     graph.analyser.get_byte_frequency_data(&mut bins);
     let bands = analyser_bins_to_bands(&bins, BAND_COUNT);
-    state.borrow_mut().bands = bands;
+    let mut waveform_bins = vec![128; graph.analyser.frequency_bin_count() as usize];
+    graph.analyser.get_byte_time_domain_data(&mut waveform_bins);
+    let waveform = waveform_bytes_to_samples(&waveform_bins, WAVEFORM_SAMPLE_COUNT);
+    let now_ms = js_sys::Date::now();
+    let mut state = state.borrow_mut();
+    let hop_seconds = state
+        .last_bpm_sample_ms
+        .map(|last_ms| ((now_ms - last_ms) / 1000.0).clamp(0.01, 0.12))
+        .unwrap_or(WEB_BPM_DEFAULT_HOP_SECONDS);
+    state.last_bpm_sample_ms = Some(now_ms);
+    state
+        .bpm
+        .update_from_time_domain_bytes(&waveform_bins, hop_seconds, true);
+    state.bands = bands;
+    state.waveform = waveform;
 }
 
 fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRuntime) {
+    let tick = fx.next_tick(js_sys::Date::now());
+    if !state.motion_enabled {
+        fx.clear_effects();
+    }
     let area = frame.area();
     let block = Block::default()
         .title(" AMP808 WEB ")
@@ -970,6 +1403,7 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
         )
         .style(classic_faceplate_style())
         .borders(Borders::ALL)
+        .border_set(web_panel_border_set())
         .border_style(classic_line_style());
 
     let inner = block.inner(area);
@@ -985,42 +1419,26 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
         .split(inner);
 
     render_machine_header(frame, rows[0], state);
-    if let Some(effect) = fx.header_effect(state.transport) {
-        frame.render_effect(effect, rows[0], tachyonfx::Duration::from_millis(50));
+    if state.motion_enabled {
+        if let Some(effect) = fx.header_effect(state.transport) {
+            frame.render_effect(effect, rows[0], tick);
+        }
     }
 
     if rows[1].width < 90 {
-        let deck_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(12),
-                Constraint::Length(7),
-                Constraint::Min(7),
-                Constraint::Length(5),
-            ])
-            .split(rows[1]);
-        render_left_control_panel(frame, deck_rows[0], state, fx);
-        render_knob_bank(frame, deck_rows[1], state, fx);
-        render_visualizer(frame, deck_rows[2], state, fx);
-        render_step_strip(frame, deck_rows[3], state, fx);
+        let deck_rows = web_compact_deck_layout(rows[1]);
+        render_left_control_panel(frame, deck_rows[0], state, fx, tick);
+        render_knob_bank(frame, deck_rows[1], state, fx, tick);
+        render_visualizer(frame, deck_rows[2], state, fx, tick);
+        render_step_strip(frame, deck_rows[3], state, fx, tick);
     } else {
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(24)])
-            .split(rows[1]);
-        render_left_control_panel(frame, body[0], state, fx);
+        let body = web_desktop_body_layout(rows[1]);
+        render_left_control_panel(frame, body[0], state, fx, tick);
 
-        let deck_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Min(7),
-                Constraint::Length(5),
-            ])
-            .split(body[1]);
-        render_knob_bank(frame, deck_rows[0], state, fx);
-        render_visualizer(frame, deck_rows[1], state, fx);
-        render_step_strip(frame, deck_rows[2], state, fx);
+        let deck_rows = web_desktop_deck_layout(body[1]);
+        render_knob_bank(frame, deck_rows[0], state, fx, tick);
+        render_visualizer(frame, deck_rows[1], state, fx, tick);
+        render_step_strip(frame, deck_rows[2], state, fx, tick);
     }
 
     let compact_status = "Load audio or CORS URL";
@@ -1040,18 +1458,65 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
     ]))
     .alignment(Alignment::Center);
     frame.render_widget(footer, rows[2]);
+    if state.motion_enabled {
+        if let Some(effect) = fx.transition_effect(state.transport) {
+            frame.render_effect(effect, rows[2], tick);
+        }
+    }
+}
+
+fn web_compact_deck_layout(area: Rect) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .spacing(WEB_PANE_GAP)
+        .constraints([
+            Constraint::Length(12),
+            Constraint::Length(7),
+            Constraint::Min(7),
+            Constraint::Length(5),
+        ])
+        .split(area)
+        .to_vec()
+}
+
+fn web_desktop_body_layout(area: Rect) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .spacing(WEB_PANE_GAP)
+        .constraints([Constraint::Length(28), Constraint::Min(24)])
+        .split(area)
+        .to_vec()
+}
+
+fn web_desktop_deck_layout(area: Rect) -> Vec<Rect> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .spacing(WEB_PANE_GAP)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(7),
+            Constraint::Length(5),
+        ])
+        .split(area)
+        .to_vec()
 }
 
 fn command_strip_line(state: &WebAppState) -> Line<'static> {
     Line::from(vec![
         Span::styled("SPC", command_key_style(state.focus == WebFocus::Transport)),
         Span::styled(" PLAY  ", classic_small_label_style()),
+        Span::styled("<", command_key_style(state.focus == WebFocus::Transport)),
+        Span::styled(" -15  ", classic_small_label_style()),
+        Span::styled(">", command_key_style(state.focus == WebFocus::Transport)),
+        Span::styled(" +15  ", classic_small_label_style()),
         Span::styled("L", command_key_style(state.focus == WebFocus::LocalFile)),
         Span::styled(" FILE  ", classic_small_label_style()),
         Span::styled("U", command_key_style(state.focus == WebFocus::HostedUrl)),
         Span::styled(" URL  ", classic_small_label_style()),
         Span::styled("V", command_key_style(state.focus == WebFocus::Analyser)),
         Span::styled(" VIS  ", classic_small_label_style()),
+        Span::styled("M", command_key_style(state.focus == WebFocus::Motion)),
+        Span::styled(" MOT  ", classic_small_label_style()),
         Span::styled("ESC", command_key_style(false)),
         Span::styled(" HOME", classic_small_label_style()),
     ])
@@ -1118,16 +1583,18 @@ fn render_808_panel(
     area: Rect,
     spec: WebPanelSpec,
     effect: Option<&mut tachyonfx::Effect>,
+    tick: tachyonfx::Duration,
 ) -> Rect {
     let block = Block::default()
         .title(panel_title(spec))
         .style(classic_faceplate_style())
         .borders(Borders::ALL)
+        .border_set(web_panel_border_set())
         .border_style(panel_border_style(spec.state));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if let Some(effect) = effect {
-        frame.render_effect(effect, area, tachyonfx::Duration::from_millis(50));
+        frame.render_effect(effect, area, tick);
     }
     inner
 }
@@ -1173,28 +1640,59 @@ fn panel_border_style(state: PanelState) -> Style {
     })
 }
 
+fn web_panel_border_set() -> border::Set<'static> {
+    border::Set {
+        top_left: "▛",
+        top_right: "▜",
+        bottom_left: "▙",
+        bottom_right: "▟",
+        horizontal_top: "━",
+        horizontal_bottom: "━",
+        vertical_left: "┃",
+        vertical_right: "┃",
+    }
+}
+
 fn render_left_control_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &WebAppState,
     fx: &mut WebFxRuntime,
+    tick: tachyonfx::Duration,
 ) {
     let spec = web_panel_spec(PanelRole::Transport, state);
-    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
+    let effect = state
+        .motion_enabled
+        .then(|| fx.panel_effect(spec))
+        .flatten();
+    let inner = render_808_panel(frame, area, spec, effect, tick);
 
     if inner.width < 18 || inner.height < 8 {
         render_left_control_fallback(frame, inner, state);
         return;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+    let expanded_recent = inner.height >= 18;
+    let rows = if expanded_recent {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(5),
+                Constraint::Min(3),
+                Constraint::Length(2),
+            ])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(3),
+                Constraint::Length(2),
+            ])
+            .split(inner)
+    };
 
     let status_lines = vec![
         Line::from(vec![
@@ -1220,7 +1718,15 @@ fn render_left_control_panel(
     ];
     frame.render_widget(Paragraph::new(Text::from(status_lines)), rows[0]);
 
-    render_tempo_dial(frame, rows[1], 0.5, "120");
+    let (dial_area, controls_area) = if expanded_recent {
+        render_recent_sources(frame, rows[1], &state.recent_sources);
+        (rows[2], rows[3])
+    } else {
+        (rows[1], rows[2])
+    };
+
+    let tempo = web_tempo_display(state.bpm.display_state());
+    render_tempo_dial(frame, dial_area, tempo.normalized, &tempo.label);
 
     let control_lines = vec![
         Line::from(vec![
@@ -1229,11 +1735,48 @@ fn render_left_control_panel(
         ]),
         Line::from(vec![
             Span::styled("PATTERN A/B ", classic_small_label_style()),
-            Span::styled("A ", active_lamp_style()),
+            Span::styled("A ", active_lamp_style(0.0)),
             Span::styled("B", inactive_lamp_style()),
         ]),
     ];
-    frame.render_widget(Paragraph::new(Text::from(control_lines)), rows[2]);
+    frame.render_widget(Paragraph::new(Text::from(control_lines)), controls_area);
+}
+
+fn render_recent_sources(frame: &mut Frame<'_>, area: Rect, recent_sources: &[WebAudioSource]) {
+    if area.height == 0 || area.width < 8 {
+        return;
+    }
+
+    let mut lines = vec![Line::from(Span::styled(
+        "RECENT SOURCES",
+        classic_small_label_style().add_modifier(Modifier::BOLD),
+    ))];
+    let entry_count = usize::from(area.height.saturating_sub(1)).min(recent_sources.len());
+
+    if entry_count == 0 {
+        lines.push(Line::from(Span::styled(
+            "--",
+            Style::default().fg(Classic808Palette::DIM.ratatui()),
+        )));
+    } else {
+        let label_width = usize::from(area.width.saturating_sub(3)).max(2);
+        for (index, source) in recent_sources.iter().take(entry_count).enumerate() {
+            let style = if source.is_hosted_url() {
+                Style::default().fg(Classic808Palette::AMBER.ratatui())
+            } else {
+                Style::default().fg(Classic808Palette::IVORY.ratatui())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", index + 1),
+                    Style::default().fg(Classic808Palette::YELLOW.ratatui()),
+                ),
+                Span::styled(recent_source_display_label(source, label_width), style),
+            ]));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn render_left_control_fallback(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
@@ -1254,11 +1797,14 @@ fn render_left_control_fallback(frame: &mut Frame<'_>, area: Rect, state: &WebAp
         ]),
         Line::from(vec![
             Span::styled("TEMPO ", classic_small_label_style()),
-            Span::styled("120 BPM", classic_value_style()),
+            Span::styled(
+                format!("{} BPM", web_tempo_display(state.bpm.display_state()).label),
+                classic_value_style(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("PATTERN ", classic_small_label_style()),
-            Span::styled("A ", active_lamp_style()),
+            Span::styled("A ", active_lamp_style(0.0)),
             Span::styled("B", inactive_lamp_style()),
         ]),
     ];
@@ -1337,7 +1883,7 @@ fn render_tempo_dial(frame: &mut Frame<'_>, area: Rect, bpm_norm: f64, bpm_label
                     y1: (geometry.radius + 0.35) * angle.sin(),
                     x2: (geometry.radius + 0.9) * angle.cos(),
                     y2: (geometry.radius + 0.9) * angle.sin(),
-                    color: Classic808Palette::DIM.ratatui(),
+                    color: tempo_tick_color_808(),
                 });
             }
 
@@ -1382,8 +1928,9 @@ struct TempoDialGeometry808 {
 fn tempo_dial_geometry_808(area: Rect) -> TempoDialGeometry808 {
     const Y_HALF: f64 = 9.0;
     const LABEL_PAD: f64 = 1.5;
+    const ROUNDING_CORRECTION: f64 = 1.45;
     let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
-    let x_half = (Y_HALF * visual_ratio).max(4.8);
+    let x_half = (Y_HALF * visual_ratio * ROUNDING_CORRECTION).clamp(6.0, 15.0);
     let radius = (x_half.min(Y_HALF) - LABEL_PAD - 0.2).clamp(2.2, 6.2);
     TempoDialGeometry808 {
         x_bounds: [-x_half, x_half],
@@ -1402,9 +1949,23 @@ fn dial_arc_color(position: f64) -> Color {
     }
 }
 
-fn render_knob_bank(frame: &mut Frame<'_>, area: Rect, state: &WebAppState, fx: &mut WebFxRuntime) {
+fn tempo_tick_color_808() -> Color {
+    Classic808Palette::GREY.ratatui()
+}
+
+fn render_knob_bank(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &WebAppState,
+    fx: &mut WebFxRuntime,
+    tick: tachyonfx::Duration,
+) {
     let spec = web_panel_spec(PanelRole::Instrument, state);
-    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
+    let effect = state
+        .motion_enabled
+        .then(|| fx.panel_effect(spec))
+        .flatten();
+    let inner = render_808_panel(frame, area, spec, effect, tick);
     let specs = instrument_control_specs();
     let visible = (usize::from(inner.width) / 6).clamp(1, specs.len());
     let specs = &specs[..visible];
@@ -1477,7 +2038,7 @@ fn render_canvas_knob(
     let end_angle = (-30.0_f64).to_radians();
     let sweep = start_angle - end_angle;
     let val_angle = start_angle - value * sweep;
-    let radius = 3.5;
+    let radius = 3.85;
     let accent = if selected {
         Classic808Palette::YELLOW.ratatui()
     } else {
@@ -1580,8 +2141,9 @@ fn abbreviate_parameter_label(label: &'static str) -> &'static str {
 
 fn knob_canvas_bounds_808(area: Rect) -> ([f64; 2], [f64; 2]) {
     const Y_HALF: f64 = 4.0;
+    const ROUNDING_CORRECTION: f64 = 1.30;
     let visual_ratio = area.width as f64 / (area.height.max(1) as f64 * 2.0);
-    let x_half = (Y_HALF * visual_ratio).max(3.8);
+    let x_half = (Y_HALF * visual_ratio * ROUNDING_CORRECTION).clamp(4.2, 12.0);
     ([-x_half, x_half], [-Y_HALF, Y_HALF])
 }
 
@@ -1597,9 +2159,14 @@ fn render_visualizer(
     area: Rect,
     state: &WebAppState,
     fx: &mut WebFxRuntime,
+    tick: tachyonfx::Duration,
 ) {
     let spec = web_panel_spec(PanelRole::Analyser, state);
-    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
+    let effect = state
+        .motion_enabled
+        .then(|| fx.panel_effect(spec))
+        .flatten();
+    let inner = render_808_panel(frame, area, spec, effect, tick);
     let bands = &state.bands;
 
     if inner.height == 0 || inner.width < 2 || bands.is_empty() {
@@ -1611,13 +2178,45 @@ fn render_visualizer(
         return;
     }
 
-    let visible_bands = (usize::from(inner.width) / 2).clamp(1, bands.len());
-    let bands = &bands[..visible_bands];
-    let heights = analyser_bands_to_heights(bands, inner.height);
-    let mut lines = Vec::with_capacity(usize::from(inner.height));
+    if inner.height >= 9 {
+        let scope_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        render_spectrum_bars(frame, scope_rows[0], bands);
+        render_waveform_trace(frame, scope_rows[1], &state.waveform);
+        render_audio_progress_row(frame, scope_rows[2], state);
+    } else if inner.height >= 5 {
+        let scope_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(inner);
+        render_spectrum_bars(frame, scope_rows[0], bands);
+        render_audio_progress_row(frame, scope_rows[1], state);
+    } else {
+        render_spectrum_bars(frame, inner, bands);
+    }
+}
 
-    for row in (1..=inner.height).rev() {
-        let row_ratio = f64::from(row) / f64::from(inner.height.max(1));
+fn render_spectrum_bars(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
+    if area.height == 0 || area.width < 2 {
+        return;
+    }
+
+    let bands = analyser_bands_for_scope_width(bands, area.width);
+    if bands.is_empty() {
+        return;
+    }
+
+    let heights = analyser_bands_to_heights(&bands, area.height);
+    let mut lines = Vec::with_capacity(usize::from(area.height));
+
+    for row in (1..=area.height).rev() {
+        let row_ratio = f64::from(row) / f64::from(area.height.max(1));
         let style = spectrum_style(row_ratio);
         let mut spans = Vec::with_capacity(heights.len());
         for height in &heights {
@@ -1628,7 +2227,90 @@ fn render_visualizer(
     }
 
     let visualizer = Paragraph::new(Text::from(lines)).alignment(Alignment::Center);
-    frame.render_widget(visualizer, inner);
+    frame.render_widget(visualizer, area);
+}
+
+fn render_waveform_trace(frame: &mut Frame<'_>, area: Rect, waveform: &[f32]) {
+    if area.height < 2 || area.width < 4 || waveform.is_empty() {
+        return;
+    }
+
+    let x_half = (area.width as f64 / 2.0).max(4.0);
+    let y_half = 1.25;
+    let samples = resample_f32(waveform, usize::from(area.width.max(1)));
+    let canvas = Canvas::default()
+        .x_bounds([-x_half, x_half])
+        .y_bounds([-y_half, y_half])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            if samples.len() < 2 {
+                return;
+            }
+
+            let last = samples.len() - 1;
+            for index in 0..last {
+                let x1 = -x_half + (index as f64 / last as f64) * x_half * 2.0;
+                let x2 = -x_half + ((index + 1) as f64 / last as f64) * x_half * 2.0;
+                let y1 = f64::from(samples[index]).clamp(-1.0, 1.0);
+                let y2 = f64::from(samples[index + 1]).clamp(-1.0, 1.0);
+                let energy =
+                    ((samples[index].abs() + samples[index + 1].abs()) / 2.0).clamp(0.0, 1.0);
+                ctx.draw(&CanvasLine {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: mix_rgb(
+                        Classic808Palette::AMBER.ratatui(),
+                        Classic808Palette::YELLOW.ratatui(),
+                        energy,
+                    ),
+                });
+            }
+        });
+
+    frame.render_widget(canvas, area);
+}
+
+fn render_audio_progress_row(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    if area.width < 12 || area.height == 0 {
+        return;
+    }
+
+    let fraction = playback_progress_fraction(state.current_time, state.duration);
+    let bar_width = usize::from(area.width.saturating_sub(18)).clamp(4, 42);
+    let filled = (fraction * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+    let line = Line::from(vec![
+        Span::styled("TIME ", classic_small_label_style()),
+        Span::styled(
+            format!(
+                "{:<13}",
+                format_time_status(state.current_time, state.duration)
+            ),
+            classic_value_style(),
+        ),
+        Span::styled(
+            " ".repeat(filled),
+            Style::default().bg(Classic808Palette::YELLOW.ratatui()),
+        ),
+        Span::styled(
+            " ".repeat(empty),
+            Style::default().bg(Classic808Palette::OLIVE.ratatui()),
+        ),
+    ]);
+
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
+}
+
+fn playback_progress_fraction(current_time: f64, duration: Option<f64>) -> f64 {
+    let Some(duration) = duration.filter(|duration| duration.is_finite() && *duration > 0.0) else {
+        return 0.0;
+    };
+    if !current_time.is_finite() {
+        return 0.0;
+    }
+    (current_time.max(0.0) / duration).clamp(0.0, 1.0)
 }
 
 fn render_analyser_empty_state(
@@ -1669,9 +2351,14 @@ fn render_step_strip(
     area: Rect,
     state: &WebAppState,
     fx: &mut WebFxRuntime,
+    tick: tachyonfx::Duration,
 ) {
     let spec = web_panel_spec(PanelRole::Steps, state);
-    let inner = render_808_panel(frame, area, spec, fx.panel_effect(spec));
+    let effect = state
+        .motion_enabled
+        .then(|| fx.panel_effect(spec))
+        .flatten();
+    let inner = render_808_panel(frame, area, spec, effect, tick);
     let bands = &state.bands;
 
     if inner.width < 32 {
@@ -1687,18 +2374,18 @@ fn render_step_strip(
             classic_small_label_style(),
         ));
         let energy = bands.get(step).copied().unwrap_or_default();
-        let active = energy > 0.08;
+        let glow = step_glow_intensity(state.transport, energy);
         pads.push(Span::styled(
             " ## ",
-            Style::default()
-                .fg(classic_pad_color(classic_pad_family(step), active))
-                .add_modifier(if active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+            step_pad_glow_style(classic_pad_family(step), glow),
         ));
     }
+
+    let lamp_glow = bands
+        .iter()
+        .copied()
+        .map(|energy| step_glow_intensity(state.transport, energy))
+        .fold(0.0, f32::max);
 
     let lines = vec![
         Line::from(numbers),
@@ -1706,7 +2393,7 @@ fn render_step_strip(
         Line::from(vec![
             Span::styled("START / STOP  ", classic_small_label_style()),
             Span::styled("TAP  ", classic_pad_style(ClassicPadFamily::Ivory)),
-            Span::styled("A", active_lamp_style()),
+            Span::styled("A", active_lamp_style(lamp_glow)),
             Span::styled(" B", inactive_lamp_style()),
         ]),
     ];
@@ -1735,6 +2422,13 @@ fn spectrum_style(row_ratio: f64) -> Style {
         Classic808Palette::YELLOW.ratatui()
     };
     Style::default().fg(color)
+}
+
+fn step_glow_intensity(transport: TransportState, energy: f32) -> f32 {
+    if transport != TransportState::Playing {
+        return 0.0;
+    }
+    ((energy - 0.08) / 0.84).clamp(0.0, 1.0)
 }
 
 fn classic_faceplate_style() -> Style {
@@ -1797,9 +2491,14 @@ fn instrument_family_bg(family: ClassicPadFamily) -> Color {
     }
 }
 
-fn active_lamp_style() -> Style {
+fn active_lamp_style(glow: f32) -> Style {
+    let glow = glow.clamp(0.0, 1.0);
     Style::default()
-        .fg(Classic808Palette::RED_TEXT.ratatui())
+        .fg(mix_rgb(
+            Classic808Palette::RED_TEXT.ratatui(),
+            Classic808Palette::YELLOW.ratatui(),
+            glow * 0.45,
+        ))
         .add_modifier(Modifier::BOLD)
 }
 
@@ -1811,6 +2510,22 @@ fn classic_pad_style(family: ClassicPadFamily) -> Style {
     Style::default()
         .fg(classic_pad_color(family, true))
         .add_modifier(Modifier::BOLD)
+}
+
+fn step_pad_glow_style(family: ClassicPadFamily, glow: f32) -> Style {
+    let glow = glow.clamp(0.0, 1.0);
+    let base = classic_pad_color(family, false);
+    let active = classic_pad_color(family, true);
+    let hot = match family {
+        ClassicPadFamily::Red | ClassicPadFamily::Orange => Classic808Palette::YELLOW.ratatui(),
+        ClassicPadFamily::Yellow | ClassicPadFamily::Ivory => Classic808Palette::IVORY.ratatui(),
+    };
+    let color = mix_rgb(mix_rgb(base, active, 0.45 + glow * 0.4), hot, glow * 0.28);
+    Style::default().fg(color).add_modifier(if glow > 0.0 {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    })
 }
 
 fn classic_pad_color(family: ClassicPadFamily, active: bool) -> Color {
@@ -1853,6 +2568,14 @@ fn finite_duration(audio: &HtmlAudioElement) -> Option<f64> {
     duration.is_finite().then_some(duration)
 }
 
+fn motion_status_text(enabled: bool) -> &'static str {
+    if enabled {
+        "Motion effects enabled"
+    } else {
+        "Reduced motion enabled"
+    }
+}
+
 fn sync_controls(button: &HtmlButtonElement, status: &HtmlElement, state: &WebAppState) {
     button.set_disabled(state.source.is_none());
     let label = if state.transport == TransportState::Playing {
@@ -1874,6 +2597,9 @@ fn set_error(
     state.transport = TransportState::Error;
     state.error = Some(message);
     state.bands = vec![0.0; BAND_COUNT];
+    state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
+    state.bpm = WebBpmState::unavailable();
+    state.last_bpm_sample_ms = None;
     sync_controls(button, status, &state);
 }
 
@@ -1912,13 +2638,20 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        analyser_empty_state_text, classic_pad_family, contrast_ratio, instrument_control_specs,
-        instrument_family_bg, instrument_family_fg, web_action_for_key, web_focus_after_action,
-        web_header_fx_signature, web_panel_fx_signature, web_panel_spec, Classic808Palette,
-        ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction,
-        WebAppState, WebFocus,
+        analyser_bands_for_scope_width, analyser_empty_state_text, classic_pad_family,
+        contrast_ratio, hosted_recent_urls, instrument_control_specs, instrument_family_bg,
+        instrument_family_fg, knob_canvas_bounds_808, playback_progress_fraction,
+        recent_source_display_label, remember_recent_source, step_glow_intensity,
+        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
+        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
+        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
+        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
+        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
+        WebAction, WebAppState, WebAudioSource, WebFocus,
     };
-    use ratzilla::ratatui::style::Color;
+    use amp808_core::web_audio::WebBpmDisplayState;
+    use ratzilla::ratatui::{layout::Rect, style::Color};
 
     #[test]
     fn classic_pad_family_matches_tr_808_step_groups() {
@@ -2016,6 +2749,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn instrument_knob_canvas_bounds_tighten_wide_slots_toward_round_dials() {
+        let area = Rect::new(0, 0, 12, 4);
+        let (x_bounds, y_bounds) = knob_canvas_bounds_808(area);
+        let x_span = x_bounds[1] - x_bounds[0];
+        let y_span = y_bounds[1] - y_bounds[0];
+        let rendered_aspect = area.width as f64 * y_span / (area.height as f64 * x_span);
+
+        assert!(
+            (1.15..=1.55).contains(&rendered_aspect),
+            "instrument knobs should render rounder than a wide arch; got aspect {rendered_aspect:.2}"
+        );
+    }
+
+    #[test]
+    fn tempo_dial_geometry_tightens_left_panel_gauge_toward_rounder_footprint() {
+        let area = Rect::new(0, 0, 26, 18);
+        let geometry = tempo_dial_geometry_808(area);
+        let x_span = geometry.x_bounds[1] - geometry.x_bounds[0];
+        let y_span = geometry.y_bounds[1] - geometry.y_bounds[0];
+        let rendered_aspect = area.width as f64 * y_span / (area.height as f64 * x_span);
+
+        assert!(
+            (1.15..=1.55).contains(&rendered_aspect),
+            "tempo gauge should render rounder than a wide arch; got aspect {rendered_aspect:.2}"
+        );
+        assert!(
+            geometry.radius >= 5.0,
+            "tempo gauge should stay bold enough to fill its panel; got radius {:.2}",
+            geometry.radius
+        );
+    }
+
+    #[test]
+    fn tempo_tick_marks_use_readable_grey_on_faceplate() {
+        assert!(
+            contrast_ratio(
+                color_to_classic(tempo_tick_color_808()),
+                Classic808Palette::FACEPLATE,
+            ) >= 4.5,
+            "tempo gauge tick marks should be visible on the black faceplate"
+        );
+    }
+
+    #[test]
+    fn web_tempo_display_maps_bpm_state_to_dial_label_and_position() {
+        let locked = web_tempo_display(WebBpmDisplayState::Locked(120));
+        assert_eq!(locked.label, "120");
+        assert!((locked.normalized - 0.4167).abs() < 0.01);
+
+        let estimating = web_tempo_display(WebBpmDisplayState::Estimating);
+        assert_eq!(estimating.label, "EST");
+        assert_eq!(estimating.normalized, 0.5);
+
+        let unavailable = web_tempo_display(WebBpmDisplayState::Unavailable);
+        assert_eq!(unavailable.label, "--");
+        assert_eq!(unavailable.normalized, 0.5);
+    }
+
     fn color_to_classic(color: Color) -> ClassicColor {
         match color {
             Color::Rgb(red, green, blue) => ClassicColor { red, green, blue },
@@ -2080,11 +2872,113 @@ mod tests {
     }
 
     #[test]
+    fn recent_sources_are_newest_first_deduped_and_capped() {
+        let mut recent = Vec::new();
+
+        for label in ["one.mp3", "two.mp3", "three.mp3", "four.mp3"] {
+            remember_recent_source(&mut recent, WebAudioSource::local_file(label));
+        }
+        remember_recent_source(
+            &mut recent,
+            WebAudioSource::hosted_url("https://example.com/a.mp3"),
+        );
+        remember_recent_source(&mut recent, WebAudioSource::local_file("two.mp3"));
+
+        let labels = recent.iter().map(WebAudioSource::label).collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "two.mp3",
+                "https://example.com/a.mp3",
+                "four.mp3",
+                "three.mp3"
+            ]
+        );
+    }
+
+    #[test]
+    fn hosted_recent_urls_exclude_browser_selected_local_files() {
+        let recent = vec![
+            WebAudioSource::local_file("break.wav"),
+            WebAudioSource::hosted_url("https://example.com/a.mp3"),
+            WebAudioSource::local_file("hat.wav"),
+            WebAudioSource::hosted_url("https://cdn.example.com/b.ogg"),
+        ];
+
+        assert_eq!(
+            hosted_recent_urls(&recent),
+            vec![
+                "https://example.com/a.mp3".to_string(),
+                "https://cdn.example.com/b.ogg".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_source_display_labels_keep_source_kind_visible() {
+        assert_eq!(
+            recent_source_display_label(&WebAudioSource::local_file("break.wav"), 12),
+            "F break.wav"
+        );
+        assert_eq!(
+            recent_source_display_label(
+                &WebAudioSource::hosted_url("https://example.com/a.mp3"),
+                12
+            ),
+            "U https://e~"
+        );
+    }
+
+    #[test]
+    fn web_desktop_layout_leaves_gutters_between_heavy_borders() {
+        let body = web_desktop_body_layout(Rect::new(0, 0, 120, 40));
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[1].x, body[0].x + body[0].width + 1);
+
+        let deck = web_desktop_deck_layout(Rect::new(30, 0, 90, 40));
+        assert_eq!(deck.len(), 3);
+        assert_eq!(deck[1].y, deck[0].y + deck[0].height + 1);
+        assert_eq!(deck[2].y, deck[1].y + deck[1].height + 1);
+    }
+
+    #[test]
+    fn web_compact_layout_leaves_vertical_gutters_between_panels() {
+        let deck = web_compact_deck_layout(Rect::new(0, 0, 80, 40));
+
+        assert_eq!(deck.len(), 4);
+        assert_eq!(deck[1].y, deck[0].y + deck[0].height + 1);
+        assert_eq!(deck[2].y, deck[1].y + deck[1].height + 1);
+        assert_eq!(deck[3].y, deck[2].y + deck[2].height + 1);
+    }
+
+    #[test]
     fn web_panel_fx_signature_only_traces_active_or_error_panels() {
         assert_eq!(web_panel_fx_signature(PanelState::Idle), None);
         assert_eq!(web_panel_fx_signature(PanelState::Armed), None);
-        assert_eq!(web_panel_fx_signature(PanelState::Active), Some(900));
-        assert_eq!(web_panel_fx_signature(PanelState::Error), Some(520));
+        assert_eq!(web_panel_fx_signature(PanelState::Active), Some(1800));
+        assert_eq!(web_panel_fx_signature(PanelState::Error), Some(900));
+    }
+
+    #[test]
+    fn web_panel_border_set_uses_heavy_exabind_style_edges() {
+        let set = web_panel_border_set();
+
+        assert_eq!(set.horizontal_top, "━");
+        assert_eq!(set.vertical_left, "┃");
+        assert_eq!(set.top_left, "▛");
+        assert_eq!(set.top_right, "▜");
+        assert_eq!(set.bottom_left, "▙");
+        assert_eq!(set.bottom_right, "▟");
+    }
+
+    #[test]
+    fn web_fx_tick_ms_uses_clamped_browser_frame_delta() {
+        assert_eq!(web_fx_tick_ms(f64::NAN), 16);
+        assert_eq!(web_fx_tick_ms(0.0), 12);
+        assert_eq!(web_fx_tick_ms(16.4), 16);
+        assert_eq!(web_fx_tick_ms(16.6), 17);
+        assert_eq!(web_fx_tick_ms(250.0), 80);
     }
 
     #[test]
@@ -2098,6 +2992,36 @@ mod tests {
     }
 
     #[test]
+    fn web_transition_fx_signature_covers_load_play_and_error_changes() {
+        assert_eq!(web_transition_fx_signature(TransportState::Idle), None);
+        assert_eq!(
+            web_transition_fx_signature(TransportState::Ready),
+            Some(360)
+        );
+        assert_eq!(
+            web_transition_fx_signature(TransportState::Playing),
+            Some(320)
+        );
+        assert_eq!(web_transition_fx_signature(TransportState::Paused), None);
+        assert_eq!(web_transition_fx_signature(TransportState::Ended), None);
+        assert_eq!(
+            web_transition_fx_signature(TransportState::Error),
+            Some(520)
+        );
+    }
+
+    #[test]
+    fn step_glow_intensity_uses_analyser_energy_without_faking_idle_motion() {
+        assert_eq!(step_glow_intensity(TransportState::Idle, 0.9), 0.0);
+        assert_eq!(step_glow_intensity(TransportState::Paused, 0.9), 0.0);
+        assert_eq!(step_glow_intensity(TransportState::Error, 0.9), 0.0);
+        assert_eq!(step_glow_intensity(TransportState::Playing, 0.0), 0.0);
+        assert_eq!(step_glow_intensity(TransportState::Playing, 0.07), 0.0);
+        assert!(step_glow_intensity(TransportState::Playing, 0.5) > 0.45);
+        assert_eq!(step_glow_intensity(TransportState::Playing, 2.0), 1.0);
+    }
+
+    #[test]
     fn web_keyboard_shortcuts_map_to_terminal_actions() {
         assert_eq!(web_action_for_key(" "), Some(WebAction::TogglePlayback));
         assert_eq!(
@@ -2108,6 +3032,12 @@ mod tests {
         assert_eq!(web_action_for_key("L"), Some(WebAction::FocusLocalFile));
         assert_eq!(web_action_for_key("u"), Some(WebAction::FocusHostedUrl));
         assert_eq!(web_action_for_key("v"), Some(WebAction::CycleVisualMode));
+        assert_eq!(web_action_for_key("m"), Some(WebAction::ToggleMotion));
+        assert_eq!(web_action_for_key("ArrowLeft"), Some(WebAction::SeekBack));
+        assert_eq!(
+            web_action_for_key("ArrowRight"),
+            Some(WebAction::SeekForward)
+        );
         assert_eq!(web_action_for_key("Escape"), Some(WebAction::ClearFocus));
         assert_eq!(web_action_for_key("x"), None);
     }
@@ -2134,6 +3064,65 @@ mod tests {
             web_focus_after_action(WebFocus::Analyser, WebAction::ClearFocus),
             WebFocus::Transport
         );
+    }
+
+    #[test]
+    fn web_motion_toggle_is_runtime_state_not_a_build_flag() {
+        assert!(WebAppState::default().motion_enabled);
+        assert!(!web_motion_enabled_after_action(
+            true,
+            WebAction::ToggleMotion
+        ));
+        assert!(web_motion_enabled_after_action(
+            false,
+            WebAction::ToggleMotion
+        ));
+        assert!(web_motion_enabled_after_action(
+            true,
+            WebAction::TogglePlayback
+        ));
+    }
+
+    #[test]
+    fn web_seek_target_clamps_to_known_duration() {
+        assert_eq!(web_seek_target_seconds(42.0, Some(120.0), -15.0), 27.0);
+        assert_eq!(web_seek_target_seconds(5.0, Some(120.0), -15.0), 0.0);
+        assert_eq!(web_seek_target_seconds(118.0, Some(120.0), 15.0), 120.0);
+        assert_eq!(web_seek_target_seconds(118.0, None, 15.0), 133.0);
+        assert_eq!(web_seek_target_seconds(f64::NAN, Some(120.0), 15.0), 15.0);
+    }
+
+    #[test]
+    fn analyser_bands_expand_to_fill_wide_scope_width() {
+        let bands = analyser_bands_for_scope_width(&[0.0, 0.5, 1.0], 20);
+
+        assert_eq!(bands.len(), 10);
+        assert_eq!(bands.first().copied(), Some(0.0));
+        assert_eq!(bands.last().copied(), Some(1.0));
+        assert!(
+            bands.iter().filter(|sample| **sample == 0.5).count() >= 2,
+            "middle band should be visibly repeated across a wide scope"
+        );
+    }
+
+    #[test]
+    fn waveform_bytes_are_normalized_and_resampled_for_scope_trace() {
+        let samples = waveform_bytes_to_samples(&[0, 128, 255], 5);
+
+        assert_eq!(samples.len(), 5);
+        assert_eq!(samples.first().copied(), Some(-1.0));
+        assert!(samples.iter().any(|sample| sample.abs() < 0.01));
+        assert!(samples.last().copied().unwrap() > 0.98);
+    }
+
+    #[test]
+    fn playback_progress_fraction_uses_known_duration_only() {
+        assert_eq!(playback_progress_fraction(30.0, Some(120.0)), 0.25);
+        assert_eq!(playback_progress_fraction(150.0, Some(120.0)), 1.0);
+        assert_eq!(playback_progress_fraction(-10.0, Some(120.0)), 0.0);
+        assert_eq!(playback_progress_fraction(30.0, None), 0.0);
+        assert_eq!(playback_progress_fraction(30.0, Some(0.0)), 0.0);
+        assert_eq!(playback_progress_fraction(f64::NAN, Some(120.0)), 0.0);
     }
 
     #[test]

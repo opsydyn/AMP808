@@ -96,9 +96,9 @@ Goal: introduce motion like Exabind without compromising readability or playback
   checks.
 - [x] Port or adapt native 808 header/panel trace effects from `src/ui/view_808.rs`.
 - [x] Add active-panel border trace for the currently relevant area.
-- [ ] Add short load/play/error transition effects using fades or color shifts.
-- [ ] Add analyser-reactive glow for step keys and LEDs.
-- [ ] Add a reduced-motion switch or compile/runtime guard if motion becomes distracting.
+- [x] Add short load/play/error transition effects using fades or color shifts.
+- [x] Add analyser-reactive glow for step keys and LEDs.
+- [x] Add a reduced-motion switch or compile/runtime guard if motion becomes distracting.
 
 Acceptance:
 
@@ -110,9 +110,10 @@ Acceptance:
 
 Goal: move from “plays a single source” to a lightweight web player.
 
-- [ ] Add seek support through `HTMLAudioElement.currentTime`.
-- [ ] Add duration/progress rendering in the 808 panel.
-- [ ] Add recent source list in memory for the browser session.
+- [x] Add seek support through `HTMLAudioElement.currentTime`.
+- [x] Add duration/progress rendering in the 808 panel.
+- [x] Add recent source list in memory for the browser session.
+- [x] Add analyser-driven BPM estimation for the tempo gauge.
 - [ ] Add static demo/sample source support only if legally distributable and same-origin.
 - [ ] Improve hosted URL error states:
   - media load failed

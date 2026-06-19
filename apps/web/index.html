@@ -48,7 +48,8 @@
 
       #amp808-controls button,
       #amp808-controls input[type="url"],
-      .amp808-file {
+      .amp808-file,
+      .amp808-motion {
         border: 2px solid #050505;
         box-shadow:
           inset 0 1px 0 rgba(255, 255, 255, 0.2),
@@ -59,7 +60,8 @@
       }
 
       #amp808-controls button,
-      .amp808-file {
+      .amp808-file,
+      .amp808-motion {
         cursor: pointer;
         letter-spacing: 0;
         padding: 6px 11px;
@@ -69,6 +71,22 @@
       .amp808-file {
         background: #eeeadc;
         color: #090a08;
+      }
+
+      .amp808-motion {
+        align-items: center;
+        background: #24251d;
+        color: #eeeadc;
+        display: inline-flex;
+        gap: 7px;
+        min-height: 34px;
+      }
+
+      .amp808-motion input {
+        accent-color: #ffd400;
+        height: 16px;
+        margin: 0;
+        width: 16px;
       }
 
       #amp808-toggle {
@@ -129,15 +147,27 @@
     <section id="amp808-controls" aria-label="AMP808 web audio controls">
       <label class="amp808-file" for="amp808-file">Load audio</label>
       <input id="amp808-file" type="file" accept="audio/*" />
+      <button id="amp808-seek-back" type="button" aria-label="Seek back 15 seconds">
+        -15s
+      </button>
       <button id="amp808-toggle" type="button" disabled>Play</button>
+      <button id="amp808-seek-forward" type="button" aria-label="Seek forward 15 seconds">
+        +15s
+      </button>
       <input
         id="amp808-url"
         type="url"
         inputmode="url"
         placeholder="https://example.com/audio.mp3"
         autocomplete="off"
+        list="amp808-recent-urls"
       />
+      <datalist id="amp808-recent-urls"></datalist>
       <button id="amp808-load-url" type="button">Load URL</button>
+      <label class="amp808-motion" for="amp808-motion">
+        <input id="amp808-motion" type="checkbox" checked />
+        Motion
+      </label>
       <span id="amp808-control-status">No audio loaded</span>
     </section>
   </body>
