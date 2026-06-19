@@ -54,8 +54,10 @@ struct Classic808Palette;
 
 impl Classic808Palette {
     const FACEPLATE: ClassicColor = ClassicColor::new(0x09, 0x0a, 0x08);
+    const BODY: ClassicColor = ClassicColor::new(0xd8, 0xd0, 0xb2);
     const IVORY: ClassicColor = ClassicColor::new(0xee, 0xea, 0xdc);
     const ORANGE: ClassicColor = ClassicColor::new(0xf0, 0x5a, 0x28);
+    const BRAND_ORANGE: ClassicColor = ClassicColor::new(0x9c, 0x33, 0x19);
     const AMBER: ClassicColor = ClassicColor::new(0xf6, 0xa6, 0x23);
     const YELLOW: ClassicColor = ClassicColor::new(0xff, 0xd4, 0x00);
     const RED: ClassicColor = ClassicColor::new(0xd7, 0x26, 0x2e);
@@ -1412,15 +1414,11 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
     let area = frame.area();
     let block = Block::default()
         .title(" AMP808 WEB ")
-        .title_style(
-            Style::default()
-                .fg(Classic808Palette::ORANGE.ratatui())
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(classic_faceplate_style())
+        .title_style(hardware_brand_style())
+        .style(classic_hardware_body_style())
         .borders(Borders::ALL)
         .border_set(web_panel_border_set())
-        .border_style(classic_line_style());
+        .border_style(classic_body_border_style());
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1472,6 +1470,7 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
         command_strip_line(state),
         Line::from(Span::styled(footer_text, Style::default().fg(footer_color))),
     ]))
+    .style(classic_faceplate_style())
     .alignment(Alignment::Center);
     frame.render_widget(footer, rows[2]);
     if state.motion_enabled {
@@ -1567,7 +1566,7 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
             ),
             Span::styled(
                 "Rhythm Composer ",
-                Style::default().fg(Classic808Palette::AMBER.ratatui()),
+                hardware_body_text_style().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "TR-808 WEB",
@@ -1579,12 +1578,9 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
         Line::from(vec![
             Span::styled(
                 "SOURCE ",
-                Style::default().fg(Classic808Palette::YELLOW.ratatui()),
+                hardware_body_text_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                source_label,
-                Style::default().fg(Classic808Palette::IVORY.ratatui()),
-            ),
+            Span::styled(source_label, hardware_body_text_style()),
         ]),
     ];
 
@@ -1603,7 +1599,7 @@ fn render_808_panel(
 ) -> Rect {
     let block = Block::default()
         .title(panel_title(spec))
-        .style(classic_faceplate_style())
+        .style(classic_panel_inset_style())
         .borders(Borders::ALL)
         .border_set(web_panel_border_set())
         .border_style(panel_border_style(spec.state));
@@ -2453,8 +2449,33 @@ fn classic_faceplate_style() -> Style {
         .bg(Classic808Palette::FACEPLATE.ratatui())
 }
 
-fn classic_line_style() -> Style {
-    Style::default().fg(Classic808Palette::ORANGE.ratatui())
+fn classic_hardware_body_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::FACEPLATE.ratatui())
+        .bg(Classic808Palette::BODY.ratatui())
+}
+
+fn classic_panel_inset_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::IVORY.ratatui())
+        .bg(Classic808Palette::FACEPLATE.ratatui())
+}
+
+fn hardware_brand_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::BRAND_ORANGE.ratatui())
+        .bg(Classic808Palette::BODY.ratatui())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn hardware_body_text_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::FACEPLATE.ratatui())
+        .bg(Classic808Palette::BODY.ratatui())
+}
+
+fn classic_body_border_style() -> Style {
+    Style::default().fg(Classic808Palette::BRAND_ORANGE.ratatui())
 }
 
 fn classic_label_style() -> Style {
@@ -2655,10 +2676,11 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 mod tests {
     use super::{
         analyser_bands_for_scope_width, analyser_empty_state_text, browser_media_error_message,
-        classic_pad_family, contrast_ratio, hosted_recent_urls, instrument_control_specs,
-        instrument_family_bg, instrument_family_fg, knob_canvas_bounds_808,
-        playback_progress_fraction, recent_source_display_label, remember_recent_source,
-        step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
+        classic_body_border_style, classic_hardware_body_style, classic_pad_family,
+        classic_panel_inset_style, contrast_ratio, hardware_body_text_style, hardware_brand_style,
+        hosted_recent_urls, instrument_control_specs, instrument_family_bg, instrument_family_fg,
+        knob_canvas_bounds_808, playback_progress_fraction, recent_source_display_label,
+        remember_recent_source, step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
         waveform_bytes_to_samples, web_action_for_key, web_compact_deck_layout,
         web_desktop_body_layout, web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms,
         web_header_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
@@ -2738,6 +2760,67 @@ mod tests {
                 "{name} should pass AA contrast"
             );
         }
+    }
+
+    #[test]
+    fn hardware_body_palette_keeps_text_and_brand_readable() {
+        assert_ne!(
+            Classic808Palette::BODY,
+            Classic808Palette::IVORY,
+            "large hardware body fill should be warmer and darker than small ivory text"
+        );
+        assert!(
+            contrast_ratio(Classic808Palette::FACEPLATE, Classic808Palette::BODY) >= 4.5,
+            "black faceplate text should pass AA contrast on the cream body"
+        );
+        assert!(
+            contrast_ratio(Classic808Palette::BRAND_ORANGE, Classic808Palette::BODY) >= 4.5,
+            "body-safe brand orange should pass AA contrast on the cream body"
+        );
+        assert!(
+            contrast_ratio(Classic808Palette::BODY, Classic808Palette::FACEPLATE) >= 4.5,
+            "cream body marks should pass AA contrast on black inset panels"
+        );
+    }
+
+    #[test]
+    fn hardware_styles_separate_body_from_black_inset_panels() {
+        assert_eq!(
+            classic_hardware_body_style().bg,
+            Some(Classic808Palette::BODY.ratatui())
+        );
+        assert_eq!(
+            classic_hardware_body_style().fg,
+            Some(Classic808Palette::FACEPLATE.ratatui())
+        );
+        assert_eq!(
+            classic_panel_inset_style().bg,
+            Some(Classic808Palette::FACEPLATE.ratatui())
+        );
+        assert_eq!(
+            classic_panel_inset_style().fg,
+            Some(Classic808Palette::IVORY.ratatui())
+        );
+        assert_eq!(
+            hardware_brand_style().fg,
+            Some(Classic808Palette::BRAND_ORANGE.ratatui())
+        );
+        assert_eq!(
+            hardware_brand_style().bg,
+            Some(Classic808Palette::BODY.ratatui())
+        );
+        assert_eq!(
+            hardware_body_text_style().fg,
+            Some(Classic808Palette::FACEPLATE.ratatui())
+        );
+        assert_eq!(
+            hardware_body_text_style().bg,
+            Some(Classic808Palette::BODY.ratatui())
+        );
+        assert_eq!(
+            classic_body_border_style().fg,
+            Some(Classic808Palette::BRAND_ORANGE.ratatui())
+        );
     }
 
     #[test]
