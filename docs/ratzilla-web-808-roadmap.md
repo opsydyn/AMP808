@@ -70,12 +70,13 @@ Acceptance:
 Goal: make the UI read like a polished Ratzilla application with clear panel ownership and active
 state.
 
-- [ ] Add a reusable panel renderer for 808 sections: title tab, border style, active/inactive
+- [x] Add a reusable panel renderer for 808 sections: title tab, border style, active/inactive
   state, and optional status lamp.
-- [ ] Make active source/transport/focus visible with colored borders, not only text.
-- [ ] Add a richer instrument strip: levels, tone/decay labels, and step grouping aligned to the
+- [x] Make active transport/analyser state visible with colored borders, not only text.
+- [ ] Add terminal focus state once keyboard affordances exist.
+- [x] Add a richer instrument strip: levels, tone/decay labels, and step grouping aligned to the
   hardware reference.
-- [ ] Improve the analyser window so idle, loading, playing, paused, and error states all have
+- [x] Improve the analyser window so idle, ready, playing, paused, and error states all have
   intentional visuals.
 - [ ] Add keyboard affordances inside the terminal grid for playback, loading, and visual modes.
 - [ ] Keep browser controls below the canvas until terminal-native controls are complete and

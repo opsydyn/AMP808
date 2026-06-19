@@ -99,6 +99,155 @@ fn classic_pad_family(step_index: usize) -> ClassicPadFamily {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstrumentControlSpec {
+    short_label: &'static str,
+    instrument_label: &'static str,
+    parameter_label: &'static str,
+    family: ClassicPadFamily,
+}
+
+fn instrument_control_specs() -> &'static [InstrumentControlSpec; 12] {
+    &[
+        InstrumentControlSpec {
+            short_label: "AC",
+            instrument_label: "ACCENT",
+            parameter_label: "LEVEL",
+            family: ClassicPadFamily::Red,
+        },
+        InstrumentControlSpec {
+            short_label: "BD",
+            instrument_label: "BASS",
+            parameter_label: "LEVEL",
+            family: ClassicPadFamily::Red,
+        },
+        InstrumentControlSpec {
+            short_label: "SD",
+            instrument_label: "SNARE",
+            parameter_label: "LEVEL",
+            family: ClassicPadFamily::Red,
+        },
+        InstrumentControlSpec {
+            short_label: "LT",
+            instrument_label: "LOW TOM",
+            parameter_label: "TUNE",
+            family: ClassicPadFamily::Red,
+        },
+        InstrumentControlSpec {
+            short_label: "MT",
+            instrument_label: "MID TOM",
+            parameter_label: "TUNE",
+            family: ClassicPadFamily::Orange,
+        },
+        InstrumentControlSpec {
+            short_label: "HT",
+            instrument_label: "HI TOM",
+            parameter_label: "TUNE",
+            family: ClassicPadFamily::Orange,
+        },
+        InstrumentControlSpec {
+            short_label: "CL",
+            instrument_label: "CLAVES",
+            parameter_label: "LEVEL",
+            family: ClassicPadFamily::Orange,
+        },
+        InstrumentControlSpec {
+            short_label: "RS",
+            instrument_label: "RIM",
+            parameter_label: "LEVEL",
+            family: ClassicPadFamily::Orange,
+        },
+        InstrumentControlSpec {
+            short_label: "CP",
+            instrument_label: "CLAP",
+            parameter_label: "SNAP",
+            family: ClassicPadFamily::Yellow,
+        },
+        InstrumentControlSpec {
+            short_label: "CB",
+            instrument_label: "COWBELL",
+            parameter_label: "TUNE",
+            family: ClassicPadFamily::Yellow,
+        },
+        InstrumentControlSpec {
+            short_label: "CY",
+            instrument_label: "CYMBAL",
+            parameter_label: "DECAY",
+            family: ClassicPadFamily::Yellow,
+        },
+        InstrumentControlSpec {
+            short_label: "OH",
+            instrument_label: "OPEN HAT",
+            parameter_label: "DECAY",
+            family: ClassicPadFamily::Ivory,
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelRole {
+    Transport,
+    Instrument,
+    Analyser,
+    Steps,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelState {
+    Idle,
+    Armed,
+    Active,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WebPanelSpec {
+    title: &'static str,
+    state: PanelState,
+    lamp: Option<PanelState>,
+}
+
+fn web_panel_spec(role: PanelRole, state: &WebAppState) -> WebPanelSpec {
+    let panel_state = match (role, state.transport) {
+        (_, TransportState::Error) => PanelState::Error,
+        (PanelRole::Transport, TransportState::Playing) => PanelState::Active,
+        (PanelRole::Transport, TransportState::Ready | TransportState::Paused) => PanelState::Armed,
+        (PanelRole::Analyser | PanelRole::Steps, TransportState::Playing) => PanelState::Active,
+        (
+            PanelRole::Analyser | PanelRole::Steps,
+            TransportState::Ready | TransportState::Paused,
+        ) => PanelState::Armed,
+        (PanelRole::Instrument, TransportState::Idle | TransportState::Ended) => PanelState::Idle,
+        (PanelRole::Instrument, _) => PanelState::Armed,
+        _ => PanelState::Idle,
+    };
+
+    WebPanelSpec {
+        title: match role {
+            PanelRole::Transport => " BASIC RHYTHM ",
+            PanelRole::Instrument => " INSTRUMENT SELECT / LEVEL ",
+            PanelRole::Analyser => " SCOPE / ANALYSER ",
+            PanelRole::Steps => " BASIC RHYTHM STEP BUTTONS ",
+        },
+        state: panel_state,
+        lamp: matches!(
+            role,
+            PanelRole::Transport | PanelRole::Analyser | PanelRole::Steps
+        )
+        .then_some(panel_state),
+    }
+}
+
+fn analyser_empty_state_text(state: &WebAppState) -> Option<&'static str> {
+    match state.transport {
+        TransportState::Idle | TransportState::Ended => Some("LOAD AUDIO OR CORS URL"),
+        TransportState::Ready => Some("READY - PRESS PLAY"),
+        TransportState::Paused => Some("PAUSED"),
+        TransportState::Error => Some("CHECK SOURCE / CORS"),
+        TransportState::Playing => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportState {
     Idle,
     Ready,
@@ -481,9 +630,9 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
             ])
             .split(rows[1]);
         render_left_control_panel(frame, deck_rows[0], state);
-        render_knob_bank(frame, deck_rows[1]);
-        render_visualizer(frame, deck_rows[2], &state.bands);
-        render_step_strip(frame, deck_rows[3], &state.bands);
+        render_knob_bank(frame, deck_rows[1], state);
+        render_visualizer(frame, deck_rows[2], state);
+        render_step_strip(frame, deck_rows[3], state);
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
@@ -499,9 +648,9 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState) {
                 Constraint::Length(5),
             ])
             .split(body[1]);
-        render_knob_bank(frame, deck_rows[0]);
-        render_visualizer(frame, deck_rows[1], &state.bands);
-        render_step_strip(frame, deck_rows[2], &state.bands);
+        render_knob_bank(frame, deck_rows[0], state);
+        render_visualizer(frame, deck_rows[1], state);
+        render_step_strip(frame, deck_rows[2], state);
     }
 
     let compact_status = "Load audio or CORS URL";
@@ -567,15 +716,60 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
     );
 }
 
-fn render_left_control_panel(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+fn render_808_panel(frame: &mut Frame<'_>, area: Rect, spec: WebPanelSpec) -> Rect {
     let block = Block::default()
-        .title(" BASIC RHYTHM ")
-        .title_style(classic_label_style())
+        .title(panel_title(spec))
         .style(classic_faceplate_style())
         .borders(Borders::ALL)
-        .border_style(classic_line_style());
+        .border_style(panel_border_style(spec.state));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    inner
+}
+
+fn panel_title(spec: WebPanelSpec) -> Line<'static> {
+    let mut spans = vec![Span::styled(spec.title, classic_label_style())];
+    if let Some(lamp) = spec.lamp {
+        spans.push(Span::styled(panel_lamp_label(lamp), panel_lamp_style(lamp)));
+    }
+    Line::from(spans)
+}
+
+fn panel_lamp_label(state: PanelState) -> &'static str {
+    match state {
+        PanelState::Idle => "[ ]",
+        PanelState::Armed => "[R]",
+        PanelState::Active => "[*]",
+        PanelState::Error => "[!]",
+    }
+}
+
+fn panel_lamp_style(state: PanelState) -> Style {
+    Style::default()
+        .fg(match state {
+            PanelState::Idle => Classic808Palette::DIM.ratatui(),
+            PanelState::Armed => Classic808Palette::AMBER.ratatui(),
+            PanelState::Active => Classic808Palette::YELLOW.ratatui(),
+            PanelState::Error => Classic808Palette::RED_TEXT.ratatui(),
+        })
+        .add_modifier(if matches!(state, PanelState::Active | PanelState::Error) {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        })
+}
+
+fn panel_border_style(state: PanelState) -> Style {
+    Style::default().fg(match state {
+        PanelState::Idle => Classic808Palette::ORANGE.ratatui(),
+        PanelState::Armed => Classic808Palette::AMBER.ratatui(),
+        PanelState::Active => Classic808Palette::YELLOW.ratatui(),
+        PanelState::Error => Classic808Palette::RED_TEXT.ratatui(),
+    })
+}
+
+fn render_left_control_panel(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Transport, state));
 
     if inner.width < 18 || inner.height < 8 {
         render_left_control_fallback(frame, inner, state);
@@ -797,34 +991,18 @@ fn dial_arc_color(position: f64) -> Color {
     }
 }
 
-fn render_knob_bank(frame: &mut Frame<'_>, area: Rect) {
-    let block = Block::default()
-        .title(" INSTRUMENT SELECT / LEVEL ")
-        .title_style(classic_label_style())
-        .style(classic_faceplate_style())
-        .borders(Borders::ALL)
-        .border_style(classic_line_style());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let labels = [
-        "AC", "BD", "SD", "LT", "MT", "HT", "CL", "RS", "CP", "CB", "CY", "OH",
-    ];
-    let visible = (usize::from(inner.width) / 6).clamp(1, labels.len());
-    let labels = &labels[..visible];
-
-    let caption = if inner.width < 60 {
-        "LEVEL   TONE    DECAY   TUNING"
-    } else {
-        "LEVEL   TONE    DECAY   TUNING   SNAPPY   ATTACK"
-    };
+fn render_knob_bank(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Instrument, state));
+    let specs = instrument_control_specs();
+    let visible = (usize::from(inner.width) / 6).clamp(1, specs.len());
+    let specs = &specs[..visible];
 
     if inner.height < 4 {
-        let mut knob_row = Vec::with_capacity(labels.len());
-        let mut label_row = Vec::with_capacity(labels.len());
-        for label in labels {
+        let mut knob_row = Vec::with_capacity(specs.len());
+        let mut label_row = Vec::with_capacity(specs.len());
+        for spec in specs {
             knob_row.push(Span::styled(" (@) ", classic_knob_style()));
-            label_row.push(Span::styled(format!("{label:^5}"), classic_strip_style()));
+            label_row.push(instrument_short_span(spec, 5));
         }
         frame.render_widget(
             Paragraph::new(Text::from(vec![
@@ -846,25 +1024,27 @@ fn render_knob_bank(frame: &mut Frame<'_>, area: Rect) {
         .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
         .split(rows[0]);
 
-    for (index, (cell, label)) in knob_cells.iter().zip(labels.iter()).enumerate() {
-        render_canvas_knob(frame, *cell, web_knob_value(index), label, index == 1);
+    for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
+        render_canvas_knob(frame, *cell, web_knob_value(index), spec, index == 1);
     }
 
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            caption,
-            classic_small_label_style(),
-        )))
-        .alignment(Alignment::Center),
+        Paragraph::new(Line::from(instrument_parameter_spans(specs))).alignment(Alignment::Center),
         rows[1],
     );
 }
 
-fn render_canvas_knob(frame: &mut Frame<'_>, area: Rect, value: f64, label: &str, selected: bool) {
+fn render_canvas_knob(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    value: f64,
+    spec: &InstrumentControlSpec,
+    selected: bool,
+) {
     if area.width < 5 || area.height < 3 {
         let fallback = vec![
             Line::from(Span::styled("(@)", classic_knob_style())),
-            Line::from(Span::styled(label, classic_strip_style())),
+            Line::from(instrument_short_span(spec, usize::from(area.width.max(1)))),
         ];
         frame.render_widget(
             Paragraph::new(Text::from(fallback)).alignment(Alignment::Center),
@@ -937,16 +1117,53 @@ fn render_canvas_knob(frame: &mut Frame<'_>, area: Rect, value: f64, label: &str
 
     frame.render_widget(canvas, canvas_area);
     let label_style = if selected {
-        classic_strip_style()
+        instrument_strip_style(spec.family)
             .fg(Classic808Palette::YELLOW.ratatui())
             .add_modifier(Modifier::BOLD)
     } else {
-        classic_strip_style()
+        instrument_strip_style(spec.family)
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(label, label_style))).alignment(Alignment::Center),
+        Paragraph::new(Line::from(Span::styled(spec.short_label, label_style)))
+            .alignment(Alignment::Center),
         label_area,
     );
+}
+
+fn instrument_parameter_spans(specs: &[InstrumentControlSpec]) -> Vec<Span<'static>> {
+    specs
+        .iter()
+        .map(|spec| instrument_parameter_span(spec, 6))
+        .collect()
+}
+
+fn instrument_short_span(spec: &InstrumentControlSpec, width: usize) -> Span<'static> {
+    Span::styled(
+        format!("{:^width$}", spec.short_label, width = width.max(2)),
+        instrument_strip_style(spec.family).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn instrument_parameter_span(spec: &InstrumentControlSpec, width: usize) -> Span<'static> {
+    let label = if width <= 5 {
+        abbreviate_parameter_label(spec.parameter_label)
+    } else {
+        spec.parameter_label
+    };
+    Span::styled(
+        format!("{label:^width$}", width = width.max(4)),
+        instrument_parameter_style(spec.family),
+    )
+}
+
+fn abbreviate_parameter_label(label: &'static str) -> &'static str {
+    match label {
+        "LEVEL" => "LVL",
+        "TUNE" => "TUN",
+        "DECAY" => "DEC",
+        "SNAP" => "SNP",
+        other => other,
+    }
 }
 
 fn knob_canvas_bounds_808(area: Rect) -> ([f64; 2], [f64; 2]) {
@@ -963,17 +1180,16 @@ fn web_knob_value(index: usize) -> f64 {
     VALUES[index % VALUES.len()]
 }
 
-fn render_visualizer(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
-    let block = Block::default()
-        .title(" SCOPE / ANALYSER ")
-        .title_style(classic_label_style())
-        .style(classic_faceplate_style())
-        .borders(Borders::ALL)
-        .border_style(classic_line_style());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn render_visualizer(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Analyser, state));
+    let bands = &state.bands;
 
     if inner.height == 0 || inner.width < 2 || bands.is_empty() {
+        return;
+    }
+
+    if let Some(message) = analyser_empty_state_text(state) {
+        render_analyser_empty_state(frame, inner, message, state.transport);
         return;
     }
 
@@ -997,15 +1213,42 @@ fn render_visualizer(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
     frame.render_widget(visualizer, inner);
 }
 
-fn render_step_strip(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
-    let block = Block::default()
-        .title(" BASIC RHYTHM STEP BUTTONS ")
-        .title_style(classic_label_style())
-        .style(classic_faceplate_style())
-        .borders(Borders::ALL)
-        .border_style(classic_line_style());
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+fn render_analyser_empty_state(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    message: &'static str,
+    transport: TransportState,
+) {
+    let spacer_count = area.height.saturating_sub(3) / 2;
+    let mut lines = Vec::with_capacity(usize::from(spacer_count) + 3);
+    for _ in 0..spacer_count {
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        message,
+        Style::default()
+            .fg(transport_color(transport))
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "WEB AUDIO ANALYSER",
+        classic_small_label_style(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "REAL BANDS ONLY",
+        classic_value_style(),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_step_strip(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let inner = render_808_panel(frame, area, web_panel_spec(PanelRole::Steps, state));
+    let bands = &state.bands;
 
     if inner.width < 32 {
         return;
@@ -1100,10 +1343,34 @@ fn classic_knob_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn classic_strip_style() -> Style {
+fn instrument_strip_style(family: ClassicPadFamily) -> Style {
     Style::default()
         .fg(Classic808Palette::IVORY.ratatui())
-        .bg(Classic808Palette::OLIVE.ratatui())
+        .bg(instrument_family_bg(family))
+}
+
+fn instrument_parameter_style(family: ClassicPadFamily) -> Style {
+    Style::default()
+        .fg(instrument_family_fg(family))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn instrument_family_fg(family: ClassicPadFamily) -> Color {
+    match family {
+        ClassicPadFamily::Red => Classic808Palette::RED_TEXT.ratatui(),
+        ClassicPadFamily::Orange => Classic808Palette::ORANGE.ratatui(),
+        ClassicPadFamily::Yellow => Classic808Palette::YELLOW.ratatui(),
+        ClassicPadFamily::Ivory => Classic808Palette::IVORY.ratatui(),
+    }
+}
+
+fn instrument_family_bg(family: ClassicPadFamily) -> Color {
+    match family {
+        ClassicPadFamily::Red => Color::Rgb(0x4c, 0x15, 0x12),
+        ClassicPadFamily::Orange => Color::Rgb(0x4a, 0x2a, 0x0e),
+        ClassicPadFamily::Yellow => Color::Rgb(0x4b, 0x42, 0x10),
+        ClassicPadFamily::Ivory => Classic808Palette::OLIVE.ratatui(),
+    }
 }
 
 fn active_lamp_style() -> Style {
@@ -1220,7 +1487,12 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{classic_pad_family, contrast_ratio, Classic808Palette, ClassicPadFamily};
+    use super::{
+        analyser_empty_state_text, classic_pad_family, contrast_ratio, instrument_control_specs,
+        instrument_family_bg, instrument_family_fg, web_panel_spec, Classic808Palette,
+        ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState, WebAppState,
+    };
+    use ratzilla::ratatui::style::Color;
 
     #[test]
     fn classic_pad_family_matches_tr_808_step_groups() {
@@ -1291,5 +1563,139 @@ mod tests {
                 "{name} should pass AA contrast"
             );
         }
+    }
+
+    #[test]
+    fn instrument_family_colors_keep_strip_labels_readable() {
+        for family in [
+            ClassicPadFamily::Red,
+            ClassicPadFamily::Orange,
+            ClassicPadFamily::Yellow,
+            ClassicPadFamily::Ivory,
+        ] {
+            assert!(
+                contrast_ratio(
+                    Classic808Palette::IVORY,
+                    color_to_classic(instrument_family_bg(family))
+                ) >= 4.5,
+                "{family:?} strip label should pass AA contrast"
+            );
+            assert!(
+                contrast_ratio(
+                    color_to_classic(instrument_family_fg(family)),
+                    Classic808Palette::FACEPLATE
+                ) >= 4.5,
+                "{family:?} parameter label should pass AA contrast"
+            );
+        }
+    }
+
+    fn color_to_classic(color: Color) -> ClassicColor {
+        match color {
+            Color::Rgb(red, green, blue) => ClassicColor { red, green, blue },
+            other => panic!("expected RGB color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_panel_specs_make_transport_state_visible() {
+        let mut state = WebAppState {
+            transport: TransportState::Playing,
+            ..WebAppState::default()
+        };
+
+        assert_eq!(
+            web_panel_spec(PanelRole::Transport, &state).state,
+            PanelState::Active
+        );
+        assert_eq!(
+            web_panel_spec(PanelRole::Analyser, &state).state,
+            PanelState::Active
+        );
+        assert_eq!(
+            web_panel_spec(PanelRole::Instrument, &state).state,
+            PanelState::Armed
+        );
+
+        state.transport = TransportState::Error;
+        state.error = Some("CORS blocked".to_string());
+
+        assert_eq!(
+            web_panel_spec(PanelRole::Transport, &state).state,
+            PanelState::Error
+        );
+        assert_eq!(
+            web_panel_spec(PanelRole::Analyser, &state).state,
+            PanelState::Error
+        );
+    }
+
+    #[test]
+    fn analyser_empty_state_text_tracks_browser_audio_state() {
+        let mut state = WebAppState::default();
+        assert_eq!(
+            analyser_empty_state_text(&state),
+            Some("LOAD AUDIO OR CORS URL")
+        );
+
+        state.transport = TransportState::Ready;
+        assert_eq!(
+            analyser_empty_state_text(&state),
+            Some("READY - PRESS PLAY")
+        );
+
+        state.transport = TransportState::Paused;
+        assert_eq!(analyser_empty_state_text(&state), Some("PAUSED"));
+
+        state.transport = TransportState::Error;
+        state.error = Some("CORS blocked".to_string());
+        assert_eq!(
+            analyser_empty_state_text(&state),
+            Some("CHECK SOURCE / CORS")
+        );
+
+        state.transport = TransportState::Playing;
+        state.error = None;
+        assert_eq!(analyser_empty_state_text(&state), None);
+    }
+
+    #[test]
+    fn instrument_control_specs_match_808_web_strip() {
+        let specs = instrument_control_specs();
+
+        assert_eq!(specs.len(), 12);
+        assert_eq!(specs[0].short_label, "AC");
+        assert_eq!(specs[0].parameter_label, "LEVEL");
+        assert_eq!(specs[1].short_label, "BD");
+        assert_eq!(specs[1].instrument_label, "BASS");
+        assert_eq!(specs[2].instrument_label, "SNARE");
+        assert_eq!(specs[9].short_label, "CB");
+        assert_eq!(specs[9].parameter_label, "TUNE");
+        assert_eq!(specs[10].short_label, "CY");
+        assert_eq!(specs[10].parameter_label, "DECAY");
+        assert_eq!(specs[11].short_label, "OH");
+        assert_eq!(specs[11].parameter_label, "DECAY");
+
+        let families = specs
+            .iter()
+            .map(|spec| spec.family)
+            .collect::<Vec<ClassicPadFamily>>();
+        assert_eq!(
+            families,
+            vec![
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Red,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Orange,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Yellow,
+                ClassicPadFamily::Ivory,
+            ]
+        );
     }
 }
