@@ -54,10 +54,10 @@ struct Classic808Palette;
 
 impl Classic808Palette {
     const FACEPLATE: ClassicColor = ClassicColor::new(0x09, 0x0a, 0x08);
-    const BODY: ClassicColor = ClassicColor::new(0xd8, 0xd0, 0xb2);
+    const BODY: ClassicColor = ClassicColor::new(0x15, 0x17, 0x12);
     const IVORY: ClassicColor = ClassicColor::new(0xee, 0xea, 0xdc);
     const ORANGE: ClassicColor = ClassicColor::new(0xf0, 0x5a, 0x28);
-    const BRAND_ORANGE: ClassicColor = ClassicColor::new(0x9c, 0x33, 0x19);
+    const BRAND_ORANGE: ClassicColor = ClassicColor::new(0xf0, 0x5a, 0x28);
     const AMBER: ClassicColor = ClassicColor::new(0xf6, 0xa6, 0x23);
     const YELLOW: ClassicColor = ClassicColor::new(0xff, 0xd4, 0x00);
     const RED: ClassicColor = ClassicColor::new(0xd7, 0x26, 0x2e);
@@ -2451,7 +2451,7 @@ fn classic_faceplate_style() -> Style {
 
 fn classic_hardware_body_style() -> Style {
     Style::default()
-        .fg(Classic808Palette::FACEPLATE.ratatui())
+        .fg(Classic808Palette::IVORY.ratatui())
         .bg(Classic808Palette::BODY.ratatui())
 }
 
@@ -2470,7 +2470,7 @@ fn hardware_brand_style() -> Style {
 
 fn hardware_body_text_style() -> Style {
     Style::default()
-        .fg(Classic808Palette::FACEPLATE.ratatui())
+        .fg(Classic808Palette::IVORY.ratatui())
         .bg(Classic808Palette::BODY.ratatui())
 }
 
@@ -2767,19 +2767,19 @@ mod tests {
         assert_ne!(
             Classic808Palette::BODY,
             Classic808Palette::IVORY,
-            "large hardware body fill should be warmer and darker than small ivory text"
+            "large hardware body fill should not use the bright ivory label color"
         );
         assert!(
-            contrast_ratio(Classic808Palette::FACEPLATE, Classic808Palette::BODY) >= 4.5,
-            "black faceplate text should pass AA contrast on the cream body"
+            contrast_ratio(Classic808Palette::IVORY, Classic808Palette::BODY) >= 4.5,
+            "ivory body text should pass AA contrast on the dark hardware body"
         );
         assert!(
             contrast_ratio(Classic808Palette::BRAND_ORANGE, Classic808Palette::BODY) >= 4.5,
-            "body-safe brand orange should pass AA contrast on the cream body"
+            "brand orange should pass AA contrast on the dark hardware body"
         );
         assert!(
-            contrast_ratio(Classic808Palette::BODY, Classic808Palette::FACEPLATE) >= 4.5,
-            "cream body marks should pass AA contrast on black inset panels"
+            contrast_ratio(Classic808Palette::BODY, Classic808Palette::FACEPLATE) < 1.3,
+            "hardware body should stay close to black so panel separation is subtle"
         );
     }
 
@@ -2791,7 +2791,7 @@ mod tests {
         );
         assert_eq!(
             classic_hardware_body_style().fg,
-            Some(Classic808Palette::FACEPLATE.ratatui())
+            Some(Classic808Palette::IVORY.ratatui())
         );
         assert_eq!(
             classic_panel_inset_style().bg,
@@ -2811,7 +2811,7 @@ mod tests {
         );
         assert_eq!(
             hardware_body_text_style().fg,
-            Some(Classic808Palette::FACEPLATE.ratatui())
+            Some(Classic808Palette::IVORY.ratatui())
         );
         assert_eq!(
             hardware_body_text_style().bg,
