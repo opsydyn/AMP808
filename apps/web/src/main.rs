@@ -1549,32 +1549,49 @@ fn command_key_style(active: bool) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+fn machine_brand_segments() -> [(&'static str, bool); 3] {
+    [
+        ("Roland ", true),
+        ("Rhythm Composer ", false),
+        ("TR-808 WEB", true),
+    ]
+}
+
+fn machine_brand_label() -> String {
+    machine_brand_segments()
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect()
+}
+
 fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let brand_label = machine_brand_label();
     let source_label = state
         .source
         .as_ref()
         .map(WebAudioSource::label)
         .unwrap_or("No audio loaded");
 
+    let brand_line = if area.width < brand_label.len() as u16 {
+        Line::from(Span::styled(brand_label, hardware_brand_style()))
+    } else {
+        Line::from(
+            machine_brand_segments()
+                .into_iter()
+                .map(|(text, is_brand)| {
+                    let style = if is_brand {
+                        hardware_brand_style()
+                    } else {
+                        hardware_body_text_style().add_modifier(Modifier::BOLD)
+                    };
+                    Span::styled(text, style)
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+
     let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "AMP808 ",
-                Style::default()
-                    .fg(Classic808Palette::ORANGE.ratatui())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Rhythm Composer ",
-                hardware_body_text_style().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "TR-808 WEB",
-                Style::default()
-                    .fg(Classic808Palette::ORANGE.ratatui())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        brand_line,
         Line::from(vec![
             Span::styled(
                 "SOURCE ",
@@ -1585,7 +1602,9 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
     ];
 
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        Paragraph::new(Text::from(lines))
+            .style(classic_hardware_body_style())
+            .alignment(Alignment::Center),
         area,
     );
 }
@@ -2679,14 +2698,15 @@ mod tests {
         classic_body_border_style, classic_hardware_body_style, classic_pad_family,
         classic_panel_inset_style, contrast_ratio, hardware_body_text_style, hardware_brand_style,
         hosted_recent_urls, instrument_control_specs, instrument_family_bg, instrument_family_fg,
-        knob_canvas_bounds_808, playback_progress_fraction, recent_source_display_label,
-        remember_recent_source, step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
-        waveform_bytes_to_samples, web_action_for_key, web_compact_deck_layout,
-        web_desktop_body_layout, web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms,
-        web_header_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
-        web_transition_fx_signature, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
-        PanelState, TransportState, WebAction, WebAppState, WebAudioSource, WebFocus,
+        knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
+        recent_source_display_label, remember_recent_source, step_glow_intensity,
+        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
+        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
+        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
+        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
+        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
+        WebAction, WebAppState, WebAudioSource, WebFocus,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{layout::Rect, style::Color};
@@ -2890,6 +2910,11 @@ mod tests {
             ) >= 4.5,
             "tempo gauge tick marks should be visible on the black faceplate"
         );
+    }
+
+    #[test]
+    fn machine_brand_label_uses_tr_808_model_identity() {
+        assert_eq!(machine_brand_label(), "Roland Rhythm Composer TR-808 WEB");
     }
 
     #[test]
