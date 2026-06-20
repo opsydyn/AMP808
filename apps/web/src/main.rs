@@ -30,6 +30,7 @@ const BAND_COUNT: usize = 24;
 const WEB_SEEK_STEP_SECONDS: f64 = 15.0;
 const WAVEFORM_SAMPLE_COUNT: usize = 96;
 const WEB_PANE_GAP: u16 = 1;
+const INSTRUMENT_CHANNEL_FULL_HEIGHT: u16 = 7;
 const RECENT_SOURCE_LIMIT: usize = 4;
 const WEB_BPM_DEFAULT_HOP_SECONDS: f64 = 1.0 / 60.0;
 
@@ -1998,7 +1999,7 @@ fn render_knob_bank(
         .flatten();
     let inner = render_808_panel(frame, area, spec, effect, tick);
     let specs = instrument_control_specs();
-    let visible = (usize::from(inner.width) / 6).clamp(1, specs.len());
+    let visible = instrument_channel_visible_count(inner.width).min(specs.len());
     let specs = &specs[..visible];
 
     if inner.height < 4 {
@@ -2019,9 +2020,41 @@ fn render_knob_bank(
         return;
     }
 
+    if inner.height < INSTRUMENT_CHANNEL_FULL_HEIGHT {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(inner);
+        let knob_cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
+            .split(rows[0]);
+
+        for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
+            render_canvas_knob(frame, *cell, web_knob_value(index), spec, index == 1);
+        }
+
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                specs
+                    .iter()
+                    .map(|spec| {
+                        Span::styled(
+                            format!("{:^8}", instrument_label_cap_text(spec)),
+                            instrument_parameter_style(spec.family),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+            .alignment(Alignment::Center),
+            rows[1],
+        );
+        return;
+    }
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(5), Constraint::Length(2)])
         .split(inner);
     let knob_cells = Layout::default()
         .direction(Direction::Horizontal)
@@ -2032,8 +2065,9 @@ fn render_knob_bank(
         render_canvas_knob(frame, *cell, web_knob_value(index), spec, index == 1);
     }
 
+    let label_lines = instrument_label_cap_lines(specs, 8);
     frame.render_widget(
-        Paragraph::new(Line::from(instrument_parameter_spans(specs))).alignment(Alignment::Center),
+        Paragraph::new(label_lines).alignment(Alignment::Center),
         rows[1],
     );
 }
@@ -2134,11 +2168,33 @@ fn render_canvas_knob(
     );
 }
 
-fn instrument_parameter_spans(specs: &[InstrumentControlSpec]) -> Vec<Span<'static>> {
-    specs
-        .iter()
-        .map(|spec| instrument_parameter_span(spec, 6))
-        .collect()
+fn instrument_channel_visible_count(width: u16) -> usize {
+    (usize::from(width) / 8).clamp(1, instrument_control_specs().len())
+}
+
+fn instrument_label_cap_text(spec: &InstrumentControlSpec) -> String {
+    format!(
+        "{} {}",
+        spec.short_label,
+        instrument_parameter_label(spec, 8)
+    )
+}
+
+fn instrument_label_cap_lines(specs: &[InstrumentControlSpec], width: usize) -> Text<'static> {
+    Text::from(vec![
+        Line::from(
+            specs
+                .iter()
+                .map(|spec| instrument_short_span(spec, width))
+                .collect::<Vec<_>>(),
+        ),
+        Line::from(
+            specs
+                .iter()
+                .map(|spec| instrument_parameter_span(spec, width))
+                .collect::<Vec<_>>(),
+        ),
+    ])
 }
 
 fn instrument_short_span(spec: &InstrumentControlSpec, width: usize) -> Span<'static> {
@@ -2149,21 +2205,25 @@ fn instrument_short_span(spec: &InstrumentControlSpec, width: usize) -> Span<'st
 }
 
 fn instrument_parameter_span(spec: &InstrumentControlSpec, width: usize) -> Span<'static> {
-    let label = if width <= 5 {
-        abbreviate_parameter_label(spec.parameter_label)
-    } else {
-        spec.parameter_label
-    };
+    let label = instrument_parameter_label(spec, width);
     Span::styled(
         format!("{label:^width$}", width = width.max(4)),
         instrument_parameter_style(spec.family),
     )
 }
 
+fn instrument_parameter_label(spec: &InstrumentControlSpec, width: usize) -> &'static str {
+    if width <= 5 {
+        abbreviate_parameter_label(spec.parameter_label)
+    } else {
+        spec.parameter_label
+    }
+}
+
 fn abbreviate_parameter_label(label: &'static str) -> &'static str {
     match label {
         "LEVEL" => "LVL",
-        "TUNE" => "TUN",
+        "TUNE" => "TUNE",
         "DECAY" => "DEC",
         "SNAP" => "SNP",
         other => other,
@@ -2697,16 +2757,18 @@ mod tests {
         analyser_bands_for_scope_width, analyser_empty_state_text, browser_media_error_message,
         classic_body_border_style, classic_hardware_body_style, classic_pad_family,
         classic_panel_inset_style, contrast_ratio, hardware_body_text_style, hardware_brand_style,
-        hosted_recent_urls, instrument_control_specs, instrument_family_bg, instrument_family_fg,
-        knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
-        recent_source_display_label, remember_recent_source, step_glow_intensity,
-        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
-        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
-        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
-        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
-        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
-        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
-        WebAction, WebAppState, WebAudioSource, WebFocus,
+        hosted_recent_urls, instrument_channel_visible_count, instrument_control_specs,
+        instrument_family_bg, instrument_family_fg, instrument_label_cap_lines,
+        instrument_label_cap_text, knob_canvas_bounds_808, machine_brand_label,
+        playback_progress_fraction, recent_source_display_label, remember_recent_source,
+        step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
+        waveform_bytes_to_samples, web_action_for_key, web_compact_deck_layout,
+        web_desktop_body_layout, web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms,
+        web_header_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
+        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
+        web_transition_fx_signature, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
+        PanelState, TransportState, WebAction, WebAppState, WebAudioSource, WebFocus,
+        INSTRUMENT_CHANNEL_FULL_HEIGHT,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{layout::Rect, style::Color};
@@ -3374,5 +3436,36 @@ mod tests {
                 ClassicPadFamily::Ivory,
             ]
         );
+    }
+
+    #[test]
+    fn instrument_channel_visible_count_prefers_roomier_hardware_slots() {
+        assert_eq!(instrument_channel_visible_count(20), 2);
+        assert_eq!(instrument_channel_visible_count(72), 9);
+        assert_eq!(instrument_channel_visible_count(96), 12);
+    }
+
+    #[test]
+    fn instrument_label_cap_text_keeps_short_and_parameter_labels_together() {
+        let spec = instrument_control_specs()[9];
+
+        assert_eq!(instrument_label_cap_text(&spec), "CB TUNE");
+    }
+
+    #[test]
+    fn instrument_label_cap_lines_match_hardware_channel_rows() {
+        let specs = &instrument_control_specs()[9..=10];
+        let lines = instrument_label_cap_lines(specs, 8);
+
+        assert_eq!(lines.lines.len(), 2);
+        assert_eq!(lines.lines[0].spans.len(), 2);
+        assert_eq!(lines.lines[1].spans.len(), 2);
+        assert_eq!(instrument_label_cap_text(&specs[0]), "CB TUNE");
+        assert_eq!(instrument_label_cap_text(&specs[1]), "CY DECAY");
+    }
+
+    #[test]
+    fn instrument_channel_full_height_documents_fallback_threshold() {
+        assert_eq!(INSTRUMENT_CHANNEL_FULL_HEIGHT, 7);
     }
 }
