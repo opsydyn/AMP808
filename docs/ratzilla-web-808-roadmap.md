@@ -144,6 +144,30 @@ Acceptance:
 - The generated static output can be served without backend code.
 - The deployment docs state exactly what hosted URLs must provide for CORS-compatible playback.
 
+## Phase 6: Control UX And Micro-Interactions
+
+Goal: make the web player feel like an instrument surface, not only a playback display.
+
+- [x] Add browser-side master volume, ten-band EQ, and sound mode controls through Web Audio.
+- [x] Add a selected-control readout beside the instrument strip:
+  - hardware/control label
+  - audio parameter label
+  - current value
+  - active sound mode
+- [x] Add short TachyonFX pulses for selected-control changes.
+- [ ] Add beat/progress chase lights across the 16 step buttons when BPM is available.
+- [ ] Add pointer selection for knobs after keyboard behavior is stable.
+- [ ] Persist visual mode, motion toggle, volume, EQ preset, and recent hosted URLs in local storage.
+- [ ] Add drag-and-drop local audio loading.
+
+Acceptance:
+
+- Keyboard users can tell which audio control is selected and what value it has without relying on
+  knob position alone.
+- Control animations are event-driven, short, and localized to the active control/readout.
+- Motion remains optional through the existing motion toggle.
+- Audio control changes remain backed by Web Audio state, not visual-only display state.
+
 ## Verification Matrix
 
 Run these before marking any web roadmap phase complete:

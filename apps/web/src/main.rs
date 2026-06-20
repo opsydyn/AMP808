@@ -282,6 +282,7 @@ struct WebAudioControls {
     eq_bands: [f64; WEB_EQ_BAND_COUNT],
     preset_index: Option<usize>,
     selected_control: usize,
+    control_revision: u64,
 }
 
 impl Default for WebAudioControls {
@@ -291,6 +292,7 @@ impl Default for WebAudioControls {
             eq_bands: WEB_EQ_PRESETS[0].bands,
             preset_index: Some(0),
             selected_control: 0,
+            control_revision: 0,
         }
     }
 }
@@ -330,6 +332,36 @@ fn web_audio_control_value(controls: &WebAudioControls, index: usize) -> f64 {
     }
 }
 
+fn web_audio_selected_control_readout(controls: &WebAudioControls) -> String {
+    let specs = instrument_control_specs();
+    let spec = specs
+        .get(controls.selected_control.min(specs.len() - 1))
+        .unwrap_or(&specs[0]);
+    let mode = web_eq_preset_label(controls);
+
+    match controls.selected_control {
+        0 => format!(
+            "{} / MASTER VOL / {} / {mode}",
+            spec.short_label,
+            format_db(controls.volume_db)
+        ),
+        1..=WEB_EQ_BAND_COUNT => {
+            let band_index = controls.selected_control - 1;
+            format!(
+                "{} / {} / {} / {mode}",
+                spec.short_label,
+                web_eq_band_label(band_index),
+                format_db(controls.eq_bands[band_index])
+            )
+        }
+        _ => format!("{} / SOUND MODE / {mode}", spec.short_label),
+    }
+}
+
+fn format_db(value: f64) -> String {
+    format!("{value:+.0} dB")
+}
+
 fn web_audio_control_status(controls: &WebAudioControls) -> String {
     match controls.selected_control {
         0 => format!("Master volume {:+.0} dB", controls.volume_db),
@@ -361,7 +393,7 @@ fn web_eq_band_label(index: usize) -> &'static str {
 }
 
 fn web_audio_controls_after_action(controls: &mut WebAudioControls, action: WebAction) -> bool {
-    match action {
+    let changed = match action {
         WebAction::SelectPreviousAudioControl => {
             controls.selected_control =
                 (controls.selected_control + WEB_EQ_CONTROL_COUNT - 1) % WEB_EQ_CONTROL_COUNT;
@@ -394,7 +426,13 @@ fn web_audio_controls_after_action(controls: &mut WebAudioControls, action: WebA
             true
         }
         _ => false,
+    };
+
+    if changed {
+        controls.control_revision = controls.control_revision.wrapping_add(1);
     }
+
+    changed
 }
 
 fn adjust_selected_web_audio_control(controls: &mut WebAudioControls, delta_db: f64) {
@@ -705,7 +743,9 @@ struct WebFxRuntime {
     last_frame_ms: Option<f64>,
     frame_counter: u64,
     last_transition_transport: Option<TransportState>,
+    last_audio_control_revision: u64,
     transition_panel: Option<WebPanelFx>,
+    audio_control_panel: Option<WebPanelFx>,
     header_panel: Option<WebPanelFx>,
     header_identity_panel: Option<WebPanelFx>,
     transport_panel: Option<WebPanelFx>,
@@ -813,13 +853,38 @@ impl WebFxRuntime {
             .map(|panel_fx| &mut panel_fx.effect)
     }
 
+    fn audio_control_effect(
+        &mut self,
+        controls: &WebAudioControls,
+    ) -> Option<&mut tachyonfx::Effect> {
+        let Some(cycle_ms) = web_audio_control_fx_signature(controls.control_revision) else {
+            self.last_audio_control_revision = controls.control_revision;
+            self.audio_control_panel = None;
+            return None;
+        };
+
+        if self.last_audio_control_revision != controls.control_revision {
+            self.last_audio_control_revision = controls.control_revision;
+            self.audio_control_panel = Some(WebPanelFx {
+                cycle_ms,
+                effect: make_web_audio_control_pulse_effect(),
+            });
+        }
+
+        self.audio_control_panel
+            .as_mut()
+            .map(|panel_fx| &mut panel_fx.effect)
+    }
+
     fn clear_panel(&mut self, role: PanelRole) {
         *self.panel_slot(role) = None;
     }
 
     fn clear_effects(&mut self) {
         self.last_transition_transport = None;
+        self.last_audio_control_revision = 0;
         self.transition_panel = None;
+        self.audio_control_panel = None;
         self.header_panel = None;
         self.header_identity_panel = None;
         self.transport_panel = None;
@@ -882,6 +947,10 @@ fn web_header_identity_fx_signature(transport: TransportState) -> Option<u32> {
         | TransportState::Ended
         | TransportState::Error => None,
     }
+}
+
+fn web_audio_control_fx_signature(control_revision: u64) -> Option<u32> {
+    (control_revision > 0).then_some(420)
 }
 
 fn make_web_transition_effect(transport: TransportState) -> tachyonfx::Effect {
@@ -966,6 +1035,37 @@ fn make_web_header_identity_effect(transport: TransportState) -> tachyonfx::Effe
         fx::hsl_shift_fg([0.0, 8.0, 14.0], (cycle_ms / 2, Interpolation::SineInOut))
             .with_filter(CellFilter::NonEmpty),
     ))
+}
+
+fn make_web_audio_control_pulse_effect() -> tachyonfx::Effect {
+    fx::run_once(fx::effect_fn(
+        WebAudioControlPulse {
+            accent: Classic808Palette::YELLOW.ratatui(),
+            warm: Classic808Palette::ORANGE.ratatui(),
+        },
+        (420, Interpolation::CircOut),
+        |state, ctx, cells| {
+            let intensity = 1.0 - ctx.alpha();
+            cells.for_each_cell(|_pos, cell| {
+                if cell.symbol().trim().is_empty() {
+                    return;
+                }
+                let glow = mix_rgb(state.warm, state.accent, intensity);
+                cell.set_fg(mix_rgb(cell.fg, glow, 0.22 + intensity * 0.5));
+                cell.set_bg(mix_rgb(
+                    cell.bg,
+                    Classic808Palette::OLIVE.ratatui(),
+                    intensity * 0.2,
+                ));
+            });
+        },
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct WebAudioControlPulse {
+    accent: Color,
+    warm: Color,
 }
 
 fn make_web_panel_trace_effect(state: PanelState) -> tachyonfx::Effect {
@@ -2587,7 +2687,7 @@ fn render_knob_bank(
         return;
     }
 
-    if inner.height < INSTRUMENT_CHANNEL_FULL_HEIGHT {
+    if inner.height < 5 {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(1)])
@@ -2626,9 +2726,59 @@ fn render_knob_bank(
         return;
     }
 
+    if inner.height < INSTRUMENT_CHANNEL_FULL_HEIGHT {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        let knob_cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
+            .split(rows[0]);
+
+        for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
+            render_canvas_knob(
+                frame,
+                *cell,
+                web_knob_value(&state.audio_controls, index),
+                spec,
+                state.focus == WebFocus::AudioControls
+                    && index == state.audio_controls.selected_control,
+            );
+        }
+
+        render_audio_control_readout(frame, rows[1], &state.audio_controls);
+        render_audio_control_pulse(frame, &knob_cells, state, fx, tick);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                specs
+                    .iter()
+                    .map(|spec| {
+                        Span::styled(
+                            format!("{:^8}", instrument_label_cap_text(spec)),
+                            instrument_parameter_style(spec.family),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+            .alignment(Alignment::Center),
+            rows[2],
+        );
+        return;
+    }
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(2)])
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
         .split(inner);
     let knob_cells = Layout::default()
         .direction(Direction::Horizontal)
@@ -2646,11 +2796,56 @@ fn render_knob_bank(
         );
     }
 
+    render_audio_control_readout(frame, rows[1], &state.audio_controls);
+    render_audio_control_pulse(frame, &knob_cells, state, fx, tick);
+
     let label_lines = instrument_label_cap_lines(specs, 8);
     frame.render_widget(
         Paragraph::new(label_lines).alignment(Alignment::Center),
-        rows[1],
+        rows[2],
     );
+}
+
+fn render_audio_control_readout(frame: &mut Frame<'_>, area: Rect, controls: &WebAudioControls) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            web_audio_selected_control_readout(controls),
+            Style::default()
+                .fg(Classic808Palette::IVORY.ratatui())
+                .bg(Classic808Palette::FACEPLATE.ratatui())
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_audio_control_pulse(
+    frame: &mut Frame<'_>,
+    knob_cells: &[Rect],
+    state: &WebAppState,
+    fx: &mut WebFxRuntime,
+    tick: tachyonfx::Duration,
+) {
+    if !state.motion_enabled {
+        return;
+    }
+
+    let Some(area) = knob_cells
+        .get(state.audio_controls.selected_control)
+        .copied()
+    else {
+        return;
+    };
+    let Some(effect) = fx.audio_control_effect(&state.audio_controls) else {
+        return;
+    };
+
+    frame.render_effect(effect, area, tick);
 }
 
 fn render_canvas_knob(
@@ -3795,16 +3990,16 @@ mod tests {
         recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
         render_retro_visualizer_lines, step_glow_intensity, tempo_dial_geometry_808,
         tempo_tick_color_808, waveform_bytes_to_samples, web_action_for_key,
-        web_audio_control_value, web_audio_controls_after_action, web_audio_gain_from_db,
-        web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
-        web_eq_band_to_normalized, web_eq_preset_label, web_focus_after_action, web_fx_tick_ms,
-        web_header_fx_signature, web_header_identity_fx_signature, web_motion_enabled_after_action,
-        web_panel_border_set, web_panel_fx_signature, web_panel_spec, web_seek_target_seconds,
-        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
-        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
-        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
-        WebAudioControls, WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
-        WEB_EQ_PRESETS,
+        web_audio_control_fx_signature, web_audio_control_value, web_audio_controls_after_action,
+        web_audio_gain_from_db, web_audio_selected_control_readout, web_compact_deck_layout,
+        web_desktop_body_layout, web_desktop_deck_layout, web_eq_band_to_normalized,
+        web_eq_preset_label, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
+        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
+        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
+        web_volume_to_normalized, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
+        PanelState, TransportState, WebAction, WebAppState, WebAudioControls, WebAudioSource,
+        WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_PRESETS,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -4518,6 +4713,7 @@ mod tests {
         assert_eq!(controls.eq_bands, [0.0; 10]);
         assert_eq!(web_eq_preset_label(&controls), "Flat");
         assert_eq!(controls.selected_control, 0);
+        assert_eq!(controls.control_revision, 0);
         assert_eq!(web_volume_to_normalized(0.0), 30.0 / 36.0);
         assert_eq!(web_eq_band_to_normalized(0.0), 0.5);
         assert_eq!(web_audio_control_value(&controls, 0), 30.0 / 36.0);
@@ -4545,22 +4741,57 @@ mod tests {
 
         web_audio_controls_after_action(&mut controls, WebAction::SelectNextAudioControl);
         assert_eq!(controls.selected_control, 1);
+        assert_eq!(controls.control_revision, 1);
 
         web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
         assert_eq!(controls.eq_bands[0], 1.0);
         assert_eq!(web_eq_preset_label(&controls), "CUSTOM");
+        assert_eq!(controls.control_revision, 2);
 
         controls.eq_bands[0] = 12.0;
         web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
         assert_eq!(controls.eq_bands[0], 12.0);
+        assert_eq!(controls.control_revision, 3);
 
         controls.selected_control = 0;
         controls.volume_db = 6.0;
         web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
         assert_eq!(controls.volume_db, 6.0);
+        assert_eq!(controls.control_revision, 4);
 
         web_audio_controls_after_action(&mut controls, WebAction::VolumeDown);
         assert_eq!(controls.volume_db, 5.0);
+        assert_eq!(controls.control_revision, 5);
+    }
+
+    #[test]
+    fn web_audio_selected_control_readout_names_volume_eq_and_sound_mode() {
+        let mut controls = WebAudioControls::default();
+
+        assert_eq!(
+            web_audio_selected_control_readout(&controls),
+            "AC / MASTER VOL / +0 dB / Flat"
+        );
+
+        controls.selected_control = 1;
+        controls.eq_bands[0] = 4.0;
+        controls.preset_index = Some(1);
+        assert_eq!(
+            web_audio_selected_control_readout(&controls),
+            "BD / 70Hz / +4 dB / Rock"
+        );
+
+        controls.selected_control = 11;
+        assert_eq!(
+            web_audio_selected_control_readout(&controls),
+            "OH / SOUND MODE / Rock"
+        );
+    }
+
+    #[test]
+    fn web_audio_control_fx_signature_only_runs_after_user_interaction() {
+        assert_eq!(web_audio_control_fx_signature(0), None);
+        assert_eq!(web_audio_control_fx_signature(1), Some(420));
     }
 
     #[test]
