@@ -33,6 +33,23 @@ const WEB_PANE_GAP: u16 = 1;
 const INSTRUMENT_CHANNEL_FULL_HEIGHT: u16 = 7;
 const RECENT_SOURCE_LIMIT: usize = 4;
 const WEB_BPM_DEFAULT_HOP_SECONDS: f64 = 1.0 / 60.0;
+const WEB_VISUALIZER_BANDS: usize = 10;
+const LOGO_GLYPH_W: usize = 5;
+const LOGO_GLYPH_H: usize = 7;
+const LOGO_GLYPH_GAP: usize = 2;
+const LOGO_GLYPH_COUNT: usize = 6;
+const LOGO_TOTAL_W: usize =
+    LOGO_GLYPH_COUNT * LOGO_GLYPH_W + (LOGO_GLYPH_COUNT - 1) * LOGO_GLYPH_GAP;
+const LOGO_BAND_MAP: [usize; LOGO_GLYPH_COUNT] = [0, 2, 4, 5, 7, 9];
+
+const LOGO_GLYPHS: [[u8; LOGO_GLYPH_H]; LOGO_GLYPH_COUNT] = [
+    [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+    [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+    [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+    [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+    [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ClassicColor {
@@ -219,6 +236,8 @@ enum WebAction {
 enum WebVisualMode {
     Bars,
     Wave,
+    Retro,
+    Logo,
     Split,
 }
 
@@ -243,7 +262,9 @@ fn web_visual_mode_after_action(current: WebVisualMode, action: WebAction) -> We
 
     match current {
         WebVisualMode::Bars => WebVisualMode::Wave,
-        WebVisualMode::Wave => WebVisualMode::Split,
+        WebVisualMode::Wave => WebVisualMode::Retro,
+        WebVisualMode::Retro => WebVisualMode::Logo,
+        WebVisualMode::Logo => WebVisualMode::Split,
         WebVisualMode::Split => WebVisualMode::Bars,
     }
 }
@@ -252,6 +273,8 @@ fn web_visual_mode_label(mode: WebVisualMode) -> &'static str {
     match mode {
         WebVisualMode::Bars => "BARS",
         WebVisualMode::Wave => "WAVE",
+        WebVisualMode::Retro => "RETRO",
+        WebVisualMode::Logo => "LOGO",
         WebVisualMode::Split => "SPLIT",
     }
 }
@@ -443,6 +466,7 @@ struct WebPanelFx {
 #[derive(Default)]
 struct WebFxRuntime {
     last_frame_ms: Option<f64>,
+    frame_counter: u64,
     last_transition_transport: Option<TransportState>,
     transition_panel: Option<WebPanelFx>,
     header_panel: Option<WebPanelFx>,
@@ -459,7 +483,12 @@ impl WebFxRuntime {
             .map(|last_frame_ms| web_fx_tick_ms(now_ms - last_frame_ms))
             .unwrap_or(16);
         self.last_frame_ms = Some(now_ms);
+        self.frame_counter = self.frame_counter.wrapping_add(1);
         tachyonfx::Duration::from_millis(tick_ms)
+    }
+
+    fn visual_frame(&self) -> u64 {
+        self.frame_counter
     }
 
     fn panel_effect(&mut self, spec: WebPanelSpec) -> Option<&mut tachyonfx::Effect> {
@@ -2347,6 +2376,26 @@ fn render_visualizer(
         WebVisualMode::Wave => {
             render_wave_visualizer(frame, inner, state);
         }
+        WebVisualMode::Retro => {
+            let lines = render_retro_visualizer_lines(
+                bands,
+                inner.width,
+                inner.height,
+                fx.visual_frame(),
+                state.motion_enabled,
+            );
+            render_web_visualizer_lines(frame, inner, lines);
+        }
+        WebVisualMode::Logo => {
+            let lines = render_logo_visualizer_lines(
+                bands,
+                inner.width,
+                inner.height,
+                fx.visual_frame(),
+                state.motion_enabled,
+            );
+            render_web_visualizer_lines(frame, inner, lines);
+        }
         WebVisualMode::Split => {
             render_split_visualizer(frame, inner, state);
         }
@@ -2390,6 +2439,395 @@ fn render_wave_visualizer(frame: &mut Frame<'_>, area: Rect, state: &WebAppState
     } else {
         render_waveform_trace(frame, area, &state.waveform);
     }
+}
+
+fn render_web_visualizer_lines(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    visualizer_lines: Vec<WebVisualizerLine>,
+) {
+    if visualizer_lines.is_empty() {
+        return;
+    }
+
+    let lines = visualizer_lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.segments
+                    .into_iter()
+                    .map(|segment| {
+                        Span::styled(
+                            segment.text,
+                            web_visualizer_segment_style(segment.kind, segment.row_bottom),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn web_visualizer_segment_style(kind: WebVisualizerSegmentKind, row_bottom: f64) -> Style {
+    match kind {
+        WebVisualizerSegmentKind::Gradient => spectrum_style(row_bottom),
+        WebVisualizerSegmentKind::RetroGrid => {
+            Style::default().fg(Classic808Palette::AMBER.ratatui())
+        }
+        WebVisualizerSegmentKind::RetroSun => Style::default().fg(mix_rgb(
+            Classic808Palette::YELLOW.ratatui(),
+            Classic808Palette::ORANGE.ratatui(),
+            (1.0 - row_bottom) as f32,
+        )),
+        WebVisualizerSegmentKind::RetroWave => Style::default()
+            .fg(Classic808Palette::RED_TEXT.ratatui())
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WebVisualizerLine {
+    segments: Vec<WebVisualizerSegment>,
+}
+
+impl WebVisualizerLine {
+    #[cfg(test)]
+    fn cell_width(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.text.chars().count())
+            .sum()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct WebVisualizerSegment {
+    text: String,
+    row_bottom: f64,
+    kind: WebVisualizerSegmentKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebVisualizerSegmentKind {
+    Gradient,
+    RetroGrid,
+    RetroSun,
+    RetroWave,
+}
+
+fn render_logo_visualizer_lines(
+    bands: &[f32],
+    width: u16,
+    height: u16,
+    frame: u64,
+    animate: bool,
+) -> Vec<WebVisualizerLine> {
+    let width = usize::from(width);
+    let height = usize::from(height);
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let bands = web_visualizer_bands_10(bands);
+    let dot_rows = height * 4;
+    let dot_cols = width * 2;
+    let mut pixels = vec![vec![false; dot_cols]; dot_rows];
+
+    let scale_x = (dot_cols / LOGO_TOTAL_W).max(1);
+    let scale_y = ((dot_rows.saturating_mul(4) / 5) / LOGO_GLYPH_H).max(1);
+    let rendered_w = LOGO_TOTAL_W * scale_x;
+    let rendered_h = LOGO_GLYPH_H * scale_y;
+    let offset_x = dot_cols.saturating_sub(rendered_w) / 2;
+    let base_offset_y = dot_rows.saturating_sub(rendered_h) / 2;
+    let animation_frame = if animate { frame } else { 0 };
+
+    for (glyph_idx, glyph) in LOGO_GLYPHS.iter().enumerate() {
+        let energy = bands[LOGO_BAND_MAP[glyph_idx]].clamp(0.0, 1.0);
+        let wave = (animation_frame as f64 * 0.085 + glyph_idx as f64 * 0.78).sin() * 2.4;
+        let bounce = (energy as f64 * base_offset_y as f64 * 0.5 + wave).round() as isize;
+        let letter_x = offset_x + glyph_idx * (LOGO_GLYPH_W + LOGO_GLYPH_GAP) * scale_x;
+        let letter_y = base_offset_y as isize - bounce;
+
+        for (py, row_bits) in glyph.iter().enumerate() {
+            for px in 0..LOGO_GLYPH_W {
+                if row_bits & (1 << (LOGO_GLYPH_W - 1 - px)) == 0 {
+                    continue;
+                }
+
+                let fill = (energy * energy * 0.58 + 0.32).clamp(0.0, 0.9);
+                for sy in 0..scale_y {
+                    for sx in 0..scale_x {
+                        let dx = letter_x + px * scale_x + sx;
+                        let dy = letter_y + (py * scale_y + sy) as isize;
+                        if dx >= dot_cols || dy < 0 || dy as usize >= dot_rows {
+                            continue;
+                        }
+                        if scatter_hash(
+                            glyph_idx,
+                            py * scale_y + sy,
+                            px * scale_x + sx,
+                            animation_frame,
+                        ) > f64::from(fill)
+                        {
+                            continue;
+                        }
+                        pixels[dy as usize][dx] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    braille_lines_from_pixels(width, height, &pixels, WebVisualizerSegmentKind::Gradient)
+}
+
+fn render_retro_visualizer_lines(
+    bands: &[f32],
+    width: u16,
+    height: u16,
+    frame: u64,
+    animate: bool,
+) -> Vec<WebVisualizerLine> {
+    let width = usize::from(width);
+    let height = usize::from(height);
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let bands = web_visualizer_bands_10(bands);
+    let dot_rows = height * 4;
+    let dot_cols = width * 2;
+    let mut horizon_dot = (dot_rows * 2) / 5;
+    horizon_dot = horizon_dot.max(2).min(dot_rows.saturating_sub(1));
+    let floor_rows = dot_rows.saturating_sub(horizon_dot);
+    let center_x = dot_cols.saturating_sub(1) as f64 / 2.0;
+    let mut grid = vec![0u8; dot_rows * dot_cols];
+    let animation_frame = if animate { frame } else { 0 };
+
+    let sun_radius = horizon_dot as f64 * 0.85;
+    for dy in 0..horizon_dot {
+        let row_dist = (horizon_dot - dy) as f64;
+        if row_dist > sun_radius {
+            continue;
+        }
+
+        let half_width = (sun_radius * sun_radius - row_dist * row_dist).sqrt();
+        if row_dist < sun_radius * 0.5 {
+            let stripe_width = ((sun_radius * 0.15) as usize).max(1);
+            if ((row_dist as usize) / stripe_width) % 2 == 1 {
+                continue;
+            }
+        }
+
+        let left = (center_x - half_width).max(0.0) as usize;
+        let right = (center_x + half_width).min(dot_cols.saturating_sub(1) as f64) as usize;
+        let offset = dy * dot_cols;
+        for dx in left..=right {
+            grid[offset + dx] = 3;
+        }
+    }
+
+    if horizon_dot < dot_rows {
+        let offset = horizon_dot * dot_cols;
+        grid[offset..offset + dot_cols].fill(1);
+    }
+
+    const NUM_VERTICAL_LINES: usize = 18;
+    for i in 0..=NUM_VERTICAL_LINES {
+        let bottom_x = i as f64 * dot_cols.saturating_sub(1) as f64 / NUM_VERTICAL_LINES as f64;
+        for dy in (horizon_dot + 1)..dot_rows {
+            let t = (dy - horizon_dot) as f64 / floor_rows.saturating_sub(1).max(1) as f64;
+            let screen_x = center_x + (bottom_x - center_x) * t;
+            let ix = screen_x.round() as usize;
+            if ix < dot_cols {
+                grid[dy * dot_cols + ix] = 1;
+            }
+        }
+    }
+
+    let scroll = (animation_frame as f64 * 0.08).fract();
+    const NUM_HORIZONTAL_LINES: usize = 10;
+    for i in 0..NUM_HORIZONTAL_LINES {
+        let mut z = (i as f64 + scroll) / NUM_HORIZONTAL_LINES as f64;
+        if z > 1.0 {
+            z -= 1.0;
+        }
+        let dy = horizon_dot + 1 + (z * z * floor_rows.saturating_sub(2).max(1) as f64) as usize;
+        if dy > horizon_dot && dy < dot_rows {
+            let offset = dy * dot_cols;
+            grid[offset..offset + dot_cols].fill(1);
+        }
+    }
+
+    let max_wave = horizon_dot as f64 * 0.85;
+    let mut wave_y = vec![horizon_dot.min(dot_rows.saturating_sub(1)); dot_cols];
+    for (dx, y_slot) in wave_y.iter_mut().enumerate() {
+        let band_f = dx as f64 / dot_cols.saturating_sub(1).max(1) as f64
+            * (WEB_VISUALIZER_BANDS - 1) as f64;
+        let band_idx = band_f.floor() as usize;
+        let frac = band_f - band_idx as f64;
+        let interp = (1.0 - (frac * std::f64::consts::PI).cos()) / 2.0;
+        let level = if band_idx >= WEB_VISUALIZER_BANDS - 1 {
+            bands[WEB_VISUALIZER_BANDS - 1]
+        } else {
+            bands[band_idx] * (1.0 - interp as f32) + bands[band_idx + 1] * interp as f32
+        }
+        .max(0.03);
+        let wave_dot = horizon_dot.saturating_sub((f64::from(level) * max_wave) as usize);
+        *y_slot = wave_dot.min(dot_rows.saturating_sub(1));
+    }
+
+    for (dx, &y) in wave_y.iter().enumerate() {
+        grid[y * dot_cols + dx] = 2;
+        if dx > 0 {
+            let previous = wave_y[dx - 1];
+            for fy in previous.min(y)..=previous.max(y) {
+                grid[fy * dot_cols + dx] = 2;
+            }
+        }
+    }
+
+    let mut lines = Vec::with_capacity(height);
+    for row in 0..height {
+        let row_bottom = (height - 1 - row) as f64 / height as f64;
+        let base = row * 4;
+        let mut segments = Vec::new();
+        let mut current_kind: Option<WebVisualizerSegmentKind> = None;
+        let mut run = String::with_capacity(width);
+
+        for ch in 0..width {
+            let mut bits = 0u8;
+            let mut has_wave = false;
+            let mut has_sun = false;
+            let col_base = ch * 2;
+
+            for dr in 0..4 {
+                for dc in 0..2 {
+                    let tag = grid[(base + dr) * dot_cols + (col_base + dc)];
+                    if tag == 0 {
+                        continue;
+                    }
+                    bits |= braille_bit(dr, dc);
+                    if tag == 2 {
+                        has_wave = true;
+                    } else if tag == 3 {
+                        has_sun = true;
+                    }
+                }
+            }
+
+            let kind = if has_wave {
+                WebVisualizerSegmentKind::RetroWave
+            } else if has_sun {
+                WebVisualizerSegmentKind::RetroSun
+            } else {
+                WebVisualizerSegmentKind::RetroGrid
+            };
+
+            if current_kind != Some(kind) && !run.is_empty() {
+                segments.push(WebVisualizerSegment {
+                    text: std::mem::take(&mut run),
+                    row_bottom,
+                    kind: current_kind.unwrap_or(WebVisualizerSegmentKind::RetroGrid),
+                });
+            }
+            current_kind = Some(kind);
+            run.push(char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' '));
+        }
+
+        if !run.is_empty() {
+            segments.push(WebVisualizerSegment {
+                text: run,
+                row_bottom,
+                kind: current_kind.unwrap_or(WebVisualizerSegmentKind::RetroGrid),
+            });
+        }
+
+        lines.push(WebVisualizerLine { segments });
+    }
+
+    lines
+}
+
+fn web_visualizer_bands_10(bands: &[f32]) -> [f32; WEB_VISUALIZER_BANDS] {
+    let mut output = [0.0; WEB_VISUALIZER_BANDS];
+    let sampled = resample_f32(bands, WEB_VISUALIZER_BANDS);
+    for (slot, level) in output.iter_mut().zip(sampled) {
+        *slot = level.clamp(0.0, 1.0);
+    }
+    output
+}
+
+fn scatter_hash(band: usize, row: usize, col: usize, frame: u64) -> f64 {
+    let stagger = (row * 3 + col) as u64;
+    let frame_bucket = (frame + stagger) / 3;
+    let mut hash = (band as u64) * 7_919
+        + (row as u64) * 6_271
+        + (col as u64) * 3_037
+        + frame_bucket * 104_729;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x45d9_f3b3_7197_344b);
+    hash ^= hash >> 16;
+    (hash % 10_000) as f64 / 10_000.0
+}
+
+fn braille_bit(dot_row: usize, dot_col: usize) -> u8 {
+    match (dot_row, dot_col) {
+        (0, 0) => 0x01,
+        (1, 0) => 0x02,
+        (2, 0) => 0x04,
+        (3, 0) => 0x40,
+        (0, 1) => 0x08,
+        (1, 1) => 0x10,
+        (2, 1) => 0x20,
+        (3, 1) => 0x80,
+        _ => 0,
+    }
+}
+
+fn braille_lines_from_pixels(
+    width: usize,
+    height: usize,
+    pixels: &[Vec<bool>],
+    kind: WebVisualizerSegmentKind,
+) -> Vec<WebVisualizerLine> {
+    let mut lines = Vec::with_capacity(height);
+    for cell_y in 0..height {
+        let mut line = String::with_capacity(width);
+        for cell_x in 0..width {
+            let x = cell_x * 2;
+            let y = cell_y * 4;
+            let mut bits = 0u8;
+
+            for dot_row in 0..4 {
+                for dot_col in 0..2 {
+                    if pixels[y + dot_row][x + dot_col] {
+                        bits |= braille_bit(dot_row, dot_col);
+                    }
+                }
+            }
+
+            if bits == 0 {
+                line.push(' ');
+            } else {
+                line.push(char::from_u32(0x2800 + u32::from(bits)).unwrap_or(' '));
+            }
+        }
+
+        lines.push(WebVisualizerLine {
+            segments: vec![WebVisualizerSegment {
+                text: line,
+                row_bottom: (height - 1 - cell_y) as f64 / height as f64,
+                kind,
+            }],
+        });
+    }
+    lines
 }
 
 fn render_spectrum_bars(frame: &mut Frame<'_>, area: Rect, bands: &[f32]) {
@@ -2874,10 +3312,11 @@ mod tests {
         instrument_channel_visible_count, instrument_control_specs, instrument_family_bg,
         instrument_family_fg, instrument_label_cap_lines, instrument_label_cap_text,
         knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
-        recent_source_display_label, remember_recent_source, step_glow_intensity,
-        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
-        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
-        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
+        render_retro_visualizer_lines, step_glow_intensity, tempo_dial_geometry_808,
+        tempo_tick_color_808, waveform_bytes_to_samples, web_action_for_key,
+        web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
+        web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
         web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
         web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
         web_visual_mode_after_action, web_visual_mode_label, Classic808Palette, ClassicColor,
@@ -3441,13 +3880,21 @@ mod tests {
     }
 
     #[test]
-    fn web_visual_mode_cycles_through_bars_wave_and_split() {
+    fn web_visual_mode_cycles_through_bars_wave_retro_logo_and_split() {
         assert_eq!(
             web_visual_mode_after_action(WebVisualMode::Bars, WebAction::CycleVisualMode),
             WebVisualMode::Wave
         );
         assert_eq!(
             web_visual_mode_after_action(WebVisualMode::Wave, WebAction::CycleVisualMode),
+            WebVisualMode::Retro
+        );
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Retro, WebAction::CycleVisualMode),
+            WebVisualMode::Logo
+        );
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Logo, WebAction::CycleVisualMode),
             WebVisualMode::Split
         );
         assert_eq!(
@@ -3464,6 +3911,8 @@ mod tests {
     fn web_visual_mode_labels_match_808_command_surface() {
         assert_eq!(web_visual_mode_label(WebVisualMode::Bars), "BARS");
         assert_eq!(web_visual_mode_label(WebVisualMode::Wave), "WAVE");
+        assert_eq!(web_visual_mode_label(WebVisualMode::Retro), "RETRO");
+        assert_eq!(web_visual_mode_label(WebVisualMode::Logo), "LOGO");
         assert_eq!(web_visual_mode_label(WebVisualMode::Split), "SPLIT");
     }
 
@@ -3472,6 +3921,66 @@ mod tests {
         let state = WebAppState::default();
 
         assert_eq!(state.visual_mode, WebVisualMode::Split);
+    }
+
+    #[test]
+    fn logo_visualizer_renders_centered_braille_logo_from_audio_bands() {
+        let bands = vec![1.0; 24];
+        let lines = render_logo_visualizer_lines(&bands, 48, 8, 0, false);
+
+        assert_eq!(lines.len(), 8);
+        assert!(lines.iter().all(|line| line.cell_width() == 48));
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| line.segments.iter())
+                .any(|segment| segment
+                    .text
+                    .chars()
+                    .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch))),
+            "logo mode should render a braille TR-808 mark"
+        );
+    }
+
+    #[test]
+    fn logo_visualizer_fills_more_cells_for_louder_bands() {
+        let quiet = render_logo_visualizer_lines(&vec![0.0; 24], 48, 8, 0, false);
+        let loud = render_logo_visualizer_lines(&vec![1.0; 24], 48, 8, 0, false);
+
+        assert!(
+            painted_braille_count(&loud) > painted_braille_count(&quiet),
+            "loud logo should resolve more of the TR-808 mark than quiet logo"
+        );
+    }
+
+    fn painted_braille_count(lines: &[super::WebVisualizerLine]) -> usize {
+        lines
+            .iter()
+            .flat_map(|line| &line.segments)
+            .flat_map(|segment| segment.text.chars())
+            .filter(|ch| ('\u{2801}'..='\u{28ff}').contains(ch))
+            .count()
+    }
+
+    #[test]
+    fn retro_visualizer_draws_grid_sun_and_audio_wave_layers() {
+        let bands = (0..24)
+            .map(|index| ((index % 8) as f32 + 1.0) / 8.0)
+            .collect::<Vec<_>>();
+        let lines = render_retro_visualizer_lines(&bands, 48, 10, 3, true);
+
+        assert_eq!(lines.len(), 10);
+        assert!(lines.iter().all(|line| line.cell_width() == 48));
+
+        let kinds = lines
+            .iter()
+            .flat_map(|line| line.segments.iter())
+            .map(|segment| segment.kind)
+            .collect::<Vec<_>>();
+
+        assert!(kinds.contains(&super::WebVisualizerSegmentKind::RetroGrid));
+        assert!(kinds.contains(&super::WebVisualizerSegmentKind::RetroSun));
+        assert!(kinds.contains(&super::WebVisualizerSegmentKind::RetroWave));
     }
 
     #[test]
