@@ -2456,19 +2456,19 @@ fn render_step_strip(
         return;
     }
 
-    let step_count = (usize::from(inner.width) / 4).clamp(1, 16);
+    let step_count = (usize::from(inner.width) / 6).clamp(1, 16);
     let mut numbers = Vec::with_capacity(step_count);
     let mut pads = Vec::with_capacity(step_count);
     for step in 0..step_count {
         numbers.push(Span::styled(
-            format!("{:^4}", step + 1),
+            format!("{:^6}", step + 1),
             classic_small_label_style(),
         ));
         let energy = bands.get(step).copied().unwrap_or_default();
         let glow = step_glow_intensity(state.transport, energy);
         pads.push(Span::styled(
-            " ## ",
-            step_pad_glow_style(classic_pad_family(step), glow),
+            format!("{:^6}", step + 1),
+            classic_step_keycap_style(classic_pad_family(step), glow),
         ));
     }
 
@@ -2628,20 +2628,33 @@ fn classic_pad_style(family: ClassicPadFamily) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn step_pad_glow_style(family: ClassicPadFamily, glow: f32) -> Style {
+fn classic_step_keycap_text_color(family: ClassicPadFamily) -> Color {
+    match family {
+        ClassicPadFamily::Red => Classic808Palette::IVORY.ratatui(),
+        ClassicPadFamily::Orange | ClassicPadFamily::Yellow | ClassicPadFamily::Ivory => {
+            Classic808Palette::FACEPLATE.ratatui()
+        }
+    }
+}
+
+fn classic_step_keycap_style(family: ClassicPadFamily, glow: f32) -> Style {
     let glow = glow.clamp(0.0, 1.0);
-    let base = classic_pad_color(family, false);
-    let active = classic_pad_color(family, true);
-    let hot = match family {
-        ClassicPadFamily::Red | ClassicPadFamily::Orange => Classic808Palette::YELLOW.ratatui(),
-        ClassicPadFamily::Yellow | ClassicPadFamily::Ivory => Classic808Palette::IVORY.ratatui(),
+    let base = match family {
+        ClassicPadFamily::Red => Color::Rgb(0xa4, 0x21, 0x1a),
+        ClassicPadFamily::Orange => Classic808Palette::ORANGE.ratatui(),
+        ClassicPadFamily::Yellow => Classic808Palette::YELLOW.ratatui(),
+        ClassicPadFamily::Ivory => Classic808Palette::IVORY.ratatui(),
     };
-    let color = mix_rgb(mix_rgb(base, active, 0.45 + glow * 0.4), hot, glow * 0.28);
-    Style::default().fg(color).add_modifier(if glow > 0.0 {
-        Modifier::BOLD
-    } else {
-        Modifier::empty()
-    })
+    let hot = match family {
+        ClassicPadFamily::Red => Classic808Palette::RED_TEXT.ratatui(),
+        ClassicPadFamily::Orange => Classic808Palette::AMBER.ratatui(),
+        ClassicPadFamily::Yellow | ClassicPadFamily::Ivory => Classic808Palette::BODY.ratatui(),
+    };
+
+    Style::default()
+        .fg(classic_step_keycap_text_color(family))
+        .bg(mix_rgb(base, hot, glow * 0.25))
+        .add_modifier(Modifier::BOLD)
 }
 
 fn classic_pad_color(family: ClassicPadFamily, active: bool) -> Color {
@@ -2756,19 +2769,19 @@ mod tests {
     use super::{
         analyser_bands_for_scope_width, analyser_empty_state_text, browser_media_error_message,
         classic_body_border_style, classic_hardware_body_style, classic_pad_family,
-        classic_panel_inset_style, contrast_ratio, hardware_body_text_style, hardware_brand_style,
-        hosted_recent_urls, instrument_channel_visible_count, instrument_control_specs,
-        instrument_family_bg, instrument_family_fg, instrument_label_cap_lines,
-        instrument_label_cap_text, knob_canvas_bounds_808, machine_brand_label,
-        playback_progress_fraction, recent_source_display_label, remember_recent_source,
-        step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
-        waveform_bytes_to_samples, web_action_for_key, web_compact_deck_layout,
-        web_desktop_body_layout, web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms,
-        web_header_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
-        web_transition_fx_signature, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
-        PanelState, TransportState, WebAction, WebAppState, WebAudioSource, WebFocus,
-        INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        classic_panel_inset_style, classic_step_keycap_style, classic_step_keycap_text_color,
+        contrast_ratio, hardware_body_text_style, hardware_brand_style, hosted_recent_urls,
+        instrument_channel_visible_count, instrument_control_specs, instrument_family_bg,
+        instrument_family_fg, instrument_label_cap_lines, instrument_label_cap_text,
+        knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
+        recent_source_display_label, remember_recent_source, step_glow_intensity,
+        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
+        web_action_for_key, web_compact_deck_layout, web_desktop_body_layout,
+        web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
+        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
+        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
+        WebAction, WebAppState, WebAudioSource, WebFocus, INSTRUMENT_CHANNEL_FULL_HEIGHT,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{layout::Rect, style::Color};
@@ -2797,6 +2810,45 @@ mod tests {
                 ClassicPadFamily::Ivory,
                 ClassicPadFamily::Ivory,
             ]
+        );
+    }
+
+    #[test]
+    fn step_keycap_text_colors_pass_on_hardware_button_colors() {
+        for family in [
+            ClassicPadFamily::Red,
+            ClassicPadFamily::Orange,
+            ClassicPadFamily::Yellow,
+            ClassicPadFamily::Ivory,
+        ] {
+            let style = classic_step_keycap_style(family, 0.0);
+            let foreground = color_to_classic(style.fg.expect("keycap text color"));
+            let background = color_to_classic(style.bg.expect("keycap background color"));
+
+            assert!(
+                contrast_ratio(foreground, background) >= 4.5,
+                "{family:?} keycap text should pass AA contrast"
+            );
+        }
+    }
+
+    #[test]
+    fn step_keycap_text_color_uses_ivory_on_dark_red_and_black_elsewhere() {
+        assert_eq!(
+            classic_step_keycap_text_color(ClassicPadFamily::Red),
+            Classic808Palette::IVORY.ratatui()
+        );
+        assert_eq!(
+            classic_step_keycap_text_color(ClassicPadFamily::Orange),
+            Classic808Palette::FACEPLATE.ratatui()
+        );
+        assert_eq!(
+            classic_step_keycap_text_color(ClassicPadFamily::Yellow),
+            Classic808Palette::FACEPLATE.ratatui()
+        );
+        assert_eq!(
+            classic_step_keycap_text_color(ClassicPadFamily::Ivory),
+            Classic808Palette::FACEPLATE.ratatui()
         );
     }
 
