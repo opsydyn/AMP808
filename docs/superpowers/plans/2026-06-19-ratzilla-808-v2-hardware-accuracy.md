@@ -805,6 +805,7 @@ The visual treatment should echo the 808 lower button strip:
 - red/orange/yellow/ivory hardware button colors
 - visible focus outlines
 - no overlap around 390px mobile width
+- no cream or ivory page/body background; ivory is reserved for labels and button faces only
 ```
 
 - [ ] **Step 2: Update the CSS controls to match the 808 hardware strip**
@@ -814,11 +815,11 @@ In `apps/web/index.html`, replace the `#amp808-controls` rule with:
 ```css
       #amp808-controls {
         align-items: center;
-        background: #eeeadc;
+        background: #151712;
         border: 3px solid #b83d1f;
         border-top-width: 4px;
         box-sizing: border-box;
-        color: #090a08;
+        color: #eeeadc;
         display: flex;
         flex: 0 0 auto;
         flex-wrap: wrap;
@@ -874,7 +875,7 @@ Replace `.amp808-file`, `#amp808-toggle`, `#amp808-load-url`, `.amp808-motion`, 
       }
 
       #amp808-control-status {
-        color: #090a08;
+        color: #eeeadc;
         font-size: 12px;
         font-weight: 800;
         max-width: min(52vw, 640px);
@@ -891,7 +892,7 @@ Add this focus rule after the disabled button rule:
       #amp808-controls input[type="url"]:focus-visible,
       .amp808-file:focus-visible,
       .amp808-motion:focus-within {
-        outline: 3px solid #090a08;
+        outline: 3px solid #ffd400;
         outline-offset: 2px;
       }
 ```
