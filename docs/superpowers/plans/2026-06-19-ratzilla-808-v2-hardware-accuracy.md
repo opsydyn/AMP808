@@ -37,16 +37,16 @@ Add these tests near the existing palette contrast tests:
     #[test]
     fn hardware_body_palette_keeps_text_and_brand_readable() {
         assert!(
-            contrast_ratio(Classic808Palette::FACEPLATE, Classic808Palette::BODY) >= 4.5,
-            "black faceplate text should pass AA contrast on the cream body"
+            contrast_ratio(Classic808Palette::IVORY, Classic808Palette::BODY) >= 4.5,
+            "ivory body text should pass AA contrast on the dark hardware body"
         );
         assert!(
             contrast_ratio(Classic808Palette::BRAND_ORANGE, Classic808Palette::BODY) >= 4.5,
-            "body-safe brand orange should pass AA contrast on the cream body"
+            "brand orange should pass AA contrast on the dark hardware body"
         );
         assert!(
-            contrast_ratio(Classic808Palette::BODY, Classic808Palette::FACEPLATE) >= 4.5,
-            "cream body marks should pass AA contrast on black inset panels"
+            contrast_ratio(Classic808Palette::BODY, Classic808Palette::FACEPLATE) < 1.3,
+            "hardware body should stay close to black so panel separation is subtle"
         );
     }
 
@@ -58,7 +58,7 @@ Add these tests near the existing palette contrast tests:
         );
         assert_eq!(
             classic_hardware_body_style().fg,
-            Some(Classic808Palette::FACEPLATE.ratatui())
+            Some(Classic808Palette::IVORY.ratatui())
         );
         assert_eq!(
             classic_panel_inset_style().bg,
@@ -71,6 +71,18 @@ Add these tests near the existing palette contrast tests:
         assert_eq!(
             hardware_brand_style().fg,
             Some(Classic808Palette::BRAND_ORANGE.ratatui())
+        );
+        assert_eq!(
+            hardware_brand_style().bg,
+            Some(Classic808Palette::BODY.ratatui())
+        );
+        assert_eq!(
+            hardware_body_text_style().fg,
+            Some(Classic808Palette::IVORY.ratatui())
+        );
+        assert_eq!(
+            hardware_body_text_style().bg,
+            Some(Classic808Palette::BODY.ratatui())
         );
         assert_eq!(
             classic_body_border_style().fg,
@@ -95,8 +107,8 @@ Expected: FAIL because `BODY`, `BRAND_ORANGE`, and the new style helpers do not 
 Add these constants to `impl Classic808Palette`:
 
 ```rust
-    const BODY: ClassicColor = ClassicColor::new(0xee, 0xea, 0xdc);
-    const BRAND_ORANGE: ClassicColor = ClassicColor::new(0xb8, 0x3d, 0x1f);
+    const BODY: ClassicColor = ClassicColor::new(0x15, 0x17, 0x12);
+    const BRAND_ORANGE: ClassicColor = ClassicColor::new(0xf0, 0x5a, 0x28);
 ```
 
 Add these helpers near the existing style helpers:
@@ -104,7 +116,7 @@ Add these helpers near the existing style helpers:
 ```rust
 fn classic_hardware_body_style() -> Style {
     Style::default()
-        .fg(Classic808Palette::FACEPLATE.ratatui())
+        .fg(Classic808Palette::IVORY.ratatui())
         .bg(Classic808Palette::BODY.ratatui())
 }
 
@@ -119,6 +131,12 @@ fn hardware_brand_style() -> Style {
         .fg(Classic808Palette::BRAND_ORANGE.ratatui())
         .bg(Classic808Palette::BODY.ratatui())
         .add_modifier(Modifier::BOLD)
+}
+
+fn hardware_body_text_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::IVORY.ratatui())
+        .bg(Classic808Palette::BODY.ratatui())
 }
 
 fn classic_body_border_style() -> Style {
@@ -291,7 +309,7 @@ fn machine_brand_label() -> &'static str {
 }
 ```
 
-- [ ] **Step 4: Render the brand rail with cream body styling**
+- [ ] **Step 4: Render the brand rail with dark body styling**
 
 Replace the first `Line` in `render_machine_header` with:
 
@@ -782,7 +800,7 @@ No Rust test covers CSS. Before editing, capture the required visual contract in
 ```text
 Browser controls remain DOM controls for keyboard and screen-reader access.
 The visual treatment should echo the 808 lower button strip:
-- cream faceplate background
+- dark hardware faceplate background
 - black inset URL field
 - red/orange/yellow/ivory hardware button colors
 - visible focus outlines
@@ -964,7 +982,7 @@ trunk serve --public-url / --port 8080
 
 Open `http://127.0.0.1:8080/` and verify:
 
-- cream hardware body is visible around black inset panels
+- dark hardware body is visible with subtle black inset panels
 - brand rail reads `Roland Rhythm Composer TR-808 WEB`
 - instrument controls look denser and more physical
 - step strip uses large colored keycaps

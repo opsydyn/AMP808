@@ -17,9 +17,9 @@ V1 is live on GitHub Pages with the accepted Ratzilla web architecture:
 - Static hosting remains a hard constraint.
 
 The current UI has the right broad palette and a working playback shell, but it still reads as a
-terminal control grid. The Roland TR-808 reference is more physical: cream faceplate, black inset
-control panels, orange rails and branding, dense vertical instrument channels, small cream labels,
-round knobs, switch caps, lamps, and large red/orange/yellow/ivory step buttons.
+terminal control grid. The Roland TR-808 reference is more physical: dark charcoal faceplate,
+subtle black inset control panels, orange rails and branding, dense vertical instrument channels,
+small cream labels, round knobs, switch caps, lamps, and large red/orange/yellow/ivory step buttons.
 
 ## Design Direction
 
@@ -28,8 +28,10 @@ round knobs, switch caps, lamps, and large red/orange/yellow/ivory step buttons.
 The first V2 slice should make the app visibly closer to the original TR-808 before adding more
 motion.
 
-- Use the canonical ivory/cream as a structural faceplate color, not only as text.
-- Keep black panels as inset hardware bays for controls and analyser content.
+- Use black/dark charcoal as the structural faceplate color. Ivory/cream should be reserved for
+  labels, selected button caps, and small hardware details.
+- Keep panel separation subtle: black inset bays should sit close to the dark body, with orange rails
+  and borders doing the structural work.
 - Use orange rails and typography for the `Rhythm Composer TR-808 WEB` identity.
 - Replace the small text-heavy step strip with large physical keycaps:
   - steps 1-4 red
