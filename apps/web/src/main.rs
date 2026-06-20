@@ -727,6 +727,40 @@ fn mix_rgb(a: Color, b: Color, ratio_to_b: f32) -> Color {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalyserEmptyPresentation {
+    title: &'static str,
+    subtitle: &'static str,
+    hint: &'static str,
+}
+
+fn analyser_empty_state_presentation(state: &WebAppState) -> Option<AnalyserEmptyPresentation> {
+    match state.transport {
+        TransportState::Idle | TransportState::Ended => Some(AnalyserEmptyPresentation {
+            title: "LOAD AUDIO",
+            subtitle: "WEB AUDIO ANALYSER",
+            hint: "LOCAL FILE OR CORS URL",
+        }),
+        TransportState::Ready => Some(AnalyserEmptyPresentation {
+            title: "READY",
+            subtitle: "ANALYSER ARMED",
+            hint: "PRESS PLAY",
+        }),
+        TransportState::Paused => Some(AnalyserEmptyPresentation {
+            title: "PAUSED",
+            subtitle: "FROZEN ANALYSER",
+            hint: "PRESS PLAY TO RESUME",
+        }),
+        TransportState::Error => Some(AnalyserEmptyPresentation {
+            title: "CHECK SOURCE",
+            subtitle: "CORS OR MEDIA ERROR",
+            hint: "NO FAKE ANALYSER MOTION",
+        }),
+        TransportState::Playing => None,
+    }
+}
+
+#[cfg(test)]
 fn analyser_empty_state_text(state: &WebAppState) -> Option<&'static str> {
     match state.transport {
         TransportState::Idle | TransportState::Ended => Some("LOAD AUDIO OR CORS URL"),
@@ -2264,8 +2298,8 @@ fn render_visualizer(
         return;
     }
 
-    if let Some(message) = analyser_empty_state_text(state) {
-        render_analyser_empty_state(frame, inner, message, state.transport);
+    if let Some(presentation) = analyser_empty_state_presentation(state) {
+        render_analyser_empty_state(frame, inner, presentation, state.transport);
         return;
     }
 
@@ -2407,7 +2441,7 @@ fn playback_progress_fraction(current_time: f64, duration: Option<f64>) -> f64 {
 fn render_analyser_empty_state(
     frame: &mut Frame<'_>,
     area: Rect,
-    message: &'static str,
+    presentation: AnalyserEmptyPresentation,
     transport: TransportState,
 ) {
     let spacer_count = area.height.saturating_sub(3) / 2;
@@ -2417,17 +2451,17 @@ fn render_analyser_empty_state(
     }
 
     lines.push(Line::from(Span::styled(
-        message,
+        presentation.title,
         Style::default()
             .fg(transport_color(transport))
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "WEB AUDIO ANALYSER",
+        presentation.subtitle,
         classic_small_label_style(),
     )));
     lines.push(Line::from(Span::styled(
-        "REAL BANDS ONLY",
+        presentation.hint,
         classic_value_style(),
     )));
 
@@ -2767,10 +2801,11 @@ fn js_to_io_error(error: JsValue) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        analyser_bands_for_scope_width, analyser_empty_state_text, browser_media_error_message,
-        classic_body_border_style, classic_hardware_body_style, classic_pad_family,
-        classic_panel_inset_style, classic_step_keycap_style, classic_step_keycap_text_color,
-        contrast_ratio, hardware_body_text_style, hardware_brand_style, hosted_recent_urls,
+        analyser_bands_for_scope_width, analyser_empty_state_presentation,
+        analyser_empty_state_text, browser_media_error_message, classic_body_border_style,
+        classic_hardware_body_style, classic_pad_family, classic_panel_inset_style,
+        classic_step_keycap_style, classic_step_keycap_text_color, contrast_ratio,
+        hardware_body_text_style, hardware_brand_style, hosted_recent_urls,
         instrument_channel_visible_count, instrument_control_specs, instrument_family_bg,
         instrument_family_fg, instrument_label_cap_lines, instrument_label_cap_text,
         knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
@@ -3425,6 +3460,28 @@ mod tests {
         state.transport = TransportState::Playing;
         state.error = None;
         assert_eq!(analyser_empty_state_text(&state), None);
+    }
+
+    #[test]
+    fn analyser_empty_state_presentation_names_idle_paused_and_blocked_hardware_states() {
+        let mut state = WebAppState::default();
+        let idle = analyser_empty_state_presentation(&state).expect("idle presentation");
+        assert_eq!(idle.title, "LOAD AUDIO");
+        assert_eq!(idle.subtitle, "WEB AUDIO ANALYSER");
+        assert_eq!(idle.hint, "LOCAL FILE OR CORS URL");
+
+        state.transport = TransportState::Paused;
+        let paused = analyser_empty_state_presentation(&state).expect("paused presentation");
+        assert_eq!(paused.title, "PAUSED");
+        assert_eq!(paused.subtitle, "FROZEN ANALYSER");
+        assert_eq!(paused.hint, "PRESS PLAY TO RESUME");
+
+        state.transport = TransportState::Error;
+        state.error = Some("CORS blocked".to_string());
+        let blocked = analyser_empty_state_presentation(&state).expect("error presentation");
+        assert_eq!(blocked.title, "CHECK SOURCE");
+        assert_eq!(blocked.subtitle, "CORS OR MEDIA ERROR");
+        assert_eq!(blocked.hint, "NO FAKE ANALYSER MOTION");
     }
 
     #[test]
