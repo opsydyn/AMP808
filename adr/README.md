@@ -36,3 +36,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0015: Add BPM analysis and display](0015-add-bpm-analysis-and-display.md) (proposed, 2026-03-16)
 - [ADR-0016: Add expanded multi-pane UI mode](0016-expanded-multi-pane-ui-mode.md) (accepted, 2026-06-13)
 - [ADR-0017: Add a Ratzilla Web 808 player target](0017-add-ratzilla-web-808-player-target.md) (proposed, 2026-06-15)
+- [ADR-0018: Add a Web Audio EQ control graph for browser knobs](0018-add-web-audio-eq-control-graph.md) (accepted, 2026-06-20)

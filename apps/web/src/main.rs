@@ -22,9 +22,9 @@ use tui_big_text::{BigText, PixelSize};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    window, AnalyserNode, AudioContext, Document, Event, EventTarget, HtmlAudioElement,
-    HtmlButtonElement, HtmlElement, HtmlInputElement, KeyboardEvent, MediaElementAudioSourceNode,
-    Url,
+    window, AnalyserNode, AudioContext, BiquadFilterNode, BiquadFilterType, Document, Event,
+    EventTarget, GainNode, HtmlAudioElement, HtmlButtonElement, HtmlElement, HtmlInputElement,
+    KeyboardEvent, MediaElementAudioSourceNode, Url,
 };
 
 const BAND_COUNT: usize = 24;
@@ -39,6 +39,17 @@ const MACHINE_LOGO_WIDTH: u16 = 16;
 const MACHINE_LOGO_GUTTER: u16 = 2;
 const MACHINE_HEADER_TEXT_MARGIN: u16 = 4;
 const WEB_VISUALIZER_BANDS: usize = 10;
+const WEB_EQ_BAND_COUNT: usize = 10;
+const WEB_EQ_CONTROL_COUNT: usize = WEB_EQ_BAND_COUNT + 2;
+const WEB_VOLUME_MIN_DB: f64 = -30.0;
+const WEB_VOLUME_MAX_DB: f64 = 6.0;
+const WEB_EQ_MIN_DB: f64 = -12.0;
+const WEB_EQ_MAX_DB: f64 = 12.0;
+const WEB_AUDIO_CONTROL_STEP_DB: f64 = 1.0;
+const WEB_EQ_Q: f32 = 1.2;
+const WEB_EQ_FREQS: [f32; WEB_EQ_BAND_COUNT] = [
+    70.0, 180.0, 320.0, 600.0, 1_000.0, 3_000.0, 6_000.0, 12_000.0, 14_000.0, 16_000.0,
+];
 const LOGO_GLYPH_W: usize = 5;
 const LOGO_GLYPH_H: usize = 7;
 const LOGO_GLYPH_GAP: usize = 2;
@@ -216,12 +227,208 @@ fn instrument_control_specs() -> &'static [InstrumentControlSpec; 12] {
     ]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WebEqPreset {
+    name: &'static str,
+    bands: [f64; WEB_EQ_BAND_COUNT],
+}
+
+const WEB_EQ_PRESETS: &[WebEqPreset] = &[
+    WebEqPreset {
+        name: "Flat",
+        bands: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    },
+    WebEqPreset {
+        name: "Rock",
+        bands: [5.0, 4.0, 2.0, -1.0, -2.0, 2.0, 4.0, 5.0, 5.0, 5.0],
+    },
+    WebEqPreset {
+        name: "Pop",
+        bands: [-1.0, 2.0, 4.0, 5.0, 4.0, 1.0, -1.0, -1.0, 1.0, 2.0],
+    },
+    WebEqPreset {
+        name: "Jazz",
+        bands: [3.0, 4.0, 2.0, 1.0, -1.0, -1.0, 1.0, 2.0, 3.0, 4.0],
+    },
+    WebEqPreset {
+        name: "Classical",
+        bands: [3.0, 2.0, 1.0, 0.0, -1.0, -1.0, 0.0, 2.0, 3.0, 4.0],
+    },
+    WebEqPreset {
+        name: "Bass Boost",
+        bands: [8.0, 6.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    },
+    WebEqPreset {
+        name: "Treble Boost",
+        bands: [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0, 7.0],
+    },
+    WebEqPreset {
+        name: "Vocal",
+        bands: [-2.0, -1.0, 1.0, 4.0, 5.0, 4.0, 2.0, 0.0, -1.0, -2.0],
+    },
+    WebEqPreset {
+        name: "Electronic",
+        bands: [6.0, 4.0, 1.0, -1.0, -2.0, 1.0, 3.0, 4.0, 5.0, 6.0],
+    },
+    WebEqPreset {
+        name: "Acoustic",
+        bands: [3.0, 3.0, 2.0, 0.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+    },
+];
+
+#[derive(Debug, Clone, PartialEq)]
+struct WebAudioControls {
+    volume_db: f64,
+    eq_bands: [f64; WEB_EQ_BAND_COUNT],
+    preset_index: Option<usize>,
+    selected_control: usize,
+}
+
+impl Default for WebAudioControls {
+    fn default() -> Self {
+        Self {
+            volume_db: 0.0,
+            eq_bands: WEB_EQ_PRESETS[0].bands,
+            preset_index: Some(0),
+            selected_control: 0,
+        }
+    }
+}
+
+fn web_volume_to_normalized(volume_db: f64) -> f64 {
+    normalize_range(volume_db, WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB)
+}
+
+fn web_eq_band_to_normalized(gain_db: f64) -> f64 {
+    normalize_range(gain_db, WEB_EQ_MIN_DB, WEB_EQ_MAX_DB)
+}
+
+fn normalize_range(value: f64, min: f64, max: f64) -> f64 {
+    ((value.clamp(min, max) - min) / (max - min)).clamp(0.0, 1.0)
+}
+
+fn web_audio_gain_from_db(volume_db: f64) -> f32 {
+    10.0_f32.powf((volume_db.clamp(WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB) as f32) / 20.0)
+}
+
+fn web_eq_preset_label(controls: &WebAudioControls) -> &'static str {
+    controls
+        .preset_index
+        .and_then(|index| WEB_EQ_PRESETS.get(index))
+        .map(|preset| preset.name)
+        .unwrap_or("CUSTOM")
+}
+
+fn web_audio_control_value(controls: &WebAudioControls, index: usize) -> f64 {
+    match index {
+        0 => web_volume_to_normalized(controls.volume_db),
+        1..=WEB_EQ_BAND_COUNT => web_eq_band_to_normalized(controls.eq_bands[index - 1]),
+        _ => controls
+            .preset_index
+            .map(|index| normalize_range(index as f64, 0.0, (WEB_EQ_PRESETS.len() - 1) as f64))
+            .unwrap_or(1.0),
+    }
+}
+
+fn web_audio_control_status(controls: &WebAudioControls) -> String {
+    match controls.selected_control {
+        0 => format!("Master volume {:+.0} dB", controls.volume_db),
+        1..=WEB_EQ_BAND_COUNT => {
+            let band_index = controls.selected_control - 1;
+            format!(
+                "EQ {} {:+.0} dB",
+                web_eq_band_label(band_index),
+                controls.eq_bands[band_index]
+            )
+        }
+        _ => format!("Sound mode {}", web_eq_preset_label(controls)),
+    }
+}
+
+fn web_eq_band_label(index: usize) -> &'static str {
+    match index {
+        0 => "70Hz",
+        1 => "180Hz",
+        2 => "320Hz",
+        3 => "600Hz",
+        4 => "1k",
+        5 => "3k",
+        6 => "6k",
+        7 => "12k",
+        8 => "14k",
+        _ => "16k",
+    }
+}
+
+fn web_audio_controls_after_action(controls: &mut WebAudioControls, action: WebAction) -> bool {
+    match action {
+        WebAction::SelectPreviousAudioControl => {
+            controls.selected_control =
+                (controls.selected_control + WEB_EQ_CONTROL_COUNT - 1) % WEB_EQ_CONTROL_COUNT;
+            true
+        }
+        WebAction::SelectNextAudioControl => {
+            controls.selected_control = (controls.selected_control + 1) % WEB_EQ_CONTROL_COUNT;
+            true
+        }
+        WebAction::AdjustSelectedAudioControlUp => {
+            adjust_selected_web_audio_control(controls, WEB_AUDIO_CONTROL_STEP_DB);
+            true
+        }
+        WebAction::AdjustSelectedAudioControlDown => {
+            adjust_selected_web_audio_control(controls, -WEB_AUDIO_CONTROL_STEP_DB);
+            true
+        }
+        WebAction::CycleSoundMode => {
+            cycle_web_eq_preset(controls, 1);
+            true
+        }
+        WebAction::VolumeUp => {
+            controls.volume_db = (controls.volume_db + WEB_AUDIO_CONTROL_STEP_DB)
+                .clamp(WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB);
+            true
+        }
+        WebAction::VolumeDown => {
+            controls.volume_db = (controls.volume_db - WEB_AUDIO_CONTROL_STEP_DB)
+                .clamp(WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn adjust_selected_web_audio_control(controls: &mut WebAudioControls, delta_db: f64) {
+    match controls.selected_control {
+        0 => {
+            controls.volume_db =
+                (controls.volume_db + delta_db).clamp(WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB);
+        }
+        1..=WEB_EQ_BAND_COUNT => {
+            let band_index = controls.selected_control - 1;
+            controls.eq_bands[band_index] =
+                (controls.eq_bands[band_index] + delta_db).clamp(WEB_EQ_MIN_DB, WEB_EQ_MAX_DB);
+            controls.preset_index = None;
+        }
+        _ if delta_db >= 0.0 => cycle_web_eq_preset(controls, 1),
+        _ => cycle_web_eq_preset(controls, -1),
+    }
+}
+
+fn cycle_web_eq_preset(controls: &mut WebAudioControls, direction: isize) {
+    let len = WEB_EQ_PRESETS.len() as isize;
+    let current = controls.preset_index.unwrap_or(0) as isize;
+    let next = (current + direction).rem_euclid(len) as usize;
+    controls.preset_index = Some(next);
+    controls.eq_bands = WEB_EQ_PRESETS[next].bands;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebFocus {
     Transport,
     LocalFile,
     HostedUrl,
     Analyser,
+    AudioControls,
     Motion,
 }
 
@@ -230,6 +437,14 @@ enum WebAction {
     TogglePlayback,
     FocusLocalFile,
     FocusHostedUrl,
+    FocusAudioControls,
+    SelectPreviousAudioControl,
+    SelectNextAudioControl,
+    AdjustSelectedAudioControlUp,
+    AdjustSelectedAudioControlDown,
+    CycleSoundMode,
+    VolumeUp,
+    VolumeDown,
     CycleVisualMode,
     ToggleMotion,
     SeekBack,
@@ -251,6 +466,14 @@ fn web_action_for_key(key: &str) -> Option<WebAction> {
         " " | "Spacebar" | "Space" => Some(WebAction::TogglePlayback),
         "l" | "L" => Some(WebAction::FocusLocalFile),
         "u" | "U" => Some(WebAction::FocusHostedUrl),
+        "i" | "I" => Some(WebAction::FocusAudioControls),
+        "[" => Some(WebAction::SelectPreviousAudioControl),
+        "]" => Some(WebAction::SelectNextAudioControl),
+        "ArrowUp" | "k" | "K" => Some(WebAction::AdjustSelectedAudioControlUp),
+        "ArrowDown" | "j" | "J" => Some(WebAction::AdjustSelectedAudioControlDown),
+        "e" | "E" => Some(WebAction::CycleSoundMode),
+        "=" | "+" => Some(WebAction::VolumeUp),
+        "-" => Some(WebAction::VolumeDown),
         "v" | "V" => Some(WebAction::CycleVisualMode),
         "m" | "M" => Some(WebAction::ToggleMotion),
         "ArrowLeft" => Some(WebAction::SeekBack),
@@ -292,6 +515,14 @@ fn web_focus_after_action(_current: WebFocus, action: WebAction) -> WebFocus {
         | WebAction::ClearFocus => WebFocus::Transport,
         WebAction::FocusLocalFile => WebFocus::LocalFile,
         WebAction::FocusHostedUrl => WebFocus::HostedUrl,
+        WebAction::FocusAudioControls
+        | WebAction::SelectPreviousAudioControl
+        | WebAction::SelectNextAudioControl
+        | WebAction::AdjustSelectedAudioControlUp
+        | WebAction::AdjustSelectedAudioControlDown
+        | WebAction::CycleSoundMode
+        | WebAction::VolumeUp
+        | WebAction::VolumeDown => WebFocus::AudioControls,
         WebAction::CycleVisualMode => WebFocus::Analyser,
         WebAction::ToggleMotion => WebFocus::Motion,
     }
@@ -424,7 +655,8 @@ fn web_panel_spec(role: PanelRole, state: &WebAppState) -> WebPanelSpec {
         (
             PanelRole::Transport,
             WebFocus::Transport | WebFocus::LocalFile | WebFocus::HostedUrl
-        ) | (PanelRole::Analyser, WebFocus::Analyser)
+        ) | (PanelRole::Instrument, WebFocus::AudioControls)
+            | (PanelRole::Analyser, WebFocus::Analyser)
     );
     let panel_state = match (role, state.transport, focused) {
         (_, TransportState::Error, _) => PanelState::Error,
@@ -922,6 +1154,7 @@ struct WebAppState {
     bpm: WebBpmState,
     last_bpm_sample_ms: Option<f64>,
     visual_mode: WebVisualMode,
+    audio_controls: WebAudioControls,
     motion_enabled: bool,
     recent_sources: Vec<WebAudioSource>,
 }
@@ -941,6 +1174,7 @@ impl Default for WebAppState {
             bpm: WebBpmState::unavailable(),
             last_bpm_sample_ms: None,
             visual_mode: WebVisualMode::Split,
+            audio_controls: WebAudioControls::default(),
             motion_enabled: true,
             recent_sources: Vec::new(),
         }
@@ -998,6 +1232,8 @@ struct AudioGraph {
     audio: HtmlAudioElement,
     context: AudioContext,
     _source: MediaElementAudioSourceNode,
+    eq_filters: Vec<BiquadFilterNode>,
+    gain: GainNode,
     analyser: AnalyserNode,
 }
 
@@ -1039,18 +1275,54 @@ fn install_audio_graph(state: Rc<RefCell<WebAppState>>) -> Result<Rc<AudioGraph>
     let analyser = context.create_analyser()?;
     analyser.set_fft_size(1024);
     analyser.set_smoothing_time_constant(0.78);
-    source.connect_with_audio_node(&analyser)?;
+
+    let mut eq_filters: Vec<BiquadFilterNode> = Vec::with_capacity(WEB_EQ_BAND_COUNT);
+    for (index, frequency) in WEB_EQ_FREQS.iter().enumerate() {
+        let filter = context.create_biquad_filter()?;
+        filter.set_type(BiquadFilterType::Peaking);
+        filter.frequency().set_value(*frequency);
+        filter.q().set_value(WEB_EQ_Q);
+        filter.gain().set_value(0.0);
+
+        if index == 0 {
+            source.connect_with_audio_node(&filter)?;
+        } else if let Some(previous) = eq_filters.get(index - 1) {
+            previous.connect_with_audio_node(&filter)?;
+        }
+
+        eq_filters.push(filter);
+    }
+
+    let gain = context.create_gain()?;
+    if let Some(last_filter) = eq_filters.last() {
+        last_filter.connect_with_audio_node(&gain)?;
+    }
+    gain.connect_with_audio_node(&analyser)?;
     analyser.connect_with_audio_node(&context.destination())?;
 
     let graph = Rc::new(AudioGraph {
         audio,
         context,
         _source: source,
+        eq_filters,
+        gain,
         analyser,
     });
 
+    apply_web_audio_controls(&graph, &state.borrow().audio_controls);
     wire_controls(&document, Rc::clone(&graph), state)?;
     Ok(graph)
+}
+
+fn apply_web_audio_controls(graph: &AudioGraph, controls: &WebAudioControls) {
+    graph
+        .gain
+        .gain()
+        .set_value(web_audio_gain_from_db(controls.volume_db));
+
+    for (filter, gain_db) in graph.eq_filters.iter().zip(controls.eq_bands) {
+        filter.gain().set_value(gain_db as f32);
+    }
 }
 
 fn wire_controls(
@@ -1296,6 +1568,38 @@ fn wire_keyboard_events(
             WebAction::FocusHostedUrl => {
                 let _ = controls.url_input.focus();
                 let state_ref = state.borrow();
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
+            }
+            WebAction::FocusAudioControls => {
+                {
+                    let mut state = state.borrow_mut();
+                    state.status = web_audio_control_status(&state.audio_controls);
+                }
+                let state_ref = state.borrow();
+                sync_controls(
+                    &controls.toggle_button,
+                    &controls.control_status,
+                    &state_ref,
+                );
+            }
+            WebAction::SelectPreviousAudioControl
+            | WebAction::SelectNextAudioControl
+            | WebAction::AdjustSelectedAudioControlUp
+            | WebAction::AdjustSelectedAudioControlDown
+            | WebAction::CycleSoundMode
+            | WebAction::VolumeUp
+            | WebAction::VolumeDown => {
+                {
+                    let mut state = state.borrow_mut();
+                    web_audio_controls_after_action(&mut state.audio_controls, action);
+                    state.status = web_audio_control_status(&state.audio_controls);
+                }
+                let state_ref = state.borrow();
+                apply_web_audio_controls(&graph, &state_ref.audio_controls);
                 sync_controls(
                     &controls.toggle_button,
                     &controls.control_status,
@@ -1689,6 +1993,33 @@ fn command_strip_line(state: &WebAppState) -> Line<'static> {
             format!(" VIS:{}  ", web_visual_mode_label(state.visual_mode)),
             classic_small_label_style(),
         ),
+        Span::styled(
+            "I",
+            command_key_style(state.focus == WebFocus::AudioControls),
+        ),
+        Span::styled(" EQ  ", classic_small_label_style()),
+        Span::styled(
+            "E",
+            command_key_style(state.focus == WebFocus::AudioControls),
+        ),
+        Span::styled(
+            format!(" MODE:{}  ", web_eq_preset_label(&state.audio_controls)),
+            classic_small_label_style(),
+        ),
+        Span::styled(
+            "[",
+            command_key_style(state.focus == WebFocus::AudioControls),
+        ),
+        Span::styled(
+            "]",
+            command_key_style(state.focus == WebFocus::AudioControls),
+        ),
+        Span::styled(" CTRL  ", classic_small_label_style()),
+        Span::styled(
+            "+-",
+            command_key_style(state.focus == WebFocus::AudioControls),
+        ),
+        Span::styled(" VOL  ", classic_small_label_style()),
         Span::styled("M", command_key_style(state.focus == WebFocus::Motion)),
         Span::styled(" MOT  ", classic_small_label_style()),
         Span::styled("ESC", command_key_style(false)),
@@ -2267,7 +2598,14 @@ fn render_knob_bank(
             .split(rows[0]);
 
         for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
-            render_canvas_knob(frame, *cell, web_knob_value(index), spec, index == 1);
+            render_canvas_knob(
+                frame,
+                *cell,
+                web_knob_value(&state.audio_controls, index),
+                spec,
+                state.focus == WebFocus::AudioControls
+                    && index == state.audio_controls.selected_control,
+            );
         }
 
         frame.render_widget(
@@ -2298,7 +2636,14 @@ fn render_knob_bank(
         .split(rows[0]);
 
     for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
-        render_canvas_knob(frame, *cell, web_knob_value(index), spec, index == 1);
+        render_canvas_knob(
+            frame,
+            *cell,
+            web_knob_value(&state.audio_controls, index),
+            spec,
+            state.focus == WebFocus::AudioControls
+                && index == state.audio_controls.selected_control,
+        );
     }
 
     let label_lines = instrument_label_cap_lines(specs, 8);
@@ -2474,11 +2819,8 @@ fn knob_canvas_bounds_808(area: Rect) -> ([f64; 2], [f64; 2]) {
     ([-x_half, x_half], [-Y_HALF, Y_HALF])
 }
 
-fn web_knob_value(index: usize) -> f64 {
-    const VALUES: [f64; 12] = [
-        0.72, 0.62, 0.55, 0.48, 0.58, 0.66, 0.35, 0.44, 0.7, 0.5, 0.77, 0.68,
-    ];
-    VALUES[index % VALUES.len()]
+fn web_knob_value(controls: &WebAudioControls, index: usize) -> f64 {
+    web_audio_control_value(controls, index)
 }
 
 fn render_visualizer(
@@ -3453,14 +3795,16 @@ mod tests {
         recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
         render_retro_visualizer_lines, step_glow_intensity, tempo_dial_geometry_808,
         tempo_tick_color_808, waveform_bytes_to_samples, web_action_for_key,
+        web_audio_control_value, web_audio_controls_after_action, web_audio_gain_from_db,
         web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
-        web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
-        web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
-        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
-        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
-        WebAction, WebAppState, WebAudioSource, WebFocus, WebVisualMode,
-        INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        web_eq_band_to_normalized, web_eq_preset_label, web_focus_after_action, web_fx_tick_ms,
+        web_header_fx_signature, web_header_identity_fx_signature, web_motion_enabled_after_action,
+        web_panel_border_set, web_panel_fx_signature, web_panel_spec, web_seek_target_seconds,
+        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
+        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
+        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
+        WebAudioControls, WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        WEB_EQ_PRESETS,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -4064,6 +4408,35 @@ mod tests {
         assert_eq!(web_action_for_key("u"), Some(WebAction::FocusHostedUrl));
         assert_eq!(web_action_for_key("v"), Some(WebAction::CycleVisualMode));
         assert_eq!(web_action_for_key("m"), Some(WebAction::ToggleMotion));
+        assert_eq!(web_action_for_key("i"), Some(WebAction::FocusAudioControls));
+        assert_eq!(web_action_for_key("e"), Some(WebAction::CycleSoundMode));
+        assert_eq!(
+            web_action_for_key("["),
+            Some(WebAction::SelectPreviousAudioControl)
+        );
+        assert_eq!(
+            web_action_for_key("]"),
+            Some(WebAction::SelectNextAudioControl)
+        );
+        assert_eq!(
+            web_action_for_key("ArrowUp"),
+            Some(WebAction::AdjustSelectedAudioControlUp)
+        );
+        assert_eq!(
+            web_action_for_key("k"),
+            Some(WebAction::AdjustSelectedAudioControlUp)
+        );
+        assert_eq!(
+            web_action_for_key("ArrowDown"),
+            Some(WebAction::AdjustSelectedAudioControlDown)
+        );
+        assert_eq!(
+            web_action_for_key("j"),
+            Some(WebAction::AdjustSelectedAudioControlDown)
+        );
+        assert_eq!(web_action_for_key("="), Some(WebAction::VolumeUp));
+        assert_eq!(web_action_for_key("+"), Some(WebAction::VolumeUp));
+        assert_eq!(web_action_for_key("-"), Some(WebAction::VolumeDown));
         assert_eq!(web_action_for_key("ArrowLeft"), Some(WebAction::SeekBack));
         assert_eq!(
             web_action_for_key("ArrowRight"),
@@ -4086,6 +4459,18 @@ mod tests {
         assert_eq!(
             web_focus_after_action(WebFocus::HostedUrl, WebAction::CycleVisualMode),
             WebFocus::Analyser
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::Transport, WebAction::FocusAudioControls),
+            WebFocus::AudioControls
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::Transport, WebAction::CycleSoundMode),
+            WebFocus::AudioControls
+        );
+        assert_eq!(
+            web_focus_after_action(WebFocus::Transport, WebAction::AdjustSelectedAudioControlUp),
+            WebFocus::AudioControls
         );
         assert_eq!(
             web_focus_after_action(WebFocus::LocalFile, WebAction::TogglePlayback),
@@ -4123,6 +4508,59 @@ mod tests {
             web_visual_mode_after_action(WebVisualMode::Wave, WebAction::TogglePlayback),
             WebVisualMode::Wave
         );
+    }
+
+    #[test]
+    fn web_audio_controls_default_to_native_tui_volume_and_flat_eq_shape() {
+        let controls = WebAudioControls::default();
+
+        assert_eq!(controls.volume_db, 0.0);
+        assert_eq!(controls.eq_bands, [0.0; 10]);
+        assert_eq!(web_eq_preset_label(&controls), "Flat");
+        assert_eq!(controls.selected_control, 0);
+        assert_eq!(web_volume_to_normalized(0.0), 30.0 / 36.0);
+        assert_eq!(web_eq_band_to_normalized(0.0), 0.5);
+        assert_eq!(web_audio_control_value(&controls, 0), 30.0 / 36.0);
+        assert_eq!(web_audio_control_value(&controls, 1), 0.5);
+        assert_eq!(web_audio_gain_from_db(0.0), 1.0);
+    }
+
+    #[test]
+    fn web_audio_sound_modes_cycle_through_native_eq_presets() {
+        let mut controls = WebAudioControls::default();
+
+        web_audio_controls_after_action(&mut controls, WebAction::CycleSoundMode);
+
+        assert_eq!(web_eq_preset_label(&controls), WEB_EQ_PRESETS[1].name);
+        assert_eq!(controls.eq_bands, WEB_EQ_PRESETS[1].bands);
+        assert_eq!(
+            web_audio_control_value(&controls, 1),
+            web_eq_band_to_normalized(WEB_EQ_PRESETS[1].bands[0])
+        );
+    }
+
+    #[test]
+    fn web_audio_control_selection_and_adjustment_are_clamped() {
+        let mut controls = WebAudioControls::default();
+
+        web_audio_controls_after_action(&mut controls, WebAction::SelectNextAudioControl);
+        assert_eq!(controls.selected_control, 1);
+
+        web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
+        assert_eq!(controls.eq_bands[0], 1.0);
+        assert_eq!(web_eq_preset_label(&controls), "CUSTOM");
+
+        controls.eq_bands[0] = 12.0;
+        web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
+        assert_eq!(controls.eq_bands[0], 12.0);
+
+        controls.selected_control = 0;
+        controls.volume_db = 6.0;
+        web_audio_controls_after_action(&mut controls, WebAction::AdjustSelectedAudioControlUp);
+        assert_eq!(controls.volume_db, 6.0);
+
+        web_audio_controls_after_action(&mut controls, WebAction::VolumeDown);
+        assert_eq!(controls.volume_db, 5.0);
     }
 
     #[test]
