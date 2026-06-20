@@ -155,7 +155,7 @@ Goal: make the web player feel like an instrument surface, not only a playback d
   - current value
   - active sound mode
 - [x] Add short TachyonFX pulses for selected-control changes.
-- [ ] Add beat/progress chase lights across the 16 step buttons when BPM is available.
+- [x] Add beat/progress chase lights across the 16 step buttons when BPM is available.
 - [ ] Add pointer selection for knobs after keyboard behavior is stable.
 - [ ] Persist visual mode, motion toggle, volume, EQ preset, and recent hosted URLs in local storage.
 - [ ] Add drag-and-drop local audio loading.

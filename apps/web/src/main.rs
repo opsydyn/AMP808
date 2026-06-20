@@ -46,6 +46,7 @@ const WEB_VOLUME_MAX_DB: f64 = 6.0;
 const WEB_EQ_MIN_DB: f64 = -12.0;
 const WEB_EQ_MAX_DB: f64 = 12.0;
 const WEB_AUDIO_CONTROL_STEP_DB: f64 = 1.0;
+const WEB_808_STEP_COUNT: usize = 16;
 const WEB_EQ_Q: f32 = 1.2;
 const WEB_EQ_FREQS: [f32; WEB_EQ_BAND_COUNT] = [
     70.0, 180.0, 320.0, 600.0, 1_000.0, 3_000.0, 6_000.0, 12_000.0, 14_000.0, 16_000.0,
@@ -3614,6 +3615,28 @@ fn playback_progress_fraction(current_time: f64, duration: Option<f64>) -> f64 {
     (current_time.max(0.0) / duration).clamp(0.0, 1.0)
 }
 
+fn web_step_chase_index(state: &WebAppState) -> Option<usize> {
+    if state.transport != TransportState::Playing || !state.current_time.is_finite() {
+        return None;
+    }
+
+    let current_time = state.current_time.max(0.0);
+    if let Some(bpm) = state.bpm.provisional_bpm().filter(|bpm| *bpm > 0) {
+        let step_seconds = 60.0 / f64::from(bpm) / 4.0;
+        if step_seconds.is_finite() && step_seconds > 0.0 {
+            return Some(((current_time / step_seconds).floor() as usize) % WEB_808_STEP_COUNT);
+        }
+    }
+
+    state
+        .duration
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map(|duration| {
+            let progress = playback_progress_fraction(current_time, Some(duration));
+            ((progress * WEB_808_STEP_COUNT as f64).floor() as usize).min(WEB_808_STEP_COUNT - 1)
+        })
+}
+
 fn render_analyser_empty_state(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3667,6 +3690,7 @@ fn render_step_strip(
     }
 
     let step_count = (usize::from(inner.width) / 6).clamp(1, 16);
+    let active_chase_step = web_step_chase_index(state);
     let mut numbers = Vec::with_capacity(step_count);
     let mut pads = Vec::with_capacity(step_count);
     for step in 0..step_count {
@@ -3675,7 +3699,8 @@ fn render_step_strip(
             classic_small_label_style(),
         ));
         let energy = bands.get(step).copied().unwrap_or_default();
-        let glow = step_glow_intensity(state.transport, energy);
+        let glow =
+            step_chase_glow_intensity(state.transport, energy, active_chase_step == Some(step));
         pads.push(Span::styled(
             format!("{:^6}", step + 1),
             classic_step_keycap_style(classic_pad_family(step), glow),
@@ -3730,6 +3755,14 @@ fn step_glow_intensity(transport: TransportState, energy: f32) -> f32 {
         return 0.0;
     }
     ((energy - 0.08) / 0.84).clamp(0.0, 1.0)
+}
+
+fn step_chase_glow_intensity(transport: TransportState, energy: f32, is_chase_active: bool) -> f32 {
+    let analyser_glow = step_glow_intensity(transport, energy);
+    if transport != TransportState::Playing || !is_chase_active {
+        return analyser_glow;
+    }
+    analyser_glow.max(0.72)
 }
 
 fn classic_faceplate_style() -> Style {
@@ -3988,18 +4021,20 @@ mod tests {
         machine_header_height, machine_header_identity_effect_area, machine_logo_area,
         machine_logo_mark, machine_logo_pixel_size, machine_logo_style, playback_progress_fraction,
         recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
-        render_retro_visualizer_lines, step_glow_intensity, tempo_dial_geometry_808,
-        tempo_tick_color_808, waveform_bytes_to_samples, web_action_for_key,
-        web_audio_control_fx_signature, web_audio_control_value, web_audio_controls_after_action,
-        web_audio_gain_from_db, web_audio_selected_control_readout, web_compact_deck_layout,
-        web_desktop_body_layout, web_desktop_deck_layout, web_eq_band_to_normalized,
-        web_eq_preset_label, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        render_retro_visualizer_lines, step_chase_glow_intensity, step_glow_intensity,
+        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
+        web_action_for_key, web_audio_control_fx_signature, web_audio_control_value,
+        web_audio_controls_after_action, web_audio_gain_from_db,
+        web_audio_selected_control_readout, web_compact_deck_layout, web_desktop_body_layout,
+        web_desktop_deck_layout, web_eq_band_to_normalized, web_eq_preset_label,
+        web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
         web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
-        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
-        web_volume_to_normalized, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
-        PanelState, TransportState, WebAction, WebAppState, WebAudioControls, WebAudioSource,
-        WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_PRESETS,
+        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_step_chase_index,
+        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
+        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
+        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
+        WebAudioControls, WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        WEB_EQ_PRESETS,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -4592,6 +4627,23 @@ mod tests {
     }
 
     #[test]
+    fn step_chase_glow_highlights_active_playing_step_without_fake_idle_motion() {
+        assert_eq!(
+            step_chase_glow_intensity(TransportState::Playing, 0.0, false),
+            0.0
+        );
+        assert!(step_chase_glow_intensity(TransportState::Playing, 0.0, true) >= 0.68);
+        assert_eq!(
+            step_chase_glow_intensity(TransportState::Paused, 0.9, true),
+            0.0
+        );
+        assert!(
+            step_chase_glow_intensity(TransportState::Playing, 0.5, true)
+                > step_glow_intensity(TransportState::Playing, 0.5)
+        );
+    }
+
+    #[test]
     fn web_keyboard_shortcuts_map_to_terminal_actions() {
         assert_eq!(web_action_for_key(" "), Some(WebAction::TogglePlayback));
         assert_eq!(
@@ -4927,6 +4979,58 @@ mod tests {
         assert_eq!(playback_progress_fraction(30.0, None), 0.0);
         assert_eq!(playback_progress_fraction(30.0, Some(0.0)), 0.0);
         assert_eq!(playback_progress_fraction(f64::NAN, Some(120.0)), 0.0);
+    }
+
+    #[test]
+    fn web_step_chase_uses_locked_bpm_for_sixteenth_note_steps() {
+        let mut state = WebAppState {
+            transport: TransportState::Playing,
+            ..WebAppState::default()
+        };
+        feed_synthetic_bpm_frames(&mut state.bpm, 180);
+
+        state.current_time = 0.0;
+        assert_eq!(web_step_chase_index(&state), Some(0));
+
+        state.current_time = 0.124;
+        assert_eq!(web_step_chase_index(&state), Some(0));
+
+        state.current_time = 0.125;
+        assert_eq!(web_step_chase_index(&state), Some(1));
+
+        state.current_time = 1.875;
+        assert_eq!(web_step_chase_index(&state), Some(15));
+
+        state.current_time = 2.0;
+        assert_eq!(web_step_chase_index(&state), Some(0));
+    }
+
+    #[test]
+    fn web_step_chase_falls_back_to_track_progress_without_bpm() {
+        let mut state = WebAppState {
+            transport: TransportState::Playing,
+            current_time: 30.0,
+            duration: Some(120.0),
+            ..WebAppState::default()
+        };
+
+        assert_eq!(web_step_chase_index(&state), Some(4));
+
+        state.current_time = 119.9;
+        assert_eq!(web_step_chase_index(&state), Some(15));
+    }
+
+    #[test]
+    fn web_step_chase_stays_dark_when_transport_has_no_motion() {
+        let mut state = WebAppState {
+            transport: TransportState::Paused,
+            current_time: 30.0,
+            duration: Some(120.0),
+            ..WebAppState::default()
+        };
+        feed_synthetic_bpm_frames(&mut state.bpm, 180);
+
+        assert_eq!(web_step_chase_index(&state), None);
     }
 
     #[test]
