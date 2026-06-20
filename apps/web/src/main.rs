@@ -1486,9 +1486,9 @@ fn web_compact_deck_layout(area: Rect) -> Vec<Rect> {
         .spacing(WEB_PANE_GAP)
         .constraints([
             Constraint::Length(12),
+            Constraint::Length(9),
+            Constraint::Min(8),
             Constraint::Length(7),
-            Constraint::Min(7),
-            Constraint::Length(5),
         ])
         .split(area)
         .to_vec()
@@ -1508,9 +1508,9 @@ fn web_desktop_deck_layout(area: Rect) -> Vec<Rect> {
         .direction(Direction::Vertical)
         .spacing(WEB_PANE_GAP)
         .constraints([
+            Constraint::Length(10),
+            Constraint::Min(10),
             Constraint::Length(7),
-            Constraint::Min(7),
-            Constraint::Length(5),
         ])
         .split(area)
         .to_vec()
@@ -3055,12 +3055,34 @@ mod tests {
     }
 
     #[test]
+    fn web_desktop_layout_gives_hardware_controls_and_step_keys_more_presence() {
+        let deck = web_desktop_deck_layout(Rect::new(30, 0, 150, 54));
+
+        assert_eq!(deck.len(), 3);
+        assert_eq!(deck[0].height, 10);
+        assert_eq!(deck[2].height, 7);
+        assert_eq!(deck[1].y, deck[0].y + deck[0].height + 1);
+        assert_eq!(deck[2].y, deck[1].y + deck[1].height + 1);
+    }
+
+    #[test]
     fn web_compact_layout_leaves_vertical_gutters_between_panels() {
         let deck = web_compact_deck_layout(Rect::new(0, 0, 80, 40));
 
         assert_eq!(deck.len(), 4);
         assert_eq!(deck[1].y, deck[0].y + deck[0].height + 1);
         assert_eq!(deck[2].y, deck[1].y + deck[1].height + 1);
+        assert_eq!(deck[3].y, deck[2].y + deck[2].height + 1);
+    }
+
+    #[test]
+    fn web_compact_layout_preserves_step_key_presence() {
+        let deck = web_compact_deck_layout(Rect::new(0, 0, 80, 44));
+
+        assert_eq!(deck.len(), 4);
+        assert_eq!(deck[1].height, 9);
+        assert_eq!(deck[3].height, 7);
+        assert_eq!(deck[1].y, deck[0].y + deck[0].height + 1);
         assert_eq!(deck[3].y, deck[2].y + deck[2].height + 1);
     }
 
