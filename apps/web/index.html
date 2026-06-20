@@ -36,13 +36,15 @@
       #amp808-controls {
         align-items: center;
         background: #151712;
-        border: 2px solid #f05a28;
+        border: 3px solid #b83d1f;
+        border-top-width: 4px;
         box-sizing: border-box;
+        color: #eeeadc;
         display: flex;
         flex: 0 0 auto;
         flex-wrap: wrap;
-        gap: 8px;
-        padding: 9px 10px;
+        gap: 9px;
+        padding: 10px 12px;
         width: 100%;
       }
 
@@ -50,21 +52,25 @@
       #amp808-controls input[type="url"],
       .amp808-file,
       .amp808-motion {
-        border: 2px solid #050505;
+        border: 2px solid #090a08;
+        border-radius: 0;
         box-shadow:
-          inset 0 1px 0 rgba(255, 255, 255, 0.2),
-          0 2px 0 #050505;
+          inset 0 2px 0 rgba(255, 255, 255, 0.24),
+          inset 0 -2px 0 rgba(0, 0, 0, 0.22),
+          0 3px 0 #050505;
         font: inherit;
-        font-weight: 700;
-        min-height: 34px;
+        font-weight: 800;
+        min-height: 38px;
       }
 
       #amp808-controls button,
       .amp808-file,
       .amp808-motion {
+        background: #b83d1f;
+        color: #eeeadc;
         cursor: pointer;
         letter-spacing: 0;
-        padding: 6px 11px;
+        padding: 7px 12px;
         text-transform: uppercase;
       }
 
@@ -79,7 +85,7 @@
         color: #eeeadc;
         display: inline-flex;
         gap: 7px;
-        min-height: 34px;
+        min-height: 38px;
       }
 
       .amp808-motion input {
@@ -100,8 +106,8 @@
       }
 
       #amp808-controls button:disabled {
-        background: #24251d;
-        color: #777b63;
+        background: #1d1f18;
+        color: #9a9d85;
         cursor: not-allowed;
       }
 
@@ -109,14 +115,38 @@
         background: #050505;
         box-sizing: border-box;
         color: #eeeadc;
+        line-height: 1.25;
         font-weight: 400;
+        min-width: 0;
         max-width: min(42vw, 420px);
-        padding: 6px 8px;
+        padding: 7px 9px;
         width: 320px;
       }
 
+      #amp808-controls button:focus-visible,
+      #amp808-controls input[type="url"]:focus-visible,
+      .amp808-motion:focus-within {
+        outline: 3px solid #ffd400;
+        outline-offset: 2px;
+      }
+
+      @supports selector(:has(*)) {
+        .amp808-file:has(+ #amp808-file:focus-visible) {
+          outline: 3px solid #ffd400;
+          outline-offset: 2px;
+        }
+      }
+
       #amp808-file {
-        display: none;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        height: 1px;
+        margin: -1px;
+        opacity: 0;
+        overflow: hidden;
+        position: absolute;
+        white-space: nowrap;
+        width: 1px;
       }
 
       #amp808-control-status {
