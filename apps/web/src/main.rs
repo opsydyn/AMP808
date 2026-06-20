@@ -1710,7 +1710,7 @@ fn command_key_style(active: bool) -> Style {
 
 fn machine_brand_segments() -> [(&'static str, bool); 3] {
     [
-        ("Roland ", true),
+        ("Machine Controlled ", true),
         ("Rhythm Composer ", false),
         ("TR-808 WEB", true),
     ]
@@ -3711,7 +3711,10 @@ mod tests {
 
     #[test]
     fn machine_brand_label_uses_tr_808_model_identity() {
-        assert_eq!(machine_brand_label(), "Roland Rhythm Composer TR-808 WEB");
+        assert_eq!(
+            machine_brand_label(),
+            "Machine Controlled Rhythm Composer TR-808 WEB"
+        );
     }
 
     #[test]
