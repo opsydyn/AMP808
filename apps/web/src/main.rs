@@ -215,6 +215,13 @@ enum WebAction {
     ClearFocus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebVisualMode {
+    Bars,
+    Wave,
+    Split,
+}
+
 fn web_action_for_key(key: &str) -> Option<WebAction> {
     match key {
         " " | "Spacebar" | "Space" => Some(WebAction::TogglePlayback),
@@ -226,6 +233,26 @@ fn web_action_for_key(key: &str) -> Option<WebAction> {
         "ArrowRight" => Some(WebAction::SeekForward),
         "Escape" => Some(WebAction::ClearFocus),
         _ => None,
+    }
+}
+
+fn web_visual_mode_after_action(current: WebVisualMode, action: WebAction) -> WebVisualMode {
+    if action != WebAction::CycleVisualMode {
+        return current;
+    }
+
+    match current {
+        WebVisualMode::Bars => WebVisualMode::Wave,
+        WebVisualMode::Wave => WebVisualMode::Split,
+        WebVisualMode::Split => WebVisualMode::Bars,
+    }
+}
+
+fn web_visual_mode_label(mode: WebVisualMode) -> &'static str {
+    match mode {
+        WebVisualMode::Bars => "BARS",
+        WebVisualMode::Wave => "WAVE",
+        WebVisualMode::Split => "SPLIT",
     }
 }
 
@@ -816,6 +843,7 @@ struct WebAppState {
     waveform: Vec<f32>,
     bpm: WebBpmState,
     last_bpm_sample_ms: Option<f64>,
+    visual_mode: WebVisualMode,
     motion_enabled: bool,
     recent_sources: Vec<WebAudioSource>,
 }
@@ -834,6 +862,7 @@ impl Default for WebAppState {
             waveform: vec![0.0; WAVEFORM_SAMPLE_COUNT],
             bpm: WebBpmState::unavailable(),
             last_bpm_sample_ms: None,
+            visual_mode: WebVisualMode::Split,
             motion_enabled: true,
             recent_sources: Vec::new(),
         }
@@ -1198,7 +1227,12 @@ fn wire_keyboard_events(
             WebAction::CycleVisualMode => {
                 {
                     let mut state = state.borrow_mut();
-                    state.status = "Visualizer focus selected".to_string();
+                    state.visual_mode =
+                        web_visual_mode_after_action(state.visual_mode, WebAction::CycleVisualMode);
+                    state.status = format!(
+                        "Visualizer mode {}",
+                        web_visual_mode_label(state.visual_mode)
+                    );
                 }
                 let state_ref = state.borrow();
                 sync_controls(
@@ -1564,7 +1598,10 @@ fn command_strip_line(state: &WebAppState) -> Line<'static> {
         Span::styled("U", command_key_style(state.focus == WebFocus::HostedUrl)),
         Span::styled(" URL  ", classic_small_label_style()),
         Span::styled("V", command_key_style(state.focus == WebFocus::Analyser)),
-        Span::styled(" VIS  ", classic_small_label_style()),
+        Span::styled(
+            format!(" VIS:{}  ", web_visual_mode_label(state.visual_mode)),
+            classic_small_label_style(),
+        ),
         Span::styled("M", command_key_style(state.focus == WebFocus::Motion)),
         Span::styled(" MOT  ", classic_small_label_style()),
         Span::styled("ESC", command_key_style(false)),
@@ -2303,7 +2340,22 @@ fn render_visualizer(
         return;
     }
 
-    if inner.height >= 9 {
+    match state.visual_mode {
+        WebVisualMode::Bars => {
+            render_spectrum_bars(frame, inner, bands);
+        }
+        WebVisualMode::Wave => {
+            render_wave_visualizer(frame, inner, state);
+        }
+        WebVisualMode::Split => {
+            render_split_visualizer(frame, inner, state);
+        }
+    }
+}
+
+fn render_split_visualizer(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    let bands = &state.bands;
+    if area.height >= 9 {
         let scope_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -2311,19 +2363,32 @@ fn render_visualizer(
                 Constraint::Length(3),
                 Constraint::Length(1),
             ])
-            .split(inner);
+            .split(area);
         render_spectrum_bars(frame, scope_rows[0], bands);
         render_waveform_trace(frame, scope_rows[1], &state.waveform);
         render_audio_progress_row(frame, scope_rows[2], state);
-    } else if inner.height >= 5 {
+    } else if area.height >= 5 {
         let scope_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(inner);
+            .split(area);
         render_spectrum_bars(frame, scope_rows[0], bands);
         render_audio_progress_row(frame, scope_rows[1], state);
     } else {
-        render_spectrum_bars(frame, inner, bands);
+        render_spectrum_bars(frame, area, bands);
+    }
+}
+
+fn render_wave_visualizer(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
+    if area.height >= 5 {
+        let scope_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+        render_waveform_trace(frame, scope_rows[0], &state.waveform);
+        render_audio_progress_row(frame, scope_rows[1], state);
+    } else {
+        render_waveform_trace(frame, area, &state.waveform);
     }
 }
 
@@ -2815,8 +2880,9 @@ mod tests {
         web_desktop_deck_layout, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
         web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
         web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
-        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
-        WebAction, WebAppState, WebAudioSource, WebFocus, INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        web_visual_mode_after_action, web_visual_mode_label, Classic808Palette, ClassicColor,
+        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
+        WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{layout::Rect, style::Color};
@@ -3372,6 +3438,40 @@ mod tests {
             web_focus_after_action(WebFocus::Analyser, WebAction::ClearFocus),
             WebFocus::Transport
         );
+    }
+
+    #[test]
+    fn web_visual_mode_cycles_through_bars_wave_and_split() {
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Bars, WebAction::CycleVisualMode),
+            WebVisualMode::Wave
+        );
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Wave, WebAction::CycleVisualMode),
+            WebVisualMode::Split
+        );
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Split, WebAction::CycleVisualMode),
+            WebVisualMode::Bars
+        );
+        assert_eq!(
+            web_visual_mode_after_action(WebVisualMode::Wave, WebAction::TogglePlayback),
+            WebVisualMode::Wave
+        );
+    }
+
+    #[test]
+    fn web_visual_mode_labels_match_808_command_surface() {
+        assert_eq!(web_visual_mode_label(WebVisualMode::Bars), "BARS");
+        assert_eq!(web_visual_mode_label(WebVisualMode::Wave), "WAVE");
+        assert_eq!(web_visual_mode_label(WebVisualMode::Split), "SPLIT");
+    }
+
+    #[test]
+    fn web_app_defaults_to_existing_split_visualizer_mode() {
+        let state = WebAppState::default();
+
+        assert_eq!(state.visual_mode, WebVisualMode::Split);
     }
 
     #[test]
