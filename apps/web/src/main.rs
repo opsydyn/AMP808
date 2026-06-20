@@ -17,7 +17,8 @@ use ratzilla::ratatui::{
     Frame, Terminal,
 };
 use ratzilla::{WebGl2Backend, WebRenderer};
-use tachyonfx::{fx, EffectRenderer, Interpolation};
+use tachyonfx::{fx, CellFilter, EffectRenderer, Interpolation};
+use tui_big_text::{BigText, PixelSize};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
@@ -33,6 +34,10 @@ const WEB_PANE_GAP: u16 = 1;
 const INSTRUMENT_CHANNEL_FULL_HEIGHT: u16 = 7;
 const RECENT_SOURCE_LIMIT: usize = 4;
 const WEB_BPM_DEFAULT_HOP_SECONDS: f64 = 1.0 / 60.0;
+const MACHINE_HEADER_HEIGHT: u16 = 8;
+const MACHINE_LOGO_WIDTH: u16 = 16;
+const MACHINE_LOGO_GUTTER: u16 = 2;
+const MACHINE_HEADER_TEXT_MARGIN: u16 = 4;
 const WEB_VISUALIZER_BANDS: usize = 10;
 const LOGO_GLYPH_W: usize = 5;
 const LOGO_GLYPH_H: usize = 7;
@@ -470,6 +475,7 @@ struct WebFxRuntime {
     last_transition_transport: Option<TransportState>,
     transition_panel: Option<WebPanelFx>,
     header_panel: Option<WebPanelFx>,
+    header_identity_panel: Option<WebPanelFx>,
     transport_panel: Option<WebPanelFx>,
     instrument_panel: Option<WebPanelFx>,
     analyser_panel: Option<WebPanelFx>,
@@ -529,6 +535,29 @@ impl WebFxRuntime {
             .map(|panel_fx| &mut panel_fx.effect)
     }
 
+    fn header_identity_effect(
+        &mut self,
+        transport: TransportState,
+    ) -> Option<&mut tachyonfx::Effect> {
+        let Some(cycle_ms) = web_header_identity_fx_signature(transport) else {
+            self.header_identity_panel = None;
+            return None;
+        };
+        let should_rebuild = self
+            .header_identity_panel
+            .as_ref()
+            .is_none_or(|panel_fx| panel_fx.cycle_ms != cycle_ms);
+        if should_rebuild {
+            self.header_identity_panel = Some(WebPanelFx {
+                cycle_ms,
+                effect: make_web_header_identity_effect(transport),
+            });
+        }
+        self.header_identity_panel
+            .as_mut()
+            .map(|panel_fx| &mut panel_fx.effect)
+    }
+
     fn transition_effect(&mut self, transport: TransportState) -> Option<&mut tachyonfx::Effect> {
         if self.last_transition_transport == Some(transport) {
             return self
@@ -560,6 +589,7 @@ impl WebFxRuntime {
         self.last_transition_transport = None;
         self.transition_panel = None;
         self.header_panel = None;
+        self.header_identity_panel = None;
         self.transport_panel = None;
         self.instrument_panel = None;
         self.analyser_panel = None;
@@ -608,6 +638,17 @@ fn web_header_fx_signature(transport: TransportState) -> Option<u32> {
         | TransportState::Ready
         | TransportState::Paused
         | TransportState::Ended => None,
+    }
+}
+
+fn web_header_identity_fx_signature(transport: TransportState) -> Option<u32> {
+    match transport {
+        TransportState::Playing => Some(2200),
+        TransportState::Idle
+        | TransportState::Ready
+        | TransportState::Paused
+        | TransportState::Ended
+        | TransportState::Error => None,
     }
 }
 
@@ -685,6 +726,14 @@ struct WebHeaderTrace {
     dim: Color,
     accent: Color,
     warm: Color,
+}
+
+fn make_web_header_identity_effect(transport: TransportState) -> tachyonfx::Effect {
+    let cycle_ms = web_header_identity_fx_signature(transport).unwrap_or(2200);
+    fx::repeating(fx::ping_pong(
+        fx::hsl_shift_fg([0.0, 8.0, 14.0], (cycle_ms / 2, Interpolation::SineInOut))
+            .with_filter(CellFilter::NonEmpty),
+    ))
 }
 
 fn make_web_panel_trace_effect(state: PanelState) -> tachyonfx::Effect {
@@ -1524,7 +1573,7 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(machine_header_height()),
             Constraint::Min(14),
             Constraint::Length(2),
         ])
@@ -1532,8 +1581,17 @@ fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRunt
 
     render_machine_header(frame, rows[0], state);
     if state.motion_enabled {
+        let source_label = state
+            .source
+            .as_ref()
+            .map(WebAudioSource::label)
+            .unwrap_or("No audio loaded");
+        let header_identity_area = machine_header_identity_effect_area(rows[0], source_label);
         if let Some(effect) = fx.header_effect(state.transport) {
-            frame.render_effect(effect, rows[0], tick);
+            frame.render_effect(effect, header_identity_area, tick);
+        }
+        if let Some(effect) = fx.header_identity_effect(state.transport) {
+            frame.render_effect(effect, header_identity_area, tick);
         }
     }
 
@@ -1665,6 +1723,67 @@ fn machine_brand_label() -> String {
         .collect()
 }
 
+fn machine_logo_mark() -> &'static str {
+    "808"
+}
+
+fn machine_logo_style() -> Style {
+    Style::default()
+        .fg(Classic808Palette::BRAND_ORANGE.ratatui())
+        .bg(Classic808Palette::BODY.ratatui())
+        .add_modifier(Modifier::BOLD)
+}
+
+fn machine_logo_pixel_size() -> PixelSize {
+    PixelSize::HalfWidth
+}
+
+fn machine_header_height() -> u16 {
+    MACHINE_HEADER_HEIGHT
+}
+
+fn machine_header_can_show_logo(width: u16, source_label: &str) -> bool {
+    let source_line_width = "SOURCE ".len() + source_label.chars().count();
+    let text_width = machine_brand_label().chars().count().max(source_line_width) as u16;
+    let min_width = MACHINE_LOGO_WIDTH
+        .saturating_add(MACHINE_LOGO_GUTTER)
+        .saturating_add(text_width)
+        .saturating_add(MACHINE_HEADER_TEXT_MARGIN);
+
+    width >= min_width
+}
+
+fn machine_logo_area(area: Rect, source_label: &str) -> Option<Rect> {
+    if area.height < 3 || !machine_header_can_show_logo(area.width, source_label) {
+        return None;
+    }
+
+    Some(Rect::new(
+        area.x,
+        area.y,
+        MACHINE_LOGO_WIDTH,
+        area.height.min(MACHINE_HEADER_HEIGHT),
+    ))
+}
+
+fn machine_header_text_area(area: Rect, source_label: &str) -> Rect {
+    if machine_logo_area(area, source_label).is_some() {
+        let x_offset = MACHINE_LOGO_WIDTH.saturating_add(MACHINE_LOGO_GUTTER);
+        return Rect::new(
+            area.x.saturating_add(x_offset),
+            area.y,
+            area.width.saturating_sub(x_offset),
+            area.height,
+        );
+    }
+
+    area
+}
+
+fn machine_header_identity_effect_area(area: Rect, _source_label: &str) -> Rect {
+    area
+}
+
 fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState) {
     let brand_label = machine_brand_label();
     let source_label = state
@@ -1702,12 +1821,29 @@ fn render_machine_header(frame: &mut Frame<'_>, area: Rect, state: &WebAppState)
         ]),
     ];
 
+    let text_area = machine_header_text_area(area, source_label);
+    let alignment = if machine_logo_area(area, source_label).is_some() {
+        Alignment::Left
+    } else {
+        Alignment::Center
+    };
+
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .style(classic_hardware_body_style())
-            .alignment(Alignment::Center),
-        area,
+            .alignment(alignment),
+        text_area,
     );
+
+    if let Some(logo_area) = machine_logo_area(area, source_label) {
+        let logo = BigText::builder()
+            .pixel_size(machine_logo_pixel_size())
+            .style(machine_logo_style())
+            .left_aligned()
+            .lines(vec![Line::from(machine_logo_mark())])
+            .build();
+        frame.render_widget(logo, logo_area);
+    }
 }
 
 fn render_808_panel(
@@ -3311,20 +3447,27 @@ mod tests {
         hardware_body_text_style, hardware_brand_style, hosted_recent_urls,
         instrument_channel_visible_count, instrument_control_specs, instrument_family_bg,
         instrument_family_fg, instrument_label_cap_lines, instrument_label_cap_text,
-        knob_canvas_bounds_808, machine_brand_label, playback_progress_fraction,
+        knob_canvas_bounds_808, machine_brand_label, machine_header_can_show_logo,
+        machine_header_height, machine_header_identity_effect_area, machine_logo_area,
+        machine_logo_mark, machine_logo_pixel_size, machine_logo_style, playback_progress_fraction,
         recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
         render_retro_visualizer_lines, step_glow_intensity, tempo_dial_geometry_808,
         tempo_tick_color_808, waveform_bytes_to_samples, web_action_for_key,
         web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
         web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
-        web_motion_enabled_after_action, web_panel_border_set, web_panel_fx_signature,
-        web_panel_spec, web_seek_target_seconds, web_tempo_display, web_transition_fx_signature,
-        web_visual_mode_after_action, web_visual_mode_label, Classic808Palette, ClassicColor,
-        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
-        WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
+        web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
+        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_tempo_display,
+        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
+        Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole, PanelState, TransportState,
+        WebAction, WebAppState, WebAudioSource, WebFocus, WebVisualMode,
+        INSTRUMENT_CHANNEL_FULL_HEIGHT,
     };
     use amp808_core::web_audio::WebBpmState;
-    use ratzilla::ratatui::{layout::Rect, style::Color};
+    use ratzilla::ratatui::{
+        layout::Rect,
+        style::{Color, Modifier},
+    };
+    use tui_big_text::PixelSize;
 
     #[test]
     fn classic_pad_family_matches_tr_808_step_groups() {
@@ -3572,6 +3715,53 @@ mod tests {
     }
 
     #[test]
+    fn machine_logo_mark_uses_large_808_identity() {
+        assert_eq!(machine_logo_mark(), "808");
+        assert_eq!(
+            machine_logo_style().fg,
+            Some(Classic808Palette::BRAND_ORANGE.ratatui())
+        );
+        assert!(machine_logo_style().add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn machine_header_shows_left_logo_only_when_brand_and_source_have_room() {
+        let source = "01. Valentino Kanzyani - Nueva York.mp3";
+
+        assert!(machine_header_can_show_logo(160, source));
+        assert!(!machine_header_can_show_logo(56, source));
+    }
+
+    #[test]
+    fn machine_logo_area_sits_in_top_left_corner_of_main_header() {
+        let header = Rect::new(0, 0, 160, machine_header_height());
+        let logo = machine_logo_area(header, "01. Valentino Kanzyani - Nueva York.mp3")
+            .expect("wide header should expose logo area");
+
+        assert_eq!(logo.x, header.x);
+        assert_eq!(logo.y, header.y);
+        assert!(logo.x + logo.width < header.x + header.width);
+        assert_eq!(machine_logo_pixel_size(), PixelSize::HalfWidth);
+        assert!(machine_header_height() >= 8);
+        assert!(logo.width <= 18);
+        assert_eq!(logo.height, machine_header_height());
+    }
+
+    #[test]
+    fn machine_header_identity_effect_area_includes_big_logo_mark() {
+        let header = Rect::new(0, 0, 160, machine_header_height());
+        let logo = machine_logo_area(header, "01. Valentino Kanzyani - Nueva York.mp3")
+            .expect("wide header should expose logo area");
+        let identity =
+            machine_header_identity_effect_area(header, "01. Valentino Kanzyani - Nueva York.mp3");
+
+        assert_eq!(identity.x, logo.x);
+        assert_eq!(identity.y, header.y);
+        assert!(identity.width >= logo.width);
+        assert_eq!(identity.height, header.height);
+    }
+
+    #[test]
     fn web_tempo_display_maps_bpm_state_to_dial_label_and_position() {
         let mut locked_state = WebBpmState::estimating();
         feed_synthetic_bpm_frames(&mut locked_state, 180);
@@ -3802,6 +3992,31 @@ mod tests {
         assert_eq!(web_header_fx_signature(TransportState::Ended), None);
         assert_eq!(web_header_fx_signature(TransportState::Playing), Some(1400));
         assert_eq!(web_header_fx_signature(TransportState::Error), Some(600));
+    }
+
+    #[test]
+    fn web_header_identity_fx_signature_tracks_playback_only() {
+        assert_eq!(web_header_identity_fx_signature(TransportState::Idle), None);
+        assert_eq!(
+            web_header_identity_fx_signature(TransportState::Ready),
+            None
+        );
+        assert_eq!(
+            web_header_identity_fx_signature(TransportState::Paused),
+            None
+        );
+        assert_eq!(
+            web_header_identity_fx_signature(TransportState::Ended),
+            None
+        );
+        assert_eq!(
+            web_header_identity_fx_signature(TransportState::Error),
+            None
+        );
+        assert_eq!(
+            web_header_identity_fx_signature(TransportState::Playing),
+            Some(2200)
+        );
     }
 
     #[test]

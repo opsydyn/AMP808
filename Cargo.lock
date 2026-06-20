@@ -111,6 +111,7 @@ dependencies = [
  "js-sys",
  "ratzilla",
  "tachyonfx",
+ "tui-big-text",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
