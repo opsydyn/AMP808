@@ -62,6 +62,45 @@ impl BrowserMediaError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebExternalProvider {
+    SoundCloud,
+    YouTube,
+    Bandcamp,
+}
+
+impl WebExternalProvider {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::SoundCloud => "SoundCloud",
+            Self::YouTube => "YouTube",
+            Self::Bandcamp => "Bandcamp",
+        }
+    }
+
+    pub fn unsupported_static_web_message(self) -> &'static str {
+        match self {
+            Self::SoundCloud => {
+                "SoundCloud page URLs need native AMP808 with yt-dlp; AMP808 Web needs a direct CORS-enabled audio URL."
+            }
+            Self::YouTube => {
+                "YouTube page URLs need native AMP808 with yt-dlp; AMP808 Web needs a direct CORS-enabled audio URL."
+            }
+            Self::Bandcamp => {
+                "Bandcamp page URLs need native AMP808 with yt-dlp; AMP808 Web needs a direct CORS-enabled audio URL."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebAudioSourceKind {
+    LocalFile,
+    DirectMediaUrl,
+    ProviderPage(WebExternalProvider),
+    HostedUrl,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebAudioSource {
     LocalFile { name: String },
@@ -81,12 +120,101 @@ impl WebAudioSource {
         matches!(self, Self::HostedUrl { .. })
     }
 
+    pub fn kind(&self) -> WebAudioSourceKind {
+        match self {
+            Self::LocalFile { .. } => WebAudioSourceKind::LocalFile,
+            Self::HostedUrl { url } => classify_hosted_audio_url(url),
+        }
+    }
+
     pub fn label(&self) -> &str {
         match self {
             Self::LocalFile { name } => name,
             Self::HostedUrl { url } => url,
         }
     }
+}
+
+pub fn classify_hosted_audio_url(url: &str) -> WebAudioSourceKind {
+    let Some(host) = hosted_url_host(url) else {
+        return WebAudioSourceKind::HostedUrl;
+    };
+
+    if is_soundcloud_host(&host) {
+        return WebAudioSourceKind::ProviderPage(WebExternalProvider::SoundCloud);
+    }
+    if is_youtube_host(&host) {
+        return WebAudioSourceKind::ProviderPage(WebExternalProvider::YouTube);
+    }
+    if is_bandcamp_host(&host) {
+        return WebAudioSourceKind::ProviderPage(WebExternalProvider::Bandcamp);
+    }
+    if hosted_url_has_direct_media_extension(url) {
+        return WebAudioSourceKind::DirectMediaUrl;
+    }
+
+    WebAudioSourceKind::HostedUrl
+}
+
+fn hosted_url_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .or_else(|| url.strip_prefix("//"))
+        .unwrap_or(url);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if authority.is_empty() {
+        return None;
+    }
+
+    Some(
+        authority
+            .trim_matches(['[', ']'])
+            .split(':')
+            .next()
+            .unwrap_or(authority)
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+    )
+}
+
+fn is_soundcloud_host(host: &str) -> bool {
+    host == "soundcloud.com" || host.ends_with(".soundcloud.com")
+}
+
+fn is_youtube_host(host: &str) -> bool {
+    matches!(host, "youtu.be" | "youtube.com" | "youtube-nocookie.com")
+        || host.ends_with(".youtube.com")
+        || host.ends_with(".youtube-nocookie.com")
+}
+
+fn is_bandcamp_host(host: &str) -> bool {
+    host == "bandcamp.com" || host.ends_with(".bandcamp.com")
+}
+
+fn hosted_url_has_direct_media_extension(url: &str) -> bool {
+    let path = url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    [
+        ".aac", ".flac", ".m4a", ".m4b", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".webm",
+    ]
+    .iter()
+    .any(|extension| path.ends_with(extension))
 }
 
 /// Converts analyser byte bins into normalized visual bands.
@@ -357,6 +485,61 @@ mod tests {
 
         assert!(source.is_hosted_url());
         assert_eq!(source.label(), "https://example.com/audio.mp3");
+    }
+
+    #[test]
+    fn web_audio_sources_classify_provider_page_urls() {
+        let cases = [
+            (
+                "https://soundcloud.com/artist/track",
+                super::WebExternalProvider::SoundCloud,
+            ),
+            (
+                "https://on.soundcloud.com/share",
+                super::WebExternalProvider::SoundCloud,
+            ),
+            (
+                "https://www.youtube.com/watch?v=abc",
+                super::WebExternalProvider::YouTube,
+            ),
+            ("https://youtu.be/abc", super::WebExternalProvider::YouTube),
+            (
+                "https://artist.bandcamp.com/track/song",
+                super::WebExternalProvider::Bandcamp,
+            ),
+        ];
+
+        for (url, provider) in cases {
+            assert_eq!(
+                WebAudioSource::hosted_url(url).kind(),
+                super::WebAudioSourceKind::ProviderPage(provider),
+                "{url} should be classified as a provider page"
+            );
+        }
+    }
+
+    #[test]
+    fn web_audio_sources_classify_direct_media_urls_and_local_files() {
+        assert_eq!(
+            WebAudioSource::hosted_url("https://cdn.example.com/audio.MP3?token=123").kind(),
+            super::WebAudioSourceKind::DirectMediaUrl
+        );
+        assert_eq!(
+            WebAudioSource::hosted_url("https://example.com/listen/123").kind(),
+            super::WebAudioSourceKind::HostedUrl
+        );
+        assert_eq!(
+            WebAudioSource::local_file("private-break.wav").kind(),
+            super::WebAudioSourceKind::LocalFile
+        );
+    }
+
+    #[test]
+    fn provider_page_messages_name_native_amp808_and_direct_cors_audio() {
+        assert_eq!(
+            super::WebExternalProvider::SoundCloud.unsupported_static_web_message(),
+            "SoundCloud page URLs need native AMP808 with yt-dlp; AMP808 Web needs a direct CORS-enabled audio URL."
+        );
     }
 
     #[test]

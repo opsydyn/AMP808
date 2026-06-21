@@ -272,6 +272,11 @@ analysis under CORS. For GitHub Pages there is no backend proxy, so AMP808 Web c
 server that blocks CORS. If a hosted source fails, the app shows a visible browser media/CORS error
 instead of fake analyser motion.
 
+Provider page URLs such as SoundCloud, YouTube, and Bandcamp are native/TUI features through
+`yt-dlp`; they are not supported by the static web app. AMP808 Web needs a direct browser-playable
+audio URL with CORS enabled. Any future provider playback or backend-assisted resolver is governed
+by [ADR-0019](adr/0019-web-external-provider-and-ffmpeg-wasm-boundary.md).
+
 Browser support is intentionally modern: WebAssembly, WebGL2, `HTMLAudioElement`, and Web Audio are
 required. If WebGL2 is unavailable, use the native terminal app instead.
 
@@ -375,6 +380,9 @@ Key architectural decisions are documented in [adr/](adr/):
 - [ADR-0006: HTTP streaming with ICY metadata](adr/0006-http-streaming-with-icy-metadata.md)
 - [ADR-0007: Provider trait for external music services](adr/0007-provider-trait-for-external-music-services.md)
 - [ADR-0008: Album art display via ratatui-image](adr/0008-album-art-display-via-ratatui-image.md)
+- [ADR-0017: Ratzilla Web 808 player target](adr/0017-add-ratzilla-web-808-player-target.md)
+- [ADR-0018: Web Audio EQ control graph](adr/0018-add-web-audio-eq-control-graph.md)
+- [ADR-0019: Web external provider and ffmpeg.wasm boundary](adr/0019-web-external-provider-and-ffmpeg-wasm-boundary.md)
 
 ## Keyboard Shortcuts
 

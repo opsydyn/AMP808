@@ -2,7 +2,7 @@ use std::{cell::RefCell, io, rc::Rc};
 
 use amp808_core::web_audio::{
     analyser_bands_to_heights, analyser_bins_to_bands, BrowserMediaError, WebAudioSource,
-    WebBpmDisplayState, WebBpmState, WEB_BPM_MAX, WEB_BPM_MIN,
+    WebAudioSourceKind, WebBpmDisplayState, WebBpmState, WEB_BPM_MAX, WEB_BPM_MIN,
 };
 use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::ratatui::{
@@ -1296,6 +1296,17 @@ fn browser_media_error_message(source: Option<&WebAudioSource>, error_code: Opti
         .to_string()
 }
 
+fn hosted_url_rejection_message(url: &str) -> Option<&'static str> {
+    match WebAudioSource::hosted_url(url).kind() {
+        WebAudioSourceKind::ProviderPage(provider) => {
+            Some(provider.unsupported_static_web_message())
+        }
+        WebAudioSourceKind::LocalFile
+        | WebAudioSourceKind::DirectMediaUrl
+        | WebAudioSourceKind::HostedUrl => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransportState {
     Idle,
@@ -1717,6 +1728,10 @@ fn wire_controls(
                     &control_status,
                     "Enter a hosted audio URL first.".to_string(),
                 );
+                return;
+            }
+            if let Some(message) = hosted_url_rejection_message(&url) {
+                set_error(&state, &toggle_button, &control_status, message.to_string());
                 return;
             }
 
@@ -4418,30 +4433,31 @@ mod tests {
         classic_hardware_body_style, classic_pad_family, classic_panel_inset_style,
         classic_step_keycap_style, classic_step_keycap_text_color, contrast_ratio,
         hardware_body_text_style, hardware_brand_style, hosted_recent_urls,
-        instrument_channel_visible_count, instrument_control_specs, instrument_family_bg,
-        instrument_family_fg, instrument_label_cap_lines, instrument_label_cap_text,
-        knob_canvas_bounds_808, machine_brand_label, machine_header_can_show_logo,
-        machine_header_height, machine_header_identity_effect_area, machine_logo_area,
-        machine_logo_mark, machine_logo_pixel_size, machine_logo_style, playback_progress_fraction,
-        recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
-        render_retro_visualizer_lines, step_chase_glow_intensity, step_glow_intensity,
-        tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
-        web_action_for_key, web_audio_control_at_cell, web_audio_control_fx_signature,
-        web_audio_control_hit_zones, web_audio_control_value, web_audio_controls_after_action,
-        web_audio_drop_error, web_audio_gain_from_db, web_audio_selected_control_readout,
-        web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
-        web_eq_band_to_normalized, web_eq_preset_label, web_focus_after_action, web_fx_tick_ms,
-        web_header_fx_signature, web_header_identity_fx_signature, web_motion_enabled_after_action,
-        web_panel_border_set, web_panel_fx_signature, web_panel_spec,
-        web_persisted_settings_from_json, web_persisted_settings_from_state,
-        web_persisted_settings_to_json, web_pointer_cell_from_canvas_offset,
-        web_restore_persisted_settings, web_seek_target_seconds, web_step_chase_index,
-        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
-        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
-        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
-        WebAudioControlHitZone, WebAudioControls, WebAudioSource, WebFocus, WebPersistedSettings,
-        WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_MAX_DB, WEB_EQ_MIN_DB,
-        WEB_EQ_PRESETS, WEB_VOLUME_MAX_DB,
+        hosted_url_rejection_message, instrument_channel_visible_count, instrument_control_specs,
+        instrument_family_bg, instrument_family_fg, instrument_label_cap_lines,
+        instrument_label_cap_text, knob_canvas_bounds_808, machine_brand_label,
+        machine_header_can_show_logo, machine_header_height, machine_header_identity_effect_area,
+        machine_logo_area, machine_logo_mark, machine_logo_pixel_size, machine_logo_style,
+        playback_progress_fraction, recent_source_display_label, remember_recent_source,
+        render_logo_visualizer_lines, render_retro_visualizer_lines, step_chase_glow_intensity,
+        step_glow_intensity, tempo_dial_geometry_808, tempo_tick_color_808,
+        waveform_bytes_to_samples, web_action_for_key, web_audio_control_at_cell,
+        web_audio_control_fx_signature, web_audio_control_hit_zones, web_audio_control_value,
+        web_audio_controls_after_action, web_audio_drop_error, web_audio_gain_from_db,
+        web_audio_selected_control_readout, web_compact_deck_layout, web_desktop_body_layout,
+        web_desktop_deck_layout, web_eq_band_to_normalized, web_eq_preset_label,
+        web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
+        web_panel_fx_signature, web_panel_spec, web_persisted_settings_from_json,
+        web_persisted_settings_from_state, web_persisted_settings_to_json,
+        web_pointer_cell_from_canvas_offset, web_restore_persisted_settings,
+        web_seek_target_seconds, web_step_chase_index, web_tempo_display,
+        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
+        web_volume_to_normalized, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
+        PanelState, TransportState, WebAction, WebAppState, WebAudioControlHitZone,
+        WebAudioControls, WebAudioSource, WebFocus, WebPersistedSettings, WebVisualMode,
+        INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_MAX_DB, WEB_EQ_MIN_DB, WEB_EQ_PRESETS,
+        WEB_VOLUME_MAX_DB,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -5671,6 +5687,24 @@ mod tests {
         assert_eq!(
             browser_media_error_message(None, None),
             "Browser could not load this audio file."
+        );
+    }
+
+    #[test]
+    fn hosted_provider_page_urls_are_rejected_before_browser_load() {
+        assert_eq!(
+            hosted_url_rejection_message("https://soundcloud.com/artist/track"),
+            Some(
+                "SoundCloud page URLs need native AMP808 with yt-dlp; AMP808 Web needs a direct CORS-enabled audio URL."
+            )
+        );
+        assert_eq!(
+            hosted_url_rejection_message("https://cdn.example.com/audio.mp3"),
+            None
+        );
+        assert_eq!(
+            hosted_url_rejection_message("https://example.com/listen/123"),
+            None
         );
     }
 

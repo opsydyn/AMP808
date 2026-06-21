@@ -71,6 +71,8 @@
 - [x] Hosted URL input with explicit CORS constraints
 - [x] Web Audio analyser data mapped through `amp808-core`
 - [x] Initial TR-808-inspired web faceplate
+- [x] External provider and `ffmpeg.wasm` boundary captured in
+      [ADR-0019](adr/0019-web-external-provider-and-ffmpeg-wasm-boundary.md)
 - [ ] Exabind-grade panel fidelity, Canvas/Braille knobs, accessibility contract, TachyonFX motion,
       and GitHub Pages deployment polish tracked in
       [docs/ratzilla-web-808-roadmap.md](docs/ratzilla-web-808-roadmap.md)

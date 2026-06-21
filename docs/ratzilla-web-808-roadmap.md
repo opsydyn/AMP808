@@ -168,6 +168,35 @@ Acceptance:
 - Motion remains optional through the existing motion toggle.
 - Audio control changes remain backed by Web Audio state, not visual-only display state.
 
+## Phase 7: External Provider Boundary
+
+Goal: make the web source model honest and extensible without breaking the static GitHub Pages
+architecture.
+
+- [x] Capture the provider/page URL and `ffmpeg.wasm` boundary in
+      `adr/0019-web-external-provider-and-ffmpeg-wasm-boundary.md`.
+- [x] Add pure source classification for likely provider/page URLs:
+  - SoundCloud
+  - YouTube
+  - Bandcamp
+  - generic direct media URL
+  - browser-selected local file
+- [x] Show a specific unsupported-provider message when a recognised page URL is pasted into AMP808
+      Web.
+- [x] Keep direct CORS-enabled audio URLs on the current `HTMLAudioElement` playback path.
+- [x] Add an explicit "open in native AMP808" handoff message for provider URLs that need `yt-dlp`.
+- [ ] Evaluate `ffmpeg.wasm` only as a future local-file import/transcode option, with bundle size,
+      load time, worker, and browser-header costs documented before adding a dependency.
+- [ ] Create a separate ADR before adding any backend-assisted resolver, proxy, official provider
+      API, or embed path.
+
+Acceptance:
+
+- Users understand why SoundCloud/page URLs are not supported in the static web player.
+- Direct media URLs that satisfy browser media and CORS rules keep working.
+- No web slice adds `yt-dlp`, native FFmpeg, subprocess, filesystem resolver, or proxy assumptions.
+- Any future provider playback parity work is explicitly non-static and has its own ADR.
+
 ## Verification Matrix
 
 Run these before marking any web roadmap phase complete:
@@ -191,3 +220,4 @@ Run these before marking any web roadmap phase complete:
 - Ratatui Canvas docs: <https://docs.rs/ratatui/latest/ratatui/widgets/canvas/struct.Canvas.html>
 - Web target ADR: `adr/0017-add-ratzilla-web-808-player-target.md`
 - Native 808 TachyonFX ADR: `adr/0010-tachyonfx-animated-808-chrome-and-visualizer-parity.md`
+- Web provider boundary ADR: `adr/0019-web-external-provider-and-ffmpeg-wasm-boundary.md`
