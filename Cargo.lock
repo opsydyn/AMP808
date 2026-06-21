@@ -110,6 +110,8 @@ dependencies = [
  "critical-section",
  "js-sys",
  "ratzilla",
+ "serde",
+ "serde_json",
  "tachyonfx",
  "tui-big-text",
  "wasm-bindgen",

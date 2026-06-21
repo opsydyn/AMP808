@@ -17,6 +17,7 @@ use ratzilla::ratatui::{
     Frame, Terminal,
 };
 use ratzilla::{WebGl2Backend, WebRenderer};
+use serde::{Deserialize, Serialize};
 use tachyonfx::{fx, CellFilter, EffectRenderer, Interpolation};
 use tui_big_text::{BigText, PixelSize};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
@@ -24,7 +25,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     window, AnalyserNode, AudioContext, BiquadFilterNode, BiquadFilterType, Document, Event,
     EventTarget, GainNode, HtmlAudioElement, HtmlButtonElement, HtmlElement, HtmlInputElement,
-    KeyboardEvent, MediaElementAudioSourceNode, Url,
+    KeyboardEvent, MediaElementAudioSourceNode, MouseEvent, Url,
 };
 
 const BAND_COUNT: usize = 24;
@@ -47,6 +48,7 @@ const WEB_EQ_MIN_DB: f64 = -12.0;
 const WEB_EQ_MAX_DB: f64 = 12.0;
 const WEB_AUDIO_CONTROL_STEP_DB: f64 = 1.0;
 const WEB_808_STEP_COUNT: usize = 16;
+const WEB_LOCAL_STORAGE_KEY: &str = "amp808.web.settings.v1";
 const WEB_EQ_Q: f32 = 1.2;
 const WEB_EQ_FREQS: [f32; WEB_EQ_BAND_COUNT] = [
     70.0, 180.0, 320.0, 600.0, 1_000.0, 3_000.0, 6_000.0, 12_000.0, 14_000.0, 16_000.0,
@@ -298,6 +300,12 @@ impl Default for WebAudioControls {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WebAudioControlHitZone {
+    index: usize,
+    area: Rect,
+}
+
 fn web_volume_to_normalized(volume_db: f64) -> f64 {
     normalize_range(volume_db, WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB)
 }
@@ -331,6 +339,72 @@ fn web_audio_control_value(controls: &WebAudioControls, index: usize) -> f64 {
             .map(|index| normalize_range(index as f64, 0.0, (WEB_EQ_PRESETS.len() - 1) as f64))
             .unwrap_or(1.0),
     }
+}
+
+fn web_audio_control_hit_zones(
+    cells: &[Rect],
+    visible_count: usize,
+) -> Vec<WebAudioControlHitZone> {
+    cells
+        .iter()
+        .copied()
+        .take(visible_count)
+        .enumerate()
+        .filter(|(_, area)| area.width > 0 && area.height > 0)
+        .map(|(index, area)| WebAudioControlHitZone { index, area })
+        .collect()
+}
+
+fn web_audio_control_at_cell(
+    hit_zones: &[WebAudioControlHitZone],
+    x: u16,
+    y: u16,
+) -> Option<usize> {
+    hit_zones
+        .iter()
+        .find(|zone| rect_contains_terminal_cell(zone.area, x, y))
+        .map(|zone| zone.index)
+}
+
+fn rect_contains_terminal_cell(area: Rect, x: u16, y: u16) -> bool {
+    area.width > 0
+        && area.height > 0
+        && x >= area.x
+        && x < area.x.saturating_add(area.width)
+        && y >= area.y
+        && y < area.y.saturating_add(area.height)
+}
+
+fn web_pointer_cell_from_canvas_offset(
+    offset_x: f64,
+    offset_y: f64,
+    pixel_width: f64,
+    pixel_height: f64,
+    terminal_area: Rect,
+) -> Option<(u16, u16)> {
+    if !offset_x.is_finite()
+        || !offset_y.is_finite()
+        || !pixel_width.is_finite()
+        || !pixel_height.is_finite()
+        || offset_x < 0.0
+        || offset_y < 0.0
+        || offset_x >= pixel_width
+        || offset_y >= pixel_height
+        || pixel_width <= 0.0
+        || pixel_height <= 0.0
+        || terminal_area.width == 0
+        || terminal_area.height == 0
+    {
+        return None;
+    }
+
+    let cell_x = ((offset_x / pixel_width) * f64::from(terminal_area.width)).floor() as u16;
+    let cell_y = ((offset_y / pixel_height) * f64::from(terminal_area.height)).floor() as u16;
+
+    Some((
+        terminal_area.x.saturating_add(cell_x),
+        terminal_area.y.saturating_add(cell_y),
+    ))
 }
 
 fn web_audio_selected_control_readout(controls: &WebAudioControls) -> String {
@@ -1256,6 +1330,8 @@ struct WebAppState {
     last_bpm_sample_ms: Option<f64>,
     visual_mode: WebVisualMode,
     audio_controls: WebAudioControls,
+    terminal_area: Rect,
+    audio_control_hit_zones: Vec<WebAudioControlHitZone>,
     motion_enabled: bool,
     recent_sources: Vec<WebAudioSource>,
 }
@@ -1276,10 +1352,125 @@ impl Default for WebAppState {
             last_bpm_sample_ms: None,
             visual_mode: WebVisualMode::Split,
             audio_controls: WebAudioControls::default(),
+            terminal_area: Rect::new(0, 0, 0, 0),
+            audio_control_hit_zones: Vec::new(),
             motion_enabled: true,
             recent_sources: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WebPersistedSettings {
+    visual_mode: String,
+    motion_enabled: bool,
+    volume_db: f64,
+    eq_bands: [f64; WEB_EQ_BAND_COUNT],
+    preset_index: Option<usize>,
+    recent_hosted_urls: Vec<String>,
+}
+
+fn web_persisted_settings_from_state(state: &WebAppState) -> WebPersistedSettings {
+    WebPersistedSettings {
+        visual_mode: web_visual_mode_storage_value(state.visual_mode).to_string(),
+        motion_enabled: state.motion_enabled,
+        volume_db: state.audio_controls.volume_db,
+        eq_bands: state.audio_controls.eq_bands,
+        preset_index: state.audio_controls.preset_index,
+        recent_hosted_urls: hosted_recent_urls(&state.recent_sources),
+    }
+}
+
+fn web_persisted_settings_to_json(
+    settings: &WebPersistedSettings,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(settings)
+}
+
+fn web_persisted_settings_from_json(json: &str) -> Option<WebPersistedSettings> {
+    serde_json::from_str(json).ok()
+}
+
+fn web_restore_persisted_settings(state: &mut WebAppState, settings: WebPersistedSettings) {
+    if let Some(mode) = web_visual_mode_from_storage_value(&settings.visual_mode) {
+        state.visual_mode = mode;
+    }
+    state.motion_enabled = settings.motion_enabled;
+    state.audio_controls.volume_db = settings
+        .volume_db
+        .clamp(WEB_VOLUME_MIN_DB, WEB_VOLUME_MAX_DB);
+    state.audio_controls.eq_bands = settings
+        .eq_bands
+        .map(|band| band.clamp(WEB_EQ_MIN_DB, WEB_EQ_MAX_DB));
+    state.audio_controls.preset_index = settings
+        .preset_index
+        .filter(|index| WEB_EQ_PRESETS.get(*index).is_some());
+    if state.audio_controls.preset_index.is_none() {
+        state.audio_controls.selected_control = 0;
+    }
+    state.audio_controls.selected_control = state
+        .audio_controls
+        .selected_control
+        .min(WEB_EQ_CONTROL_COUNT - 1);
+    state.audio_controls.control_revision = 0;
+    state.recent_sources.clear();
+    for url in settings
+        .recent_hosted_urls
+        .into_iter()
+        .rev()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+    {
+        remember_recent_source(&mut state.recent_sources, WebAudioSource::hosted_url(url));
+    }
+}
+
+fn web_visual_mode_storage_value(mode: WebVisualMode) -> &'static str {
+    match mode {
+        WebVisualMode::Bars => "bars",
+        WebVisualMode::Wave => "wave",
+        WebVisualMode::Retro => "retro",
+        WebVisualMode::Logo => "logo",
+        WebVisualMode::Split => "split",
+    }
+}
+
+fn web_visual_mode_from_storage_value(value: &str) -> Option<WebVisualMode> {
+    match value {
+        "bars" => Some(WebVisualMode::Bars),
+        "wave" => Some(WebVisualMode::Wave),
+        "retro" => Some(WebVisualMode::Retro),
+        "logo" => Some(WebVisualMode::Logo),
+        "split" => Some(WebVisualMode::Split),
+        _ => None,
+    }
+}
+
+fn load_web_settings_from_storage(state: &mut WebAppState) {
+    let Some(storage) = web_local_storage() else {
+        return;
+    };
+    let Ok(Some(json)) = storage.get_item(WEB_LOCAL_STORAGE_KEY) else {
+        return;
+    };
+    if let Some(settings) = web_persisted_settings_from_json(&json) {
+        web_restore_persisted_settings(state, settings);
+    }
+}
+
+fn persist_web_settings_to_storage(state: &WebAppState) {
+    let Some(storage) = web_local_storage() else {
+        return;
+    };
+    let settings = web_persisted_settings_from_state(state);
+    let Ok(json) = web_persisted_settings_to_json(&settings) else {
+        return;
+    };
+    let _ = storage.set_item(WEB_LOCAL_STORAGE_KEY, &json);
+}
+
+fn web_local_storage() -> Option<web_sys::Storage> {
+    window()?.local_storage().ok().flatten()
 }
 
 fn remember_recent_source(recent_sources: &mut Vec<WebAudioSource>, source: WebAudioSource) {
@@ -1350,15 +1541,22 @@ struct WebKeyboardControls {
 fn main() -> io::Result<()> {
     let backend = WebGl2Backend::new_with_options(WebGl2BackendOptions::new().grid_id("app"))?;
     let terminal = Terminal::new(backend)?;
-    let state = Rc::new(RefCell::new(WebAppState::default()));
+    let mut initial_state = WebAppState::default();
+    load_web_settings_from_storage(&mut initial_state);
+    let state = Rc::new(RefCell::new(initial_state));
     let fx_runtime = Rc::new(RefCell::new(WebFxRuntime::default()));
     let graph = install_audio_graph(Rc::clone(&state)).map_err(js_to_io_error)?;
 
     terminal.draw_web(move |frame| {
         sample_analyser(&graph, &state);
-        let snapshot = state.borrow().clone();
+        let mut snapshot = state.borrow().clone();
         let mut fx_runtime = fx_runtime.borrow_mut();
-        render_web_808(frame, &snapshot, &mut fx_runtime);
+        render_web_808(frame, &mut snapshot, &mut fx_runtime);
+        {
+            let mut state = state.borrow_mut();
+            state.terminal_area = snapshot.terminal_area;
+            state.audio_control_hit_zones = snapshot.audio_control_hit_zones;
+        }
     });
 
     Ok(())
@@ -1440,7 +1638,15 @@ fn wire_controls(
     let motion_input: HtmlInputElement = element_by_id(document, "amp808-motion")?;
     let control_status: HtmlElement = element_by_id(document, "amp808-control-status")?;
     let recent_url_list: HtmlElement = element_by_id(document, "amp808-recent-urls")?;
+    let app_root: HtmlElement = element_by_id(document, "app")?;
     let object_url: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    {
+        let state_ref = state.borrow();
+        motion_input.set_checked(state_ref.motion_enabled);
+        sync_recent_url_options(document, &recent_url_list, &state_ref.recent_sources);
+        sync_controls(&toggle_button, &control_status, &state_ref);
+    }
 
     {
         let graph = Rc::clone(&graph);
@@ -1534,6 +1740,7 @@ fn wire_controls(
                 state.bpm = WebBpmState::estimating();
                 state.last_bpm_sample_ms = None;
                 sync_recent_url_options(&document, &recent_url_list, &state.recent_sources);
+                persist_web_settings_to_storage(&state);
             }
             sync_controls(&toggle_button, &control_status, &state.borrow());
         })?;
@@ -1597,11 +1804,19 @@ fn wire_controls(
                 state.motion_enabled = motion_input.checked();
                 state.focus = WebFocus::Motion;
                 state.status = motion_status_text(state.motion_enabled).to_string();
+                persist_web_settings_to_storage(&state);
             }
             let state_ref = state.borrow();
             sync_controls(&toggle_button, &control_status, &state_ref);
         })?;
     }
+
+    wire_pointer_events(
+        app_root,
+        Rc::clone(&state),
+        toggle_button.clone(),
+        control_status.clone(),
+    )?;
 
     wire_keyboard_events(
         document,
@@ -1618,6 +1833,51 @@ fn wire_controls(
 
     wire_audio_events(&graph.audio, state, toggle_button, control_status)?;
     Ok(())
+}
+
+fn wire_pointer_events(
+    app_root: HtmlElement,
+    state: Rc<RefCell<WebAppState>>,
+    toggle_button: HtmlButtonElement,
+    control_status: HtmlElement,
+) -> Result<(), JsValue> {
+    let app_root_for_event = app_root.clone();
+    add_event_listener(app_root.as_ref(), "click", move |event| {
+        let Ok(mouse_event) = event.dyn_into::<MouseEvent>() else {
+            return;
+        };
+
+        let bounds = app_root_for_event.get_bounding_client_rect();
+        let target_index = {
+            let state = state.borrow();
+            let Some((x, y)) = web_pointer_cell_from_canvas_offset(
+                f64::from(mouse_event.client_x()) - bounds.left(),
+                f64::from(mouse_event.client_y()) - bounds.top(),
+                bounds.width(),
+                bounds.height(),
+                state.terminal_area,
+            ) else {
+                return;
+            };
+            let Some(index) = web_audio_control_at_cell(&state.audio_control_hit_zones, x, y)
+            else {
+                return;
+            };
+            index
+        };
+
+        mouse_event.prevent_default();
+        {
+            let mut state = state.borrow_mut();
+            state.audio_controls.selected_control = target_index.min(WEB_EQ_CONTROL_COUNT - 1);
+            state.audio_controls.control_revision =
+                state.audio_controls.control_revision.wrapping_add(1);
+            state.focus = WebFocus::AudioControls;
+            state.status = web_audio_control_status(&state.audio_controls);
+            persist_web_settings_to_storage(&state);
+            sync_controls(&toggle_button, &control_status, &state);
+        }
+    })
 }
 
 fn wire_keyboard_events(
@@ -1698,6 +1958,7 @@ fn wire_keyboard_events(
                     let mut state = state.borrow_mut();
                     web_audio_controls_after_action(&mut state.audio_controls, action);
                     state.status = web_audio_control_status(&state.audio_controls);
+                    persist_web_settings_to_storage(&state);
                 }
                 let state_ref = state.borrow();
                 apply_web_audio_controls(&graph, &state_ref.audio_controls);
@@ -1716,6 +1977,7 @@ fn wire_keyboard_events(
                         "Visualizer mode {}",
                         web_visual_mode_label(state.visual_mode)
                     );
+                    persist_web_settings_to_storage(&state);
                 }
                 let state_ref = state.borrow();
                 sync_controls(
@@ -1731,6 +1993,7 @@ fn wire_keyboard_events(
                         web_motion_enabled_after_action(state.motion_enabled, action);
                     state.status = motion_status_text(state.motion_enabled).to_string();
                     controls.motion_input.set_checked(state.motion_enabled);
+                    persist_web_settings_to_storage(&state);
                 }
                 let state_ref = state.borrow();
                 sync_controls(
@@ -1958,12 +2221,14 @@ fn sample_analyser(graph: &AudioGraph, state: &Rc<RefCell<WebAppState>>) {
     state.waveform = waveform;
 }
 
-fn render_web_808(frame: &mut Frame<'_>, state: &WebAppState, fx: &mut WebFxRuntime) {
+fn render_web_808(frame: &mut Frame<'_>, state: &mut WebAppState, fx: &mut WebFxRuntime) {
     let tick = fx.next_tick(js_sys::Date::now());
     if !state.motion_enabled {
         fx.clear_effects();
     }
     let area = frame.area();
+    state.terminal_area = area;
+    state.audio_control_hit_zones.clear();
     let block = Block::default()
         .title(" AMP808 WEB ")
         .title_style(hardware_brand_style())
@@ -2656,7 +2921,7 @@ fn tempo_tick_color_808() -> Color {
 fn render_knob_bank(
     frame: &mut Frame<'_>,
     area: Rect,
-    state: &WebAppState,
+    state: &mut WebAppState,
     fx: &mut WebFxRuntime,
     tick: tachyonfx::Duration,
 ) {
@@ -2671,6 +2936,12 @@ fn render_knob_bank(
     let specs = &specs[..visible];
 
     if inner.height < 4 {
+        let knob_cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
+            .split(inner);
+        state.audio_control_hit_zones = web_audio_control_hit_zones(&knob_cells, visible);
+
         let mut knob_row = Vec::with_capacity(specs.len());
         let mut label_row = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -2697,6 +2968,7 @@ fn render_knob_bank(
             .direction(Direction::Horizontal)
             .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
             .split(rows[0]);
+        state.audio_control_hit_zones = web_audio_control_hit_zones(&knob_cells, visible);
 
         for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
             render_canvas_knob(
@@ -2740,6 +3012,7 @@ fn render_knob_bank(
             .direction(Direction::Horizontal)
             .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
             .split(rows[0]);
+        state.audio_control_hit_zones = web_audio_control_hit_zones(&knob_cells, visible);
 
         for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
             render_canvas_knob(
@@ -2785,6 +3058,7 @@ fn render_knob_bank(
         .direction(Direction::Horizontal)
         .constraints(vec![Constraint::Ratio(1, visible as u32); visible])
         .split(rows[0]);
+    state.audio_control_hit_zones = web_audio_control_hit_zones(&knob_cells, visible);
 
     for (index, (cell, spec)) in knob_cells.iter().zip(specs.iter()).enumerate() {
         render_canvas_knob(
@@ -4023,18 +4297,22 @@ mod tests {
         recent_source_display_label, remember_recent_source, render_logo_visualizer_lines,
         render_retro_visualizer_lines, step_chase_glow_intensity, step_glow_intensity,
         tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
-        web_action_for_key, web_audio_control_fx_signature, web_audio_control_value,
-        web_audio_controls_after_action, web_audio_gain_from_db,
-        web_audio_selected_control_readout, web_compact_deck_layout, web_desktop_body_layout,
-        web_desktop_deck_layout, web_eq_band_to_normalized, web_eq_preset_label,
-        web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
+        web_action_for_key, web_audio_control_at_cell, web_audio_control_fx_signature,
+        web_audio_control_hit_zones, web_audio_control_value, web_audio_controls_after_action,
+        web_audio_gain_from_db, web_audio_selected_control_readout, web_compact_deck_layout,
+        web_desktop_body_layout, web_desktop_deck_layout, web_eq_band_to_normalized,
+        web_eq_preset_label, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
         web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_seek_target_seconds, web_step_chase_index,
-        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
-        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
-        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
-        WebAudioControls, WebAudioSource, WebFocus, WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT,
-        WEB_EQ_PRESETS,
+        web_panel_fx_signature, web_panel_spec, web_persisted_settings_from_json,
+        web_persisted_settings_from_state, web_persisted_settings_to_json,
+        web_pointer_cell_from_canvas_offset, web_restore_persisted_settings,
+        web_seek_target_seconds, web_step_chase_index, web_tempo_display,
+        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
+        web_volume_to_normalized, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
+        PanelState, TransportState, WebAction, WebAppState, WebAudioControlHitZone,
+        WebAudioControls, WebAudioSource, WebFocus, WebPersistedSettings, WebVisualMode,
+        INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_MAX_DB, WEB_EQ_MIN_DB, WEB_EQ_PRESETS,
+        WEB_VOLUME_MAX_DB,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -4841,6 +5119,76 @@ mod tests {
     }
 
     #[test]
+    fn web_audio_control_hit_test_returns_selected_knob_index() {
+        let zones = vec![
+            WebAudioControlHitZone {
+                index: 0,
+                area: Rect::new(4, 2, 8, 5),
+            },
+            WebAudioControlHitZone {
+                index: 1,
+                area: Rect::new(14, 2, 8, 5),
+            },
+        ];
+
+        assert_eq!(web_audio_control_at_cell(&zones, 4, 2), Some(0));
+        assert_eq!(web_audio_control_at_cell(&zones, 21, 6), Some(1));
+        assert_eq!(web_audio_control_at_cell(&zones, 12, 4), None);
+    }
+
+    #[test]
+    fn web_audio_control_hit_test_uses_exclusive_bottom_and_right_edges() {
+        let zones = vec![WebAudioControlHitZone {
+            index: 3,
+            area: Rect::new(10, 5, 6, 4),
+        }];
+
+        assert_eq!(web_audio_control_at_cell(&zones, 15, 8), Some(3));
+        assert_eq!(web_audio_control_at_cell(&zones, 16, 8), None);
+        assert_eq!(web_audio_control_at_cell(&zones, 15, 9), None);
+    }
+
+    #[test]
+    fn web_audio_control_hit_zones_ignore_empty_or_hidden_cells() {
+        let cells = vec![
+            Rect::new(0, 0, 8, 5),
+            Rect::new(8, 0, 0, 5),
+            Rect::new(16, 0, 8, 0),
+            Rect::new(24, 0, 8, 5),
+        ];
+
+        assert_eq!(
+            web_audio_control_hit_zones(&cells, 3),
+            vec![WebAudioControlHitZone {
+                index: 0,
+                area: cells[0],
+            }]
+        );
+    }
+
+    #[test]
+    fn web_pointer_cell_from_canvas_offset_maps_browser_pixels_to_terminal_cells() {
+        let terminal = Rect::new(2, 3, 160, 80);
+
+        assert_eq!(
+            web_pointer_cell_from_canvas_offset(400.0, 200.0, 800.0, 400.0, terminal),
+            Some((82, 43))
+        );
+        assert_eq!(
+            web_pointer_cell_from_canvas_offset(799.0, 399.0, 800.0, 400.0, terminal),
+            Some((161, 82))
+        );
+        assert_eq!(
+            web_pointer_cell_from_canvas_offset(800.0, 399.0, 800.0, 400.0, terminal),
+            None
+        );
+        assert_eq!(
+            web_pointer_cell_from_canvas_offset(0.0, -1.0, 800.0, 400.0, terminal),
+            None
+        );
+    }
+
+    #[test]
     fn web_audio_control_fx_signature_only_runs_after_user_interaction() {
         assert_eq!(web_audio_control_fx_signature(0), None);
         assert_eq!(web_audio_control_fx_signature(1), Some(420));
@@ -4860,6 +5208,86 @@ mod tests {
         let state = WebAppState::default();
 
         assert_eq!(state.visual_mode, WebVisualMode::Split);
+    }
+
+    #[test]
+    fn persisted_settings_capture_restorable_browser_preferences_only() {
+        let mut state = WebAppState {
+            visual_mode: WebVisualMode::Logo,
+            motion_enabled: false,
+            ..WebAppState::default()
+        };
+        state.audio_controls.volume_db = -8.0;
+        state.audio_controls.eq_bands = WEB_EQ_PRESETS[2].bands;
+        state.audio_controls.preset_index = Some(2);
+        state.audio_controls.selected_control = 4;
+        state.recent_sources = vec![
+            WebAudioSource::local_file("private-break.wav"),
+            WebAudioSource::hosted_url("https://example.com/a.mp3"),
+            WebAudioSource::hosted_url("https://cdn.example.com/b.ogg"),
+        ];
+
+        let settings = web_persisted_settings_from_state(&state);
+
+        assert_eq!(settings.visual_mode, "logo");
+        assert!(!settings.motion_enabled);
+        assert_eq!(settings.volume_db, -8.0);
+        assert_eq!(settings.eq_bands, WEB_EQ_PRESETS[2].bands);
+        assert_eq!(settings.preset_index, Some(2));
+        assert_eq!(
+            settings.recent_hosted_urls,
+            vec![
+                "https://example.com/a.mp3".to_string(),
+                "https://cdn.example.com/b.ogg".to_string()
+            ]
+        );
+
+        let json = web_persisted_settings_to_json(&settings).expect("settings should serialize");
+        let restored =
+            web_persisted_settings_from_json(&json).expect("settings should deserialize");
+
+        assert_eq!(restored, settings);
+    }
+
+    #[test]
+    fn restored_settings_apply_clamped_state_without_transport_side_effects() {
+        let settings = WebPersistedSettings {
+            visual_mode: "retro".to_string(),
+            motion_enabled: false,
+            volume_db: 99.0,
+            eq_bands: [20.0, -20.0, 2.0, 1.0, 0.0, -1.0, -2.0, 3.0, 4.0, 5.0],
+            preset_index: Some(999),
+            recent_hosted_urls: vec![
+                "https://example.com/a.mp3".to_string(),
+                "https://example.com/a.mp3".to_string(),
+                "".to_string(),
+                "https://cdn.example.com/b.ogg".to_string(),
+            ],
+        };
+        let mut state = WebAppState {
+            transport: TransportState::Playing,
+            source: Some(WebAudioSource::local_file("current.wav")),
+            ..WebAppState::default()
+        };
+
+        web_restore_persisted_settings(&mut state, settings);
+
+        assert_eq!(state.visual_mode, WebVisualMode::Retro);
+        assert!(!state.motion_enabled);
+        assert_eq!(state.audio_controls.volume_db, WEB_VOLUME_MAX_DB);
+        assert_eq!(state.audio_controls.eq_bands[0], WEB_EQ_MAX_DB);
+        assert_eq!(state.audio_controls.eq_bands[1], WEB_EQ_MIN_DB);
+        assert_eq!(state.audio_controls.preset_index, None);
+        assert_eq!(state.audio_controls.selected_control, 0);
+        assert_eq!(state.audio_controls.control_revision, 0);
+        assert_eq!(state.transport, TransportState::Playing);
+        assert_eq!(
+            hosted_recent_urls(&state.recent_sources),
+            vec![
+                "https://example.com/a.mp3".to_string(),
+                "https://cdn.example.com/b.ogg".to_string()
+            ]
+        );
     }
 
     #[test]
