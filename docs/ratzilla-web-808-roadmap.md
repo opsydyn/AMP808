@@ -158,7 +158,7 @@ Goal: make the web player feel like an instrument surface, not only a playback d
 - [x] Add beat/progress chase lights across the 16 step buttons when BPM is available.
 - [x] Add pointer selection for knobs after keyboard behavior is stable.
 - [x] Persist visual mode, motion toggle, volume, EQ preset, and recent hosted URLs in local storage.
-- [ ] Add drag-and-drop local audio loading.
+- [x] Add drag-and-drop local audio loading.
 
 Acceptance:
 

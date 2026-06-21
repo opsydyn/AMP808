@@ -20,6 +20,8 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Document",
     "DomRect",
+    "DataTransfer",
+    "DragEvent",
     "Element",
     "EventTarget",
     "HtmlButtonElement",

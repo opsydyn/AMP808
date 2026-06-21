@@ -23,9 +23,9 @@ use tui_big_text::{BigText, PixelSize};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    window, AnalyserNode, AudioContext, BiquadFilterNode, BiquadFilterType, Document, Event,
-    EventTarget, GainNode, HtmlAudioElement, HtmlButtonElement, HtmlElement, HtmlInputElement,
-    KeyboardEvent, MediaElementAudioSourceNode, MouseEvent, Url,
+    window, AnalyserNode, AudioContext, BiquadFilterNode, BiquadFilterType, Document, DragEvent,
+    Event, EventTarget, GainNode, HtmlAudioElement, HtmlButtonElement, HtmlElement,
+    HtmlInputElement, KeyboardEvent, MediaElementAudioSourceNode, MouseEvent, Url,
 };
 
 const BAND_COUNT: usize = 24;
@@ -49,6 +49,10 @@ const WEB_EQ_MAX_DB: f64 = 12.0;
 const WEB_AUDIO_CONTROL_STEP_DB: f64 = 1.0;
 const WEB_808_STEP_COUNT: usize = 16;
 const WEB_LOCAL_STORAGE_KEY: &str = "amp808.web.settings.v1";
+const WEB_AUDIO_DROP_REJECTION: &str = "Drop an audio file to load it into AMP808 web.";
+const WEB_AUDIO_DROP_EXTENSIONS: &[&str] = &[
+    ".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".webm",
+];
 const WEB_EQ_Q: f32 = 1.2;
 const WEB_EQ_FREQS: [f32; WEB_EQ_BAND_COUNT] = [
     70.0, 180.0, 320.0, 600.0, 1_000.0, 3_000.0, 6_000.0, 12_000.0, 14_000.0, 16_000.0,
@@ -1251,7 +1255,7 @@ fn analyser_empty_state_presentation(state: &WebAppState) -> Option<AnalyserEmpt
         TransportState::Idle | TransportState::Ended => Some(AnalyserEmptyPresentation {
             title: "LOAD AUDIO",
             subtitle: "WEB AUDIO ANALYSER",
-            hint: "LOCAL FILE OR CORS URL",
+            hint: "LOCAL FILE, DROP, OR CORS URL",
         }),
         TransportState::Ready => Some(AnalyserEmptyPresentation {
             title: "READY",
@@ -1489,6 +1493,27 @@ fn hosted_recent_urls(recent_sources: &[WebAudioSource]) -> Vec<String> {
         .collect()
 }
 
+fn web_audio_drop_error(file_name: &str, media_type: &str) -> Option<&'static str> {
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if media_type.starts_with("audio/") {
+        return None;
+    }
+
+    let file_name = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(file_name)
+        .to_ascii_lowercase();
+    if WEB_AUDIO_DROP_EXTENSIONS
+        .iter()
+        .any(|extension| file_name.ends_with(extension))
+    {
+        None
+    } else {
+        Some(WEB_AUDIO_DROP_REJECTION)
+    }
+}
+
 fn recent_source_display_label(source: &WebAudioSource, max_width: usize) -> String {
     let prefix = if source.is_hosted_url() { "U " } else { "F " };
     let max_width = max_width.max(prefix.len());
@@ -1663,38 +1688,14 @@ fn wire_controls(
                 return;
             };
 
-            revoke_object_url(&object_url);
-            match Url::create_object_url_with_blob(&file) {
-                Ok(url) => {
-                    graph.audio.set_cross_origin(None);
-                    graph.audio.set_src(&url);
-                    graph.audio.load();
-                    *object_url.borrow_mut() = Some(url);
-
-                    {
-                        let mut state = state.borrow_mut();
-                        let source = WebAudioSource::local_file(file.name());
-                        state.source = Some(source.clone());
-                        remember_recent_source(&mut state.recent_sources, source);
-                        state.transport = TransportState::Ready;
-                        state.status = "Local audio loaded".to_string();
-                        state.error = None;
-                        state.current_time = 0.0;
-                        state.duration = None;
-                        state.bands = vec![0.0; BAND_COUNT];
-                        state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
-                        state.bpm = WebBpmState::estimating();
-                        state.last_bpm_sample_ms = None;
-                    }
-                    sync_controls(&toggle_button, &control_status, &state.borrow());
-                }
-                Err(error) => set_error(
-                    &state,
-                    &toggle_button,
-                    &control_status,
-                    format!("Could not create browser object URL: {error:?}"),
-                ),
-            }
+            load_browser_local_file(
+                file,
+                &graph,
+                &state,
+                &object_url,
+                &toggle_button,
+                &control_status,
+            );
         })?;
     }
 
@@ -1811,6 +1812,15 @@ fn wire_controls(
         })?;
     }
 
+    wire_drop_events(
+        app_root.clone(),
+        Rc::clone(&graph),
+        Rc::clone(&state),
+        Rc::clone(&object_url),
+        toggle_button.clone(),
+        control_status.clone(),
+    )?;
+
     wire_pointer_events(
         app_root,
         Rc::clone(&state),
@@ -1832,6 +1842,125 @@ fn wire_controls(
     )?;
 
     wire_audio_events(&graph.audio, state, toggle_button, control_status)?;
+    Ok(())
+}
+
+fn load_browser_local_file(
+    file: web_sys::File,
+    graph: &AudioGraph,
+    state: &Rc<RefCell<WebAppState>>,
+    object_url: &Rc<RefCell<Option<String>>>,
+    toggle_button: &HtmlButtonElement,
+    control_status: &HtmlElement,
+) {
+    let file_name = file.name();
+    if let Some(message) = web_audio_drop_error(&file_name, &file.type_()) {
+        set_error(state, toggle_button, control_status, message.to_string());
+        return;
+    }
+
+    revoke_object_url(object_url);
+    match Url::create_object_url_with_blob(&file) {
+        Ok(url) => {
+            graph.audio.set_cross_origin(None);
+            graph.audio.set_src(&url);
+            graph.audio.load();
+            *object_url.borrow_mut() = Some(url);
+
+            {
+                let mut state = state.borrow_mut();
+                let source = WebAudioSource::local_file(file_name);
+                state.source = Some(source.clone());
+                remember_recent_source(&mut state.recent_sources, source);
+                state.transport = TransportState::Ready;
+                state.focus = WebFocus::LocalFile;
+                state.status = "Local audio loaded".to_string();
+                state.error = None;
+                state.current_time = 0.0;
+                state.duration = None;
+                state.bands = vec![0.0; BAND_COUNT];
+                state.waveform = vec![0.0; WAVEFORM_SAMPLE_COUNT];
+                state.bpm = WebBpmState::estimating();
+                state.last_bpm_sample_ms = None;
+            }
+            sync_controls(toggle_button, control_status, &state.borrow());
+        }
+        Err(error) => set_error(
+            state,
+            toggle_button,
+            control_status,
+            format!("Could not create browser object URL: {error:?}"),
+        ),
+    }
+}
+
+fn wire_drop_events(
+    app_root: HtmlElement,
+    graph: Rc<AudioGraph>,
+    state: Rc<RefCell<WebAppState>>,
+    object_url: Rc<RefCell<Option<String>>>,
+    toggle_button: HtmlButtonElement,
+    control_status: HtmlElement,
+) -> Result<(), JsValue> {
+    {
+        let state = Rc::clone(&state);
+        let toggle_button = toggle_button.clone();
+        let control_status = control_status.clone();
+        add_event_listener(app_root.as_ref(), "dragover", move |event| {
+            let Ok(drag_event) = event.dyn_into::<DragEvent>() else {
+                return;
+            };
+            drag_event.prevent_default();
+            if let Some(data_transfer) = drag_event.data_transfer() {
+                data_transfer.set_drop_effect("copy");
+            }
+            {
+                let mut state = state.borrow_mut();
+                state.focus = WebFocus::LocalFile;
+                state.status = "Drop local audio to load".to_string();
+                state.error = None;
+            }
+            sync_controls(&toggle_button, &control_status, &state.borrow());
+        })?;
+    }
+
+    {
+        let graph = Rc::clone(&graph);
+        let state = Rc::clone(&state);
+        let object_url = Rc::clone(&object_url);
+        let toggle_button = toggle_button.clone();
+        let control_status = control_status.clone();
+        add_event_listener(app_root.as_ref(), "drop", move |event| {
+            let Ok(drag_event) = event.dyn_into::<DragEvent>() else {
+                return;
+            };
+            drag_event.prevent_default();
+
+            let Some(file) = drag_event
+                .data_transfer()
+                .and_then(|data_transfer| data_transfer.files())
+                .and_then(|files| files.get(0))
+            else {
+                set_error(
+                    &state,
+                    &toggle_button,
+                    &control_status,
+                    WEB_AUDIO_DROP_REJECTION.to_string(),
+                );
+                return;
+            };
+
+            load_browser_local_file(
+                file,
+                &graph,
+                &state,
+                &object_url,
+                &toggle_button,
+                &control_status,
+            );
+        })?;
+    }
+
     Ok(())
 }
 
@@ -2351,7 +2480,7 @@ fn command_strip_line(state: &WebAppState) -> Line<'static> {
         Span::styled(">", command_key_style(state.focus == WebFocus::Transport)),
         Span::styled(" +15  ", classic_small_label_style()),
         Span::styled("L", command_key_style(state.focus == WebFocus::LocalFile)),
-        Span::styled(" FILE  ", classic_small_label_style()),
+        Span::styled(" FILE/DROP  ", classic_small_label_style()),
         Span::styled("U", command_key_style(state.focus == WebFocus::HostedUrl)),
         Span::styled(" URL  ", classic_small_label_style()),
         Span::styled("V", command_key_style(state.focus == WebFocus::Analyser)),
@@ -4299,20 +4428,20 @@ mod tests {
         tempo_dial_geometry_808, tempo_tick_color_808, waveform_bytes_to_samples,
         web_action_for_key, web_audio_control_at_cell, web_audio_control_fx_signature,
         web_audio_control_hit_zones, web_audio_control_value, web_audio_controls_after_action,
-        web_audio_gain_from_db, web_audio_selected_control_readout, web_compact_deck_layout,
-        web_desktop_body_layout, web_desktop_deck_layout, web_eq_band_to_normalized,
-        web_eq_preset_label, web_focus_after_action, web_fx_tick_ms, web_header_fx_signature,
-        web_header_identity_fx_signature, web_motion_enabled_after_action, web_panel_border_set,
-        web_panel_fx_signature, web_panel_spec, web_persisted_settings_from_json,
-        web_persisted_settings_from_state, web_persisted_settings_to_json,
-        web_pointer_cell_from_canvas_offset, web_restore_persisted_settings,
-        web_seek_target_seconds, web_step_chase_index, web_tempo_display,
-        web_transition_fx_signature, web_visual_mode_after_action, web_visual_mode_label,
-        web_volume_to_normalized, Classic808Palette, ClassicColor, ClassicPadFamily, PanelRole,
-        PanelState, TransportState, WebAction, WebAppState, WebAudioControlHitZone,
-        WebAudioControls, WebAudioSource, WebFocus, WebPersistedSettings, WebVisualMode,
-        INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_MAX_DB, WEB_EQ_MIN_DB, WEB_EQ_PRESETS,
-        WEB_VOLUME_MAX_DB,
+        web_audio_drop_error, web_audio_gain_from_db, web_audio_selected_control_readout,
+        web_compact_deck_layout, web_desktop_body_layout, web_desktop_deck_layout,
+        web_eq_band_to_normalized, web_eq_preset_label, web_focus_after_action, web_fx_tick_ms,
+        web_header_fx_signature, web_header_identity_fx_signature, web_motion_enabled_after_action,
+        web_panel_border_set, web_panel_fx_signature, web_panel_spec,
+        web_persisted_settings_from_json, web_persisted_settings_from_state,
+        web_persisted_settings_to_json, web_pointer_cell_from_canvas_offset,
+        web_restore_persisted_settings, web_seek_target_seconds, web_step_chase_index,
+        web_tempo_display, web_transition_fx_signature, web_visual_mode_after_action,
+        web_visual_mode_label, web_volume_to_normalized, Classic808Palette, ClassicColor,
+        ClassicPadFamily, PanelRole, PanelState, TransportState, WebAction, WebAppState,
+        WebAudioControlHitZone, WebAudioControls, WebAudioSource, WebFocus, WebPersistedSettings,
+        WebVisualMode, INSTRUMENT_CHANNEL_FULL_HEIGHT, WEB_EQ_MAX_DB, WEB_EQ_MIN_DB,
+        WEB_EQ_PRESETS, WEB_VOLUME_MAX_DB,
     };
     use amp808_core::web_audio::WebBpmState;
     use ratzilla::ratatui::{
@@ -4763,6 +4892,16 @@ mod tests {
                 12
             ),
             "U https://e~"
+        );
+    }
+
+    #[test]
+    fn web_audio_drop_accepts_browser_audio_files_and_known_audio_extensions() {
+        assert_eq!(web_audio_drop_error("break.mp3", "audio/mpeg"), None);
+        assert_eq!(web_audio_drop_error("909 Kick.WAV", ""), None);
+        assert_eq!(
+            web_audio_drop_error("cover.png", "image/png"),
+            Some("Drop an audio file to load it into AMP808 web.")
         );
     }
 
@@ -5496,7 +5635,7 @@ mod tests {
         let idle = analyser_empty_state_presentation(&state).expect("idle presentation");
         assert_eq!(idle.title, "LOAD AUDIO");
         assert_eq!(idle.subtitle, "WEB AUDIO ANALYSER");
-        assert_eq!(idle.hint, "LOCAL FILE OR CORS URL");
+        assert_eq!(idle.hint, "LOCAL FILE, DROP, OR CORS URL");
 
         state.transport = TransportState::Paused;
         let paused = analyser_empty_state_presentation(&state).expect("paused presentation");
