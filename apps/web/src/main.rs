@@ -1288,11 +1288,20 @@ fn analyser_empty_state_text(state: &WebAppState) -> Option<&'static str> {
 }
 
 fn browser_media_error_message(source: Option<&WebAudioSource>, error_code: Option<u16>) -> String {
-    let is_hosted_url = source.is_some_and(WebAudioSource::is_hosted_url);
-    error_code
+    let error = error_code
         .map(BrowserMediaError::from_code)
-        .unwrap_or(BrowserMediaError::Unknown)
-        .user_message(is_hosted_url)
+        .unwrap_or(BrowserMediaError::Unknown);
+    if source.is_some_and(|source| source.kind() == WebAudioSourceKind::DirectMediaUrl)
+        && matches!(
+            error,
+            BrowserMediaError::SourceNotSupported | BrowserMediaError::Unknown
+        )
+    {
+        return "This direct audio URL looks playable, but its server does not allow CORS for AMP808 Web analysis.".to_string();
+    }
+
+    error
+        .user_message(source.is_some_and(WebAudioSource::is_hosted_url))
         .to_string()
 }
 
@@ -5669,7 +5678,7 @@ mod tests {
 
     #[test]
     fn browser_media_error_messages_keep_hosted_and_local_failures_clear() {
-        let hosted = WebAudioSource::hosted_url("https://example.com/audio.mp3");
+        let hosted = WebAudioSource::hosted_url("https://example.com/listen/123");
         assert_eq!(
             browser_media_error_message(Some(&hosted), Some(2)),
             "Hosted audio network load failed. Check the URL and server availability."
@@ -5687,6 +5696,18 @@ mod tests {
         assert_eq!(
             browser_media_error_message(None, None),
             "Browser could not load this audio file."
+        );
+    }
+
+    #[test]
+    fn direct_mp3_media_errors_explain_server_cors_requirement() {
+        let soundhelix = WebAudioSource::hosted_url(
+            "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+        );
+
+        assert_eq!(
+            browser_media_error_message(Some(&soundhelix), Some(4)),
+            "This direct audio URL looks playable, but its server does not allow CORS for AMP808 Web analysis."
         );
     }
 
