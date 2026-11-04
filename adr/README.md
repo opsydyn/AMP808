@@ -38,3 +38,5 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0017: Add a Ratzilla Web 808 player target](0017-add-ratzilla-web-808-player-target.md) (proposed, 2026-06-15)
 - [ADR-0018: Add a Web Audio EQ control graph for browser knobs](0018-add-web-audio-eq-control-graph.md) (accepted, 2026-06-20)
 - [ADR-0019: Define the web external provider and ffmpeg.wasm boundary](0019-web-external-provider-and-ffmpeg-wasm-boundary.md) (accepted, 2026-06-21)
+- [ADR-0021: Adopt a Moon-orchestrated Cargo monorepo layout](0021-adopt-moon-cargo-monorepo-layout.md) (accepted, 2026-11-04)
+- [ADR-0022: Add the macOS-first AMP808-R3TR0 desktop player with GPUI Kit](0022-add-amp808-r3tr0-macos-desktop-player.md) (accepted, 2026-11-04)

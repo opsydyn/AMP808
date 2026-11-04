@@ -1,0 +1,36 @@
+mod analysis;
+mod app;
+mod audio;
+mod media;
+mod skin;
+mod ui;
+
+fn main() {
+    use gpui_kit::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+
+    let window_spec = app::WindowSpec::main_player();
+
+    gpui_kit::application().run(move |cx| {
+        gpui_kit::init(cx);
+
+        let (width, height) = window_spec.initial_size();
+        let (minimum_width, minimum_height) = window_spec.minimum_size();
+        let bounds = Bounds::centered(None, size(px(f32::from(width)), px(f32::from(height))), cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(
+                px(f32::from(minimum_width)),
+                px(f32::from(minimum_height)),
+            )),
+            titlebar: Some(TitlebarOptions {
+                title: Some(window_spec.title().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| ui::PlayerView::new()))
+            .expect("failed to open AMP808-R3TR0 window");
+        cx.activate(true);
+    });
+}

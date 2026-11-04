@@ -322,16 +322,22 @@ cargo fmt
 
 # Build and run in one step
 cargo run -- <args>
+
+# Optional Moon wrappers around the same Cargo gates
+moon run build
+moon run test
+moon run release-gate
 ```
 
 `amp808` CI uses [`cargo-nextest`](https://nexte.st/) plus JUnit output configured in
-`.config/nextest.toml`. This crate is currently binary-only, so `cargo test --doc` is skipped in
-CI unless a library target exists.
+`.config/nextest.toml`. Cargo commands and CI remain authoritative; Moon provides a workspace-level
+task surface for the same commands. The native `amp808` package is binary-only, while workspace
+library targets continue to participate in doctest checks.
 
 ### Project Structure
 
 ```text
-src/
+apps/tui/src/
 ├── main.rs               # CLI entry point, tokio runtime, signal handling
 ├── config.rs             # ~/.config/amp808/config.toml (serde + toml)
 ├── external/

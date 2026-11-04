@@ -1,0 +1,5 @@
+# Keep the first Moon slice as one workspace-level project beside Cargo.lock.
+projects:
+  root: '.'
+
+defaultProject: root

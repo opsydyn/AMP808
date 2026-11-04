@@ -1,0 +1,26 @@
+[package]
+name = "amp808-r3tr0"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "AMP808-R3TR0 macOS-first desktop music player."
+license = "MIT"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+allow_attributes_without_reason = "warn"
+dbg_macro = "deny"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[dependencies]
+cpal = "0.18"
+gpui-kit = "=0.7.3"
+realfft = "3"
+rtrb = "0.3"
+symphonia = { version = "0.6", features = ["all", "opt-simd"] }
+
+[dev-dependencies]
+tempfile = "3"

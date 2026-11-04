@@ -67,7 +67,7 @@ impl Player {
 
         let config = cpal::StreamConfig {
             channels: 2,
-            sample_rate: cpal::SampleRate(sample_rate),
+            sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -83,7 +83,7 @@ impl Player {
             .collect();
 
         let stream = device.build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if paused_cb.load(Ordering::Relaxed) {
                     // Fill silence when paused

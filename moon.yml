@@ -1,0 +1,69 @@
+# ADR-0021: These workspace-level tasks mirror the authoritative Cargo gates.
+language: rust
+layer: application
+
+env:
+  CARGO_TERM_COLOR: always
+
+fileGroups:
+  sources:
+    - 'apps/tui/src/**/*'
+    - 'apps/tui/Cargo.toml'
+    - 'apps/web/src/**/*'
+    - 'apps/web/Cargo.toml'
+    - 'crates/*/src/**/*'
+    - 'crates/*/Cargo.toml'
+    - 'Cargo.toml'
+    - 'Cargo.lock'
+    - 'rust-toolchain.toml'
+  tests:
+    - 'apps/*/tests/**/*'
+    - 'crates/*/tests/**/*'
+  release:
+    - '.github/workflows/release.yml'
+    - 'release-plz.toml'
+    - 'scripts/check-release-gate.sh'
+  workspaceLayout:
+    - 'Cargo.toml'
+    - 'apps/*/Cargo.toml'
+    - 'crates/*/Cargo.toml'
+    - 'scripts/check-workspace-layout.sh'
+
+tasks:
+  layout:
+    command: 'bash scripts/check-workspace-layout.sh'
+    inputs:
+      - '@group(workspaceLayout)'
+  build:
+    command: 'cargo build --locked'
+    inputs:
+      - '@group(sources)'
+  check:
+    command: 'cargo check --locked'
+    inputs:
+      - '@group(sources)'
+  check-web:
+    command: 'cargo check --locked -p amp808_web --target wasm32-unknown-unknown'
+    inputs:
+      - '@group(sources)'
+  format:
+    command: 'cargo fmt --all --check'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  lint:
+    command: 'cargo clippy --all-targets --locked -- -D warnings'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  test:
+    command: 'cargo test --locked'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  release-gate:
+    command: 'bash scripts/check-release-gate.sh'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - '@group(release)'

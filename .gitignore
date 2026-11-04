@@ -1,4 +1,5 @@
 /target
+/.moon/cache/
 /apps/web/dist/
 *.mp3
 .DS_Store
