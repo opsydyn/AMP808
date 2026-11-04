@@ -2,6 +2,7 @@ mod analysis;
 mod app;
 mod audio;
 mod media;
+mod playback;
 mod skin;
 mod ui;
 

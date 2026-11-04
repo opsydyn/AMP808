@@ -1,8 +1,13 @@
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use realfft::num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
+
+use crate::audio::AnalysisTapConsumer;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnalysisAvailability {
@@ -92,20 +97,21 @@ pub enum AnalysisError {
     InvalidConfig,
     InsufficientSamples { required: usize, actual: usize },
     Fft(String),
+    Worker(String),
 }
 
 impl AnalysisError {
     pub const fn required_samples(&self) -> usize {
         match self {
             Self::InsufficientSamples { required, .. } => *required,
-            Self::InvalidConfig | Self::Fft(_) => 0,
+            Self::InvalidConfig | Self::Fft(_) | Self::Worker(_) => 0,
         }
     }
 
     pub const fn actual_samples(&self) -> usize {
         match self {
             Self::InsufficientSamples { actual, .. } => *actual,
-            Self::InvalidConfig | Self::Fft(_) => 0,
+            Self::InvalidConfig | Self::Fft(_) | Self::Worker(_) => 0,
         }
     }
 }
@@ -119,6 +125,7 @@ impl fmt::Display for AnalysisError {
                 "analysis requires {required} samples but received {actual}"
             ),
             Self::Fft(message) => write!(formatter, "FFT processing failed: {message}"),
+            Self::Worker(message) => write!(formatter, "analysis worker failed: {message}"),
         }
     }
 }
@@ -247,6 +254,128 @@ impl Analyzer {
     }
 }
 
+#[derive(Clone)]
+pub struct LatestAnalysis {
+    snapshot: Arc<Mutex<Arc<AnalysisSnapshot>>>,
+}
+
+impl LatestAnalysis {
+    pub fn new(config: AnalyzerConfig) -> Self {
+        Self {
+            snapshot: Arc::new(Mutex::new(Arc::new(AnalysisSnapshot::empty(
+                AnalysisAvailability::Idle,
+                0,
+                config,
+            )))),
+        }
+    }
+
+    pub fn publish(&self, snapshot: AnalysisSnapshot) -> bool {
+        let Ok(mut current) = self.snapshot.lock() else {
+            return false;
+        };
+        *current = Arc::new(snapshot);
+        true
+    }
+
+    pub fn load(&self) -> Option<Arc<AnalysisSnapshot>> {
+        self.snapshot
+            .try_lock()
+            .ok()
+            .map(|snapshot| Arc::clone(&snapshot))
+    }
+}
+
+pub struct AnalysisPump {
+    consumer: AnalysisTapConsumer,
+    latest: LatestAnalysis,
+    analyzer: Analyzer,
+    window: Vec<f32>,
+    filled: usize,
+    sequence: u64,
+}
+
+impl AnalysisPump {
+    pub fn new(
+        consumer: AnalysisTapConsumer,
+        latest: LatestAnalysis,
+        config: AnalyzerConfig,
+    ) -> Result<Self, AnalysisError> {
+        Ok(Self {
+            consumer,
+            latest,
+            analyzer: Analyzer::new(config)?,
+            window: vec![0.0; config.fft_size()],
+            filled: 0,
+            sequence: 0,
+        })
+    }
+
+    pub fn poll_once(&mut self) -> Result<bool, AnalysisError> {
+        self.filled += self.consumer.pop_into(&mut self.window[self.filled..]);
+        if self.filled < self.window.len() {
+            return Ok(false);
+        }
+
+        self.sequence = self.sequence.wrapping_add(1);
+        let snapshot = self.analyzer.analyze(&self.window, self.sequence)?;
+        self.filled = 0;
+        Ok(self.latest.publish(snapshot))
+    }
+}
+
+pub struct AnalysisWorker {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<Result<(), AnalysisError>>>,
+}
+
+impl AnalysisWorker {
+    pub fn spawn(
+        consumer: AnalysisTapConsumer,
+        latest: LatestAnalysis,
+        config: AnalyzerConfig,
+    ) -> Result<Self, AnalysisError> {
+        let mut pump = AnalysisPump::new(consumer, latest, config)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::Builder::new()
+            .name("amp808-analysis".to_owned())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Acquire) {
+                    if !pump.poll_once()? {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|error| AnalysisError::Worker(error.to_string()))?;
+
+        Ok(Self {
+            stop,
+            join: Some(join),
+        })
+    }
+
+    pub fn stop(mut self) -> Result<(), AnalysisError> {
+        self.stop_and_join()
+    }
+
+    fn stop_and_join(&mut self) -> Result<(), AnalysisError> {
+        self.stop.store(true, Ordering::Release);
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        join.join()
+            .map_err(|_| AnalysisError::Worker("thread panicked".to_owned()))?
+    }
+}
+
+impl Drop for AnalysisWorker {
+    fn drop(&mut self) {
+        let _ = self.stop_and_join();
+    }
+}
+
 fn log_bin_boundary(band: usize, band_count: usize, max_bin: usize) -> usize {
     if band == 0 {
         return 1;
@@ -261,8 +390,79 @@ fn log_bin_boundary(band: usize, band_count: usize, max_bin: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use std::f32::consts::TAU;
+    use std::time::{Duration, Instant};
 
-    use super::{AnalysisAvailability, AnalysisSnapshot, Analyzer, AnalyzerConfig};
+    use crate::audio::AnalysisTap;
+
+    use super::{
+        AnalysisAvailability, AnalysisPump, AnalysisSnapshot, AnalysisWorker, Analyzer,
+        AnalyzerConfig, LatestAnalysis,
+    };
+
+    #[test]
+    fn latest_analysis_starts_idle_and_replaces_snapshots_atomically() {
+        let config = AnalyzerConfig::default();
+        let latest = LatestAnalysis::new(config);
+        assert_eq!(
+            latest.load().unwrap().availability(),
+            AnalysisAvailability::Idle
+        );
+
+        let replacement = AnalysisSnapshot::empty(AnalysisAvailability::Paused, 9, config);
+        assert!(latest.publish(replacement));
+
+        let loaded = latest.load().unwrap();
+        assert_eq!(loaded.sequence(), 9);
+        assert_eq!(loaded.availability(), AnalysisAvailability::Paused);
+    }
+
+    #[test]
+    fn analysis_pump_waits_for_a_complete_window_before_publishing() {
+        let config = AnalyzerConfig::default();
+        let (mut producer, consumer, _diagnostics) = AnalysisTap::bounded(2_048);
+        let latest = LatestAnalysis::new(config);
+        let mut pump = AnalysisPump::new(consumer, latest.clone(), config).unwrap();
+
+        producer.push_samples(&vec![0.25; 512]);
+        assert!(!pump.poll_once().unwrap());
+        assert_eq!(
+            latest.load().unwrap().availability(),
+            AnalysisAvailability::Idle
+        );
+
+        producer.push_samples(&vec![0.25; 512]);
+        assert!(pump.poll_once().unwrap());
+        let snapshot = latest.load().unwrap();
+        assert_eq!(snapshot.availability(), AnalysisAvailability::Available);
+        assert_eq!(snapshot.sequence(), 1);
+        assert!((snapshot.peak() - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn analysis_worker_publishes_from_the_tap_off_thread() {
+        let config = AnalyzerConfig::default();
+        let (mut producer, consumer, _diagnostics) = AnalysisTap::bounded(2_048);
+        let latest = LatestAnalysis::new(config);
+        let worker = AnalysisWorker::spawn(consumer, latest.clone(), config).unwrap();
+        producer.push_samples(&vec![0.5; config.fft_size()]);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let published = loop {
+            if latest
+                .load()
+                .is_some_and(|snapshot| snapshot.availability() == AnalysisAvailability::Available)
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+
+        assert!(published, "analysis worker did not publish before timeout");
+        worker.stop().unwrap();
+    }
 
     #[test]
     fn non_signal_states_publish_explicit_empty_snapshots() {
