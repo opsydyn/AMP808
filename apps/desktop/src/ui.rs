@@ -7,12 +7,59 @@ use crate::app::transport::TransportState;
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VisualizerMode {
+    Spectrum,
+    Waveform,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackDisplay {
+    title: String,
+    artist: String,
+    album: String,
+}
+
+impl TrackDisplay {
+    fn new(title: &str, artist: Option<&str>, album: Option<&str>) -> Self {
+        Self {
+            title: title.to_owned(),
+            artist: artist.unwrap_or("UNKNOWN ARTIST").to_owned(),
+            album: album.unwrap_or("UNKNOWN ALBUM").to_owned(),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            title: "NO TRACK LOADED".to_owned(),
+            artist: "--".to_owned(),
+            album: "--".to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    #[cfg(test)]
+    fn artist(&self) -> &str {
+        &self.artist
+    }
+
+    #[cfg(test)]
+    fn album(&self) -> &str {
+        &self.album
+    }
+}
+
 pub struct PlayerView {
     app: DesktopApp,
     skin: Amp808Skin,
     session: Option<PlaybackSession>,
     error: Option<String>,
     seeking: bool,
+    visualizer_mode: VisualizerMode,
 }
 
 impl PlayerView {
@@ -23,6 +70,7 @@ impl PlayerView {
             session: None,
             error: None,
             seeking: false,
+            visualizer_mode: VisualizerMode::Spectrum,
         }
     }
 
@@ -134,6 +182,14 @@ impl PlayerView {
         })
         .detach();
     }
+
+    fn toggle_visualizer(&mut self, cx: &mut Context<Self>) {
+        self.visualizer_mode = match self.visualizer_mode {
+            VisualizerMode::Spectrum => VisualizerMode::Waveform,
+            VisualizerMode::Waveform => VisualizerMode::Spectrum,
+        };
+        cx.notify();
+    }
 }
 
 fn format_time(seconds: f64) -> String {
@@ -162,10 +218,74 @@ impl Render for PlayerView {
                 self.error = Some(error.clone());
             }
         }
-        let spectrum = snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.analysis().spectrum().to_vec())
-            .unwrap_or_else(|| vec![0.0; 24]);
+        let (visualizer_label, visualizer_action_label) = match self.visualizer_mode {
+            VisualizerMode::Spectrum => ("SPECTRUM", "Show waveform visualizer"),
+            VisualizerMode::Waveform => ("WAVEFORM", "Show spectrum visualizer"),
+        };
+        let visualizer = match self.visualizer_mode {
+            VisualizerMode::Spectrum => {
+                let spectrum = snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.analysis().spectrum().to_vec())
+                    .unwrap_or_else(|| vec![0.0; 24]);
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_end()
+                    .gap_1()
+                    .rounded_md()
+                    .bg(canvas)
+                    .p_4()
+                    .children(spectrum.into_iter().map(|magnitude| {
+                        div()
+                            .flex_1()
+                            .h(px(3.0 + magnitude * 220.0))
+                            .rounded_sm()
+                            .bg(meter_low.opacity(0.18 + magnitude * 0.82))
+                    }))
+                    .into_any_element()
+            }
+            VisualizerMode::Waveform => {
+                let waveform = snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.analysis().waveform().to_vec())
+                    .unwrap_or_else(|| vec![0.0; 128]);
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .rounded_md()
+                    .bg(canvas)
+                    .p_4()
+                    .children(waveform.into_iter().map(|sample| {
+                        let positive = sample.max(0.0);
+                        let negative = (-sample).max(0.0);
+                        let opacity = 0.18 + sample.abs() * 0.82;
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .h_full()
+                            .child(
+                                div().flex().flex_1().items_end().child(
+                                    div()
+                                        .w_full()
+                                        .h(px(1.0 + positive * 100.0))
+                                        .bg(meter_high.opacity(opacity)),
+                                ),
+                            )
+                            .child(
+                                div().flex().flex_1().items_start().child(
+                                    div()
+                                        .w_full()
+                                        .h(px(1.0 + negative * 100.0))
+                                        .bg(meter_low.opacity(opacity)),
+                                ),
+                            )
+                    }))
+                    .into_any_element()
+            }
+        };
         let has_session = self.session.is_some();
         let is_playing = self
             .session
@@ -190,11 +310,18 @@ impl Render for PlayerView {
             .session
             .as_ref()
             .map_or(100, |session| (session.volume() * 100.0).round() as u32);
-        let track_title = self
+        let track_display = self
             .session
             .as_ref()
-            .map(|session| session.metadata().title().to_owned())
-            .unwrap_or_else(|| "NO TRACK LOADED".to_owned());
+            .map_or_else(TrackDisplay::empty, |session| {
+                let metadata = session.metadata();
+                TrackDisplay::new(metadata.title(), metadata.artist(), metadata.album())
+            });
+        let TrackDisplay {
+            title,
+            artist,
+            album,
+        } = track_display;
         let signal_status = if self.seeking {
             "PCM / BUFFERING"
         } else {
@@ -285,15 +412,25 @@ impl Render for PlayerView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_col()
                                     .items_center()
                                     .justify_center()
+                                    .gap_2()
                                     .aspect_square()
                                     .rounded_md()
                                     .border_1()
                                     .border_color(panel_raised)
                                     .bg(canvas)
                                     .text_color(text_muted)
-                                    .child(track_title),
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_semibold()
+                                            .text_color(text)
+                                            .child(title),
+                                    )
+                                    .child(div().text_sm().child(artist))
+                                    .child(div().text_xs().text_color(text_muted).child(album)),
                             )
                             .child(
                                 div()
@@ -377,7 +514,14 @@ impl Render for PlayerView {
                                     .justify_between()
                                     .text_xs()
                                     .text_color(text_muted)
-                                    .child("SPECTRUM")
+                                    .child(
+                                        Button::new("visualizer-mode")
+                                            .label(visualizer_label)
+                                            .accessibility_label(visualizer_action_label)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_visualizer(cx);
+                                            })),
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -392,23 +536,7 @@ impl Render for PlayerView {
                                             .child(signal_status),
                                     ),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_1()
-                                    .items_end()
-                                    .gap_1()
-                                    .rounded_md()
-                                    .bg(canvas)
-                                    .p_4()
-                                    .children(spectrum.into_iter().map(|magnitude| {
-                                        div()
-                                            .flex_1()
-                                            .h(px(3.0 + magnitude * 220.0))
-                                            .rounded_sm()
-                                            .bg(meter_low.opacity(0.18 + magnitude * 0.82))
-                                    })),
-                            )
+                            .child(visualizer)
                             .child(
                                 div()
                                     .flex()
@@ -431,7 +559,25 @@ mod tests {
         AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
     };
 
-    use super::PlayerView;
+    use super::{PlayerView, TrackDisplay};
+
+    #[test]
+    fn track_display_preserves_available_title_artist_and_album_tags() {
+        let display = TrackDisplay::new("Halcyon", Some("Orbital"), Some("Brown Album"));
+
+        assert_eq!(display.title(), "Halcyon");
+        assert_eq!(display.artist(), "Orbital");
+        assert_eq!(display.album(), "Brown Album");
+    }
+
+    #[test]
+    fn track_display_labels_missing_optional_tags_honestly() {
+        let display = TrackDisplay::new("Untitled", None, None);
+
+        assert_eq!(display.title(), "Untitled");
+        assert_eq!(display.artist(), "UNKNOWN ARTIST");
+        assert_eq!(display.album(), "UNKNOWN ALBUM");
+    }
 
     #[gpui_kit::test]
     fn open_button_requests_one_local_file(cx: &mut TestAppContext) {
@@ -498,6 +644,40 @@ mod tests {
             );
             assert_eq!(window.find("volume-down").label(), Some("Decrease volume"));
             assert_eq!(window.find("volume-up").label(), Some("Increase volume"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn visualizer_control_switches_between_spectrum_and_waveform(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| PlayerView::new()),
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show waveform visualizer")
+            );
+            window.click("visualizer-mode", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show spectrum visualizer")
+            );
         })
         .unwrap();
     }
