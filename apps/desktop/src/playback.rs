@@ -4,8 +4,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::audio::FrameProducer;
-use crate::media::{DecodedChunk, MediaError, StreamingDecoder};
+use crate::analysis::{
+    AnalysisError, AnalysisSnapshot, AnalysisWorker, AnalyzerConfig, LatestAnalysis,
+};
+use crate::audio::{
+    AudioCallback, AudioDeviceError, FrameProducer, OutputStreamHandle, PlaybackBuffer,
+    VolumeControl,
+};
+use crate::media::{DecodedChunk, MediaError, StreamingDecoder, TrackMetadata};
+
+const FRAME_CAPACITY: usize = 16_384;
+const ANALYSIS_CAPACITY: usize = 8_192;
+const DECODE_CHUNK_SIZE: usize = 2_048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeProgress {
@@ -207,18 +217,262 @@ impl Drop for DecodeWorker {
     }
 }
 
+trait AudioOutput {
+    fn volume_control(&self) -> VolumeControl;
+    fn take_error(&self) -> Option<String>;
+}
+
+impl AudioOutput for OutputStreamHandle {
+    fn volume_control(&self) -> VolumeControl {
+        self.volume_control()
+    }
+
+    fn take_error(&self) -> Option<String> {
+        self.take_error()
+    }
+}
+
+#[derive(Debug)]
+pub enum PlaybackSessionError {
+    Media(MediaError),
+    Audio(AudioDeviceError),
+    Analysis(AnalysisError),
+    Playback(PlaybackError),
+}
+
+impl fmt::Display for PlaybackSessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Media(error) => error.fmt(formatter),
+            Self::Audio(error) => error.fmt(formatter),
+            Self::Analysis(error) => error.fmt(formatter),
+            Self::Playback(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for PlaybackSessionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Media(error) => Some(error),
+            Self::Audio(error) => Some(error),
+            Self::Analysis(error) => Some(error),
+            Self::Playback(error) => Some(error),
+        }
+    }
+}
+
+impl From<MediaError> for PlaybackSessionError {
+    fn from(error: MediaError) -> Self {
+        Self::Media(error)
+    }
+}
+
+impl From<AudioDeviceError> for PlaybackSessionError {
+    fn from(error: AudioDeviceError) -> Self {
+        Self::Audio(error)
+    }
+}
+
+impl From<AnalysisError> for PlaybackSessionError {
+    fn from(error: AnalysisError) -> Self {
+        Self::Analysis(error)
+    }
+}
+
+impl From<PlaybackError> for PlaybackSessionError {
+    fn from(error: PlaybackError) -> Self {
+        Self::Playback(error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PlaybackSessionSnapshot {
+    analysis: Arc<AnalysisSnapshot>,
+    decode: Arc<DecodeWorkerState>,
+    output_error: Option<String>,
+}
+
+impl PlaybackSessionSnapshot {
+    pub fn analysis(&self) -> &AnalysisSnapshot {
+        &self.analysis
+    }
+
+    pub fn decode(&self) -> &DecodeWorkerState {
+        &self.decode
+    }
+
+    pub fn output_error(&self) -> Option<&str> {
+        self.output_error.as_deref()
+    }
+}
+
+pub struct PlaybackSession {
+    _decode_worker: DecodeWorker,
+    _analysis_worker: AnalysisWorker,
+    output: Box<dyn AudioOutput>,
+    volume: VolumeControl,
+    metadata: TrackMetadata,
+    latest_analysis: LatestAnalysis,
+    decode_status: LatestDecodeStatus,
+}
+
+impl PlaybackSession {
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, PlaybackSessionError> {
+        Self::open_with_output(path, OutputStreamHandle::open_default)
+    }
+
+    fn open_with_output<F, O>(
+        path: impl AsRef<std::path::Path>,
+        open_output: F,
+    ) -> Result<Self, PlaybackSessionError>
+    where
+        F: FnOnce(AudioCallback, u32) -> Result<O, AudioDeviceError>,
+        O: AudioOutput + 'static,
+    {
+        let (decoder, metadata) = StreamingDecoder::open(path)?;
+        let (producer, callback, analysis_consumer, _diagnostics) =
+            PlaybackBuffer::bounded(FRAME_CAPACITY, ANALYSIS_CAPACITY);
+        let analysis_config = AnalyzerConfig::default();
+        let latest_analysis = LatestAnalysis::new(analysis_config);
+        let analysis_worker =
+            AnalysisWorker::spawn(analysis_consumer, latest_analysis.clone(), analysis_config)?;
+        let output = open_output(callback, metadata.sample_rate())?;
+        let volume = output.volume_control();
+        let (decode_worker, decode_status) =
+            DecodeWorker::spawn(decoder, producer, DECODE_CHUNK_SIZE)?;
+
+        Ok(Self {
+            _decode_worker: decode_worker,
+            _analysis_worker: analysis_worker,
+            output: Box::new(output),
+            volume,
+            metadata,
+            latest_analysis,
+            decode_status,
+        })
+    }
+
+    pub const fn metadata(&self) -> &TrackMetadata {
+        &self.metadata
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.set(volume);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume.get()
+    }
+
+    pub fn try_snapshot(&self) -> Option<PlaybackSessionSnapshot> {
+        let analysis = self.latest_analysis.load()?;
+        let decode = self.decode_status.load()?;
+        Some(PlaybackSessionSnapshot {
+            analysis,
+            decode,
+            output_error: self.output.take_error(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use tempfile::tempdir;
 
-    use crate::audio::PlaybackBuffer;
+    use crate::analysis::AnalysisAvailability;
+    use crate::audio::{AudioCallback, PlaybackBuffer, VolumeControl};
     use crate::media::StreamingDecoder;
 
-    use super::{DecodeProgress, DecodePump, DecodeWorker, DecodeWorkerState};
+    use super::{
+        AudioOutput, DecodeProgress, DecodePump, DecodeWorker, DecodeWorkerState, PlaybackSession,
+    };
+
+    #[test]
+    fn playback_session_assembles_local_pcm_metadata_analysis_and_volume() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("session.wav");
+        write_stereo_wav(&path, 8_000, 4_096);
+
+        let session = PlaybackSession::open_with_output(&path, |callback, sample_rate| {
+            assert_eq!(sample_rate, 8_000);
+            Ok(TestOutput::open(callback))
+        })
+        .unwrap();
+
+        assert_eq!(session.metadata().title(), "session");
+        assert_eq!(session.metadata().sample_rate(), 8_000);
+        session.set_volume(0.35);
+        assert!((session.volume() - 0.35).abs() < f32::EPSILON);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let produced_analysis = loop {
+            if session.try_snapshot().is_some_and(|snapshot| {
+                snapshot.analysis().availability() == AnalysisAvailability::Available
+                    && snapshot.analysis().sequence() > 0
+            }) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+
+        assert!(produced_analysis, "session did not publish PCM analysis");
+    }
+
+    struct TestOutput {
+        volume: VolumeControl,
+        stop: Arc<AtomicBool>,
+        join: Option<JoinHandle<()>>,
+    }
+
+    impl TestOutput {
+        fn open(mut callback: AudioCallback) -> Self {
+            let volume = callback.volume_control();
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = Arc::clone(&stop);
+            let join = std::thread::spawn(move || {
+                let mut output = [0.0; 256];
+                while !thread_stop.load(Ordering::Acquire) {
+                    callback.render_f32(&mut output, 2);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            });
+            Self {
+                volume,
+                stop,
+                join: Some(join),
+            }
+        }
+    }
+
+    impl AudioOutput for TestOutput {
+        fn volume_control(&self) -> VolumeControl {
+            self.volume.clone()
+        }
+
+        fn take_error(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl Drop for TestOutput {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
 
     #[test]
     fn decode_pump_preserves_pending_frames_while_the_audio_buffer_is_full() {

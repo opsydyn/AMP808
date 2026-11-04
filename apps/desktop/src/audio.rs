@@ -298,25 +298,55 @@ impl std::fmt::Display for AudioDeviceError {
 
 impl std::error::Error for AudioDeviceError {}
 
+fn select_output_config(
+    ranges: impl IntoIterator<Item = cpal::SupportedStreamConfigRange>,
+    sample_rate: u32,
+) -> Result<cpal::SupportedStreamConfig, AudioDeviceError> {
+    ranges
+        .into_iter()
+        .filter(|range| range.channels() > 0)
+        .filter_map(|range| {
+            let format_rank = match OutputSampleFormat::try_from(range.sample_format()) {
+                Ok(OutputSampleFormat::F32) => 0,
+                Ok(OutputSampleFormat::I16) => 1,
+                Ok(OutputSampleFormat::U16) => 2,
+                Err(_) => return None,
+            };
+            let channel_rank = usize::from(range.channels() != 2);
+            range
+                .try_with_sample_rate(sample_rate)
+                .map(|config| ((channel_rank, format_rank), config))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, config)| config)
+        .ok_or_else(|| {
+            AudioDeviceError(format!(
+                "default audio output does not support {sample_rate} Hz with a compatible sample format"
+            ))
+        })
+}
+
 pub struct OutputStreamHandle {
     _stream: cpal::Stream,
     volume: VolumeControl,
-    diagnostics: PlaybackDiagnostics,
     latest_error: Arc<Mutex<Option<String>>>,
 }
 
 impl OutputStreamHandle {
     pub fn open_default(
         callback: AudioCallback,
-        diagnostics: PlaybackDiagnostics,
+        sample_rate: u32,
     ) -> Result<Self, AudioDeviceError> {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| {
             AudioDeviceError("no default audio output device is available".into())
         })?;
-        let supported = device
-            .default_output_config()
-            .map_err(|error| AudioDeviceError(error.to_string()))?;
+        let supported = select_output_config(
+            device
+                .supported_output_configs()
+                .map_err(|error| AudioDeviceError(error.to_string()))?,
+            sample_rate,
+        )?;
         let output_format = OutputSampleFormat::try_from(supported.sample_format())
             .map_err(|error| AudioDeviceError(error.to_string()))?;
         let config = supported.config();
@@ -354,17 +384,12 @@ impl OutputStreamHandle {
         Ok(Self {
             _stream: stream,
             volume,
-            diagnostics,
             latest_error,
         })
     }
 
     pub fn volume_control(&self) -> VolumeControl {
         self.volume.clone()
-    }
-
-    pub const fn diagnostics(&self) -> &PlaybackDiagnostics {
-        &self.diagnostics
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -437,7 +462,37 @@ impl PlaybackBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnalysisTap, OutputSampleFormat, PlaybackBuffer, VolumeControl};
+    use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfigRange};
+
+    use super::{
+        AnalysisTap, OutputSampleFormat, PlaybackBuffer, VolumeControl, select_output_config,
+    };
+
+    #[test]
+    fn output_selection_uses_the_track_rate_and_prefers_stereo_f32() {
+        let ranges = [
+            SupportedStreamConfigRange::new(
+                2,
+                44_100,
+                96_000,
+                SupportedBufferSize::Unknown,
+                SampleFormat::I16,
+            ),
+            SupportedStreamConfigRange::new(
+                2,
+                44_100,
+                96_000,
+                SupportedBufferSize::Unknown,
+                SampleFormat::F32,
+            ),
+        ];
+
+        let selected = select_output_config(ranges, 48_000).unwrap();
+
+        assert_eq!(selected.sample_rate(), 48_000);
+        assert_eq!(selected.channels(), 2);
+        assert_eq!(selected.sample_format(), SampleFormat::F32);
+    }
 
     #[test]
     fn tap_is_bounded_and_drops_new_analysis_samples_on_overflow() {

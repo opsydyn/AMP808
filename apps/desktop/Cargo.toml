@@ -23,4 +23,5 @@ rtrb = "0.3"
 symphonia = { version = "0.6", features = ["all", "opt-simd"] }
 
 [dev-dependencies]
+gpui-kit = { version = "=0.7.3", features = ["test-support"] }
 tempfile = "3"
