@@ -1,9 +1,10 @@
-use gpui_kit::base::StyledExt;
+use gpui_kit::base::{Disableable, StyledExt};
 use gpui_kit::component::button::Button;
 use gpui_kit::{Context, IntoElement, PathPromptOptions, Render, Window, div, prelude::*, px, rgb};
 
 use crate::app::DesktopApp;
-use crate::playback::{DecodeWorkerState, PlaybackSession};
+use crate::app::transport::TransportState;
+use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
 
 pub struct PlayerView {
@@ -11,6 +12,7 @@ pub struct PlayerView {
     skin: Amp808Skin,
     session: Option<PlaybackSession>,
     error: Option<String>,
+    seeking: bool,
 }
 
 impl PlayerView {
@@ -20,6 +22,7 @@ impl PlayerView {
             skin: Amp808Skin::built_in(),
             session: None,
             error: None,
+            seeking: false,
         }
     }
 
@@ -62,10 +65,12 @@ impl PlayerView {
                     Ok(session) => {
                         view.session = Some(session);
                         view.error = None;
+                        view.seeking = false;
                     }
                     Err(error) => {
                         view.session = None;
                         view.error = Some(error.to_string());
+                        view.seeking = false;
                     }
                 }
                 cx.notify();
@@ -73,6 +78,67 @@ impl PlayerView {
         })
         .detach();
     }
+
+    fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let result = match session.transport_state() {
+            TransportState::Playing => session.pause(),
+            TransportState::Paused | TransportState::Ready => session.play(),
+            _ => return,
+        };
+        if let Err(error) = result {
+            self.error = Some(error.to_string());
+        }
+        cx.notify();
+    }
+
+    fn adjust_volume(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        session.set_volume(session.volume() + delta);
+        cx.notify();
+    }
+
+    fn seek_by(&mut self, delta_seconds: f64, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let duration = session.metadata().duration_seconds().unwrap_or(f64::MAX);
+        let target = (session.position_seconds() + delta_seconds).clamp(0.0, duration);
+        let path = session.path().to_path_buf();
+        let resume_paused = session.transport_state() == &TransportState::Paused;
+        self.seeking = true;
+        self.error = None;
+        cx.notify();
+
+        let rebuild = cx.background_executor().spawn(async move {
+            let mut session = PlaybackSession::open_at(path, target)?;
+            if resume_paused {
+                session.pause()?;
+            }
+            Ok::<PlaybackSession, PlaybackSessionError>(session)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = rebuild.await;
+            let _ = this.update(cx, |view, cx| {
+                view.seeking = false;
+                match result {
+                    Ok(session) => view.session = Some(session),
+                    Err(error) => view.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+fn format_time(seconds: f64) -> String {
+    let total_seconds = seconds.max(0.0).floor() as u64;
+    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
 impl Render for PlayerView {
@@ -100,12 +166,38 @@ impl Render for PlayerView {
             .as_ref()
             .map(|snapshot| snapshot.analysis().spectrum().to_vec())
             .unwrap_or_else(|| vec![0.0; 24]);
+        let has_session = self.session.is_some();
+        let is_playing = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.transport_state() == &TransportState::Playing);
+        let play_label = if is_playing { "PAUSE" } else { "PLAY" };
+        let play_accessibility_label = if is_playing { "Pause" } else { "Play" };
+        let position = self.session.as_ref().map_or_else(
+            || "00:00".to_owned(),
+            |session| format_time(session.position_seconds()),
+        );
+        let duration = self.session.as_ref().map_or_else(
+            || "00:00".to_owned(),
+            |session| {
+                session
+                    .metadata()
+                    .duration_seconds()
+                    .map_or_else(|| "--:--".to_owned(), format_time)
+            },
+        );
+        let volume = self
+            .session
+            .as_ref()
+            .map_or(100, |session| (session.volume() * 100.0).round() as u32);
         let track_title = self
             .session
             .as_ref()
             .map(|session| session.metadata().title().to_owned())
             .unwrap_or_else(|| "NO TRACK LOADED".to_owned());
-        let signal_status =
+        let signal_status = if self.seeking {
+            "PCM / BUFFERING"
+        } else {
             snapshot
                 .as_ref()
                 .map_or("PCM / IDLE", |snapshot| match snapshot.decode() {
@@ -114,7 +206,8 @@ impl Render for PlayerView {
                     DecodeWorkerState::Ended => "PCM / DRAINING",
                     DecodeWorkerState::Failed(_) => "PCM / ERROR",
                     DecodeWorkerState::Stopped => "PCM / STOPPED",
-                });
+                })
+        };
         let detail = self.error.clone().unwrap_or_else(|| {
             self.session.as_ref().map_or_else(
                 || "SELECT A LOCAL FILE TO BEGIN".to_owned(),
@@ -207,19 +300,63 @@ impl Render for PlayerView {
                                     .flex()
                                     .gap_2()
                                     .child(
-                                        Button::new("previous")
-                                            .label("PREV")
-                                            .accessibility_label("Previous track"),
+                                        Button::new("seek-back")
+                                            .label("-10S")
+                                            .accessibility_label("Seek back 10 seconds")
+                                            .disabled(!has_session || self.seeking)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.seek_by(-10.0, cx);
+                                            })),
                                     )
                                     .child(
                                         Button::new("play-pause")
-                                            .label("PLAY")
-                                            .accessibility_label("Play"),
+                                            .label(play_label)
+                                            .accessibility_label(play_accessibility_label)
+                                            .disabled(!has_session || self.seeking)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_playback(cx);
+                                            })),
                                     )
                                     .child(
-                                        Button::new("next")
-                                            .label("NEXT")
-                                            .accessibility_label("Next track"),
+                                        Button::new("seek-forward")
+                                            .label("+10S")
+                                            .accessibility_label("Seek forward 10 seconds")
+                                            .disabled(!has_session || self.seeking)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.seek_by(10.0, cx);
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("volume-down")
+                                            .label("VOL-")
+                                            .accessibility_label("Decrease volume")
+                                            .disabled(!has_session)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.adjust_volume(-0.05, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_center()
+                                            .text_xs()
+                                            .text_color(text_muted)
+                                            .child(format!("VOL {volume:03}%")),
+                                    )
+                                    .child(
+                                        Button::new("volume-up")
+                                            .label("VOL+")
+                                            .accessibility_label("Increase volume")
+                                            .disabled(!has_session)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.adjust_volume(0.05, cx);
+                                            })),
                                     ),
                             ),
                     )
@@ -278,9 +415,9 @@ impl Render for PlayerView {
                                     .justify_between()
                                     .text_xs()
                                     .text_color(text_muted)
-                                    .child("00:00")
+                                    .child(position)
                                     .child(detail)
-                                    .child("00:00"),
+                                    .child(duration),
                             ),
                     ),
             )
@@ -328,5 +465,40 @@ mod tests {
             None
         });
         cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn transport_controls_expose_accessible_desktop_actions(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| PlayerView::new()),
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("seek-back").label(),
+                Some("Seek back 10 seconds")
+            );
+            assert_eq!(window.find("play-pause").label(), Some("Play"));
+            assert_eq!(
+                window.find("seek-forward").label(),
+                Some("Seek forward 10 seconds")
+            );
+            assert_eq!(window.find("volume-down").label(), Some("Decrease volume"));
+            assert_eq!(window.find("volume-up").label(), Some("Increase volume"));
+        })
+        .unwrap();
     }
 }

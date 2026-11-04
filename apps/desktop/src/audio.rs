@@ -207,12 +207,17 @@ impl FrameProducer {
 #[derive(Clone, Debug)]
 pub struct PlaybackDiagnostics {
     underflow_frames: Arc<AtomicU64>,
+    rendered_frames: Arc<AtomicU64>,
     analysis: TapDiagnostics,
 }
 
 impl PlaybackDiagnostics {
     pub fn underflow_frames(&self) -> u64 {
         self.underflow_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn rendered_frames(&self) -> u64 {
+        self.rendered_frames.load(Ordering::Relaxed)
     }
 
     pub fn analysis_accepted(&self) -> u64 {
@@ -229,6 +234,7 @@ pub struct AudioCallback {
     analysis: AnalysisTapProducer,
     volume: VolumeControl,
     underflow_frames: Arc<AtomicU64>,
+    rendered_frames: Arc<AtomicU64>,
 }
 
 impl AudioCallback {
@@ -251,12 +257,16 @@ impl AudioCallback {
 
         let volume = self.volume.get();
         let mut underflow_frames = 0_u64;
+        let mut rendered_frames = 0_u64;
         let mut tap_accepted = 0;
         let mut tap_dropped = 0;
 
         for output_frame in output.chunks_mut(channel_count) {
             let frame = match self.consumer.pop() {
-                Ok(frame) => [frame[0] * volume, frame[1] * volume],
+                Ok(frame) => {
+                    rendered_frames += 1;
+                    [frame[0] * volume, frame[1] * volume]
+                }
                 Err(_) => {
                     underflow_frames += 1;
                     [0.0, 0.0]
@@ -282,6 +292,10 @@ impl AudioCallback {
         if underflow_frames > 0 {
             self.underflow_frames
                 .fetch_add(underflow_frames, Ordering::Relaxed);
+        }
+        if rendered_frames > 0 {
+            self.rendered_frames
+                .fetch_add(rendered_frames, Ordering::Relaxed);
         }
         self.analysis.record_counts(tap_accepted, tap_dropped);
     }
@@ -327,7 +341,7 @@ fn select_output_config(
 }
 
 pub struct OutputStreamHandle {
-    _stream: cpal::Stream,
+    stream: cpal::Stream,
     volume: VolumeControl,
     latest_error: Arc<Mutex<Option<String>>>,
 }
@@ -382,10 +396,22 @@ impl OutputStreamHandle {
             .map_err(|error| AudioDeviceError(error.to_string()))?;
 
         Ok(Self {
-            _stream: stream,
+            stream,
             volume,
             latest_error,
         })
+    }
+
+    pub fn play(&self) -> Result<(), AudioDeviceError> {
+        self.stream
+            .play()
+            .map_err(|error| AudioDeviceError(error.to_string()))
+    }
+
+    pub fn pause(&self) -> Result<(), AudioDeviceError> {
+        self.stream
+            .pause()
+            .map_err(|error| AudioDeviceError(error.to_string()))
     }
 
     pub fn volume_control(&self) -> VolumeControl {
@@ -439,8 +465,10 @@ impl PlaybackBuffer {
             AnalysisTap::bounded(analysis_capacity);
         let volume = VolumeControl::new();
         let underflow_frames = Arc::new(AtomicU64::new(0));
+        let rendered_frames = Arc::new(AtomicU64::new(0));
         let diagnostics = PlaybackDiagnostics {
             underflow_frames: underflow_frames.clone(),
+            rendered_frames: rendered_frames.clone(),
             analysis: analysis_diagnostics,
         };
 
@@ -453,6 +481,7 @@ impl PlaybackBuffer {
                 analysis: analysis_producer,
                 volume,
                 underflow_frames,
+                rendered_frames,
             },
             analysis_consumer,
             diagnostics,
@@ -552,6 +581,20 @@ mod tests {
         let mut tapped = [0.0; 3];
         assert_eq!(analysis_consumer.pop_into(&mut tapped), 3);
         assert_eq!(tapped, [0.0, 0.1875, 0.0]);
+    }
+
+    #[test]
+    fn playhead_counts_consumed_frames_but_not_underflow_silence() {
+        let (mut producer, mut callback, _analysis_consumer, diagnostics) =
+            PlaybackBuffer::bounded(4, 8);
+        assert_eq!(producer.push_frames(&[[0.1, 0.2], [0.3, 0.4]]), 2);
+        let mut output = [0.0; 6];
+
+        callback.render_f32(&mut output, 2);
+        assert_eq!(diagnostics.rendered_frames(), 2);
+
+        callback.render_f32(&mut output, 2);
+        assert_eq!(diagnostics.rendered_frames(), 2);
     }
 
     #[test]
