@@ -89,6 +89,20 @@ impl TrackDisplay {
         }
     }
 
+    fn accessibility_label(&self) -> String {
+        if self.title == "NO TRACK LOADED" {
+            format!(
+                "No track loaded. Artist: {}. Album: {}.",
+                self.artist, self.album
+            )
+        } else {
+            format!(
+                "Now playing: {}. Artist: {}. Album: {}.",
+                self.title, self.artist, self.album
+            )
+        }
+    }
+
     #[cfg(test)]
     fn title(&self) -> &str {
         &self.title
@@ -424,6 +438,13 @@ impl Render for PlayerView {
                     .map_or_else(|| "--:--".to_owned(), format_time)
             },
         );
+        let progress_value = self.session.as_ref().and_then(|session| {
+            let duration = session.metadata().duration_seconds()?;
+            (duration.is_finite() && duration > 0.0)
+                .then(|| (session.position_seconds() / duration * 100.0).clamp(0.0, 100.0))
+        });
+        let progress_accessibility_label =
+            format!("Playback progress: {position} elapsed of {duration}");
         let volume = self
             .session
             .as_ref()
@@ -435,6 +456,7 @@ impl Render for PlayerView {
                 let metadata = session.metadata();
                 TrackDisplay::new(metadata.title(), metadata.artist(), metadata.album())
             });
+        let track_accessibility_label = track_display.accessibility_label();
         let TrackDisplay {
             title,
             artist,
@@ -445,6 +467,7 @@ impl Render for PlayerView {
             self.session.as_ref().map(PlaybackSession::transport_state),
             snapshot.as_ref().map(|snapshot| snapshot.decode()),
         );
+        let playback_status_label = format!("Playback status: {signal_status}. {motion_label}");
         let detail = self.session.as_ref().map_or_else(
             || "SELECT A LOCAL FILE TO BEGIN".to_owned(),
             |session| {
@@ -570,6 +593,10 @@ impl Render for PlayerView {
                             .child(div().text_xs().text_color(text_muted).child("NOW PLAYING"))
                             .child(
                                 div()
+                                    .id("now-playing-summary")
+                                    .test_support()
+                                    .role(Role::Group)
+                                    .aria_label(track_accessibility_label)
                                     .flex()
                                     .flex_col()
                                     .items_center()
@@ -643,6 +670,10 @@ impl Render for PlayerView {
                                     )
                                     .child(
                                         div()
+                                            .id("volume-status")
+                                            .test_support()
+                                            .role(Role::Status)
+                                            .aria_label(format!("Volume {volume} percent"))
                                             .flex_1()
                                             .text_center()
                                             .text_xs()
@@ -700,7 +731,7 @@ impl Render for PlayerView {
                                             .id("motion-policy")
                                             .test_support()
                                             .role(Role::Status)
-                                            .aria_label(motion_label)
+                                            .aria_label(playback_status_label)
                                             .flex()
                                             .items_center()
                                             .gap_2()
@@ -716,6 +747,15 @@ impl Render for PlayerView {
                             .child(visualizer)
                             .child(
                                 div()
+                                    .id("playback-progress")
+                                    .test_support()
+                                    .role(Role::ProgressIndicator)
+                                    .aria_label(progress_accessibility_label)
+                                    .aria_min_numeric_value(0.0)
+                                    .aria_max_numeric_value(100.0)
+                                    .when_some(progress_value, |progress, value| {
+                                        progress.aria_numeric_value(value)
+                                    })
                                     .flex()
                                     .justify_between()
                                     .text_xs()
@@ -797,6 +837,93 @@ mod tests {
         assert_eq!(display.title(), "Untitled");
         assert_eq!(display.artist(), "UNKNOWN ARTIST");
         assert_eq!(display.album(), "UNKNOWN ALBUM");
+    }
+
+    #[gpui_kit::test]
+    fn now_playing_metadata_is_exposed_to_assistive_technology(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let summary = window.find("now-playing-summary");
+            assert_eq!(summary.role(), Some(Role::Group));
+            assert_eq!(
+                summary.label(),
+                Some("No track loaded. Artist: --. Album: --.")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn volume_value_is_exposed_to_assistive_technology(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let volume = window.find("volume-status");
+            assert_eq!(volume.role(), Some(Role::Status));
+            assert_eq!(volume.label(), Some("Volume 100 percent"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn pcm_status_is_exposed_with_the_motion_policy(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let status = window.find("motion-policy");
+            assert_eq!(status.role(), Some(Role::Status));
+            assert_eq!(
+                status.label(),
+                Some(
+                    "Playback status: PCM / IDLE. Standard motion enabled; essential audio levels remain active"
+                )
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn playback_time_is_exposed_as_progress(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let progress = window.find("playback-progress");
+            assert_eq!(progress.role(), Some(Role::ProgressIndicator));
+            assert_eq!(
+                progress.label(),
+                Some("Playback progress: 00:00 elapsed of 00:00")
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -1095,7 +1222,9 @@ mod tests {
             assert_eq!(policy.role(), Some(Role::Status));
             assert_eq!(
                 policy.label(),
-                Some("Reduced motion enabled; essential audio levels remain active")
+                Some(
+                    "Playback status: PCM / IDLE. Reduced motion enabled; essential audio levels remain active"
+                )
             );
             assert!(window.find("visualizer-mode").visible());
         })
