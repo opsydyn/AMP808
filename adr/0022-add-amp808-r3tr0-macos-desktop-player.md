@@ -260,7 +260,7 @@ The first vertical slice is complete when a user can:
       pass.
 - [x] Moon desktop check, test, lint, and macOS build tasks pass without changing existing task
       semantics.
-- [ ] Manual macOS qualification confirms audible local-file playback, working play/pause/seek/
+- [x] Manual macOS qualification confirms audible local-file playback, working play/pause/seek/
       volume, responsive real spectrum/waveform displays, and visible error states.
 - [x] Automated, manual-device, and visual-acceptance evidence are reported separately.
 
@@ -318,9 +318,9 @@ The first vertical slice is complete when a user can:
   tests, 72 web tests, baseline strict Clippy, formatting, and the wasm check also passed.
 - **Native-device evidence:** the rebuilt `/tmp/AMP808-R3TR0.app` loaded the normal and corrupt WAV
   fixtures through the macOS picker. Native state reached `PCM / LIVE` and `PCM / ENDED`; the
-  corrupt-file error remained visible and a subsequent normal load recovered. System output was
-  muted, so this does not prove audible playback and the manual qualification criterion remains
-  open.
+  corrupt-file error remained visible and a subsequent normal load recovered. On the final replay,
+  macOS output was temporarily unmuted at 15% and the user confirmed audible playback. The original
+  `0% / muted` output state was restored afterward.
 - **Visual and accessibility evidence:** the native accessibility tree exposed track metadata,
   volume, playback status, elapsed/duration progress, and the corrupt-file alert. Actual spoken
   VoiceOver phrasing was not observed, so the evidence is limited to native accessibility-tree
