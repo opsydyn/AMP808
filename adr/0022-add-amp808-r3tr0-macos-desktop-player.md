@@ -243,26 +243,26 @@ The first vertical slice is complete when a user can:
       direct duplicate GPUI package.
 - [x] Pure transport-state tests cover load, ready, play, pause, seek/buffer, resume, end, and error
       transitions.
-- [ ] Fixture tests prove bounded streaming decode, metadata extraction, end-of-stream, seek rebuild,
+- [x] Fixture tests prove bounded streaming decode, metadata extraction, end-of-stream, seek rebuild,
       unsupported format, and corrupt media behavior.
 - [x] Audio pipeline tests prove callback-side frame reads are bounded and that underflow writes
       silence without blocking.
 - [x] Tap tests prove analysis overflow drops samples without blocking playback.
-- [ ] Analysis tests prove waveform bounds, FFT band mapping, level calculation, snapshot freshness,
+- [x] Analysis tests prove waveform bounds, FFT band mapping, level calculation, snapshot freshness,
       paused/idle behavior, and no fabricated motion without PCM.
-- [ ] GPUI Kit headless tests cover transport controls, visualiser switching, errors, focus,
+- [x] GPUI Kit headless tests cover transport controls, visualiser switching, errors, focus,
       keyboard activation, accessibility names/states, and reduced-motion behavior.
 - [x] A source review confirms the CPAL callback contains no allocation, mutex wait, decode, FFT,
       logging, filesystem/network I/O, or GPUI dispatch.
 - [x] `cargo check --locked -p amp808-r3tr0` passes on macOS.
-- [ ] Desktop package tests and strict package Clippy pass.
-- [ ] Existing TUI/core tests, web tests, baseline strict Clippy, formatting, and wasm check still
+- [x] Desktop package tests and strict package Clippy pass.
+- [x] Existing TUI/core tests, web tests, baseline strict Clippy, formatting, and wasm check still
       pass.
-- [ ] Moon desktop check, test, lint, and macOS build tasks pass without changing existing task
+- [x] Moon desktop check, test, lint, and macOS build tasks pass without changing existing task
       semantics.
 - [ ] Manual macOS qualification confirms audible local-file playback, working play/pause/seek/
       volume, responsive real spectrum/waveform displays, and visible error states.
-- [ ] Automated, manual-device, and visual-acceptance evidence are reported separately.
+- [x] Automated, manual-device, and visual-acceptance evidence are reported separately.
 
 ## Pros and Cons of the Options
 
@@ -309,6 +309,22 @@ The first vertical slice is complete when a user can:
 - Bad, because seeking and worker lifecycle need explicit state and more tests.
 
 ## More Information
+
+### 2026-11-05 verification reconciliation
+
+- **Automated evidence:** `root:desktop-check`, `root:desktop-test`, `root:desktop-lint`, and
+  `root:desktop-build-macos` all passed through Moon. The desktop suite passed 52 tests. Fixture,
+  analysis, playback, and GPUI headless tests cover the checked behaviors above. Workspace TUI/core
+  tests, 72 web tests, baseline strict Clippy, formatting, and the wasm check also passed.
+- **Native-device evidence:** the rebuilt `/tmp/AMP808-R3TR0.app` loaded the normal and corrupt WAV
+  fixtures through the macOS picker. Native state reached `PCM / LIVE` and `PCM / ENDED`; the
+  corrupt-file error remained visible and a subsequent normal load recovered. System output was
+  muted, so this does not prove audible playback and the manual qualification criterion remains
+  open.
+- **Visual and accessibility evidence:** the native accessibility tree exposed track metadata,
+  volume, playback status, elapsed/duration progress, and the corrupt-file alert. Actual spoken
+  VoiceOver phrasing was not observed, so the evidence is limited to native accessibility-tree
+  exposure rather than a complete screen-reader acceptance pass.
 
 - ADR-0021: [Adopt a Moon-orchestrated Cargo monorepo layout](0021-adopt-moon-cargo-monorepo-layout.md)
 - GPUI Kit: <https://github.com/longbridge/gpui-kit>
