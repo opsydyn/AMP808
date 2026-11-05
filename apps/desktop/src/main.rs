@@ -7,7 +7,9 @@ mod skin;
 mod ui;
 
 fn main() {
-    use gpui_kit::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+    use gpui_kit::{
+        AppContext, Bounds, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+    };
 
     let window_spec = app::WindowSpec::main_player();
 
@@ -30,8 +32,12 @@ fn main() {
             ..Default::default()
         };
 
-        gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| ui::PlayerView::new()))
-            .expect("failed to open AMP808-R3TR0 window");
+        gpui_kit::open_window(options, cx, |window, cx| {
+            let view = cx.new(ui::PlayerView::new);
+            window.focus(&view.read(cx).focus_handle(cx), cx);
+            view
+        })
+        .expect("failed to open AMP808-R3TR0 window");
         cx.activate(true);
     });
 }

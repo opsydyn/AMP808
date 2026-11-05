@@ -189,6 +189,7 @@ impl Default for VolumeControl {
 
 pub struct FrameProducer {
     producer: Producer<[f32; 2]>,
+    decoded_frames: Arc<AtomicU64>,
 }
 
 impl FrameProducer {
@@ -200,6 +201,10 @@ impl FrameProducer {
             }
             accepted += 1;
         }
+        if accepted > 0 {
+            self.decoded_frames
+                .fetch_add(accepted as u64, Ordering::Relaxed);
+        }
         accepted
     }
 }
@@ -207,6 +212,7 @@ impl FrameProducer {
 #[derive(Clone, Debug)]
 pub struct PlaybackDiagnostics {
     underflow_frames: Arc<AtomicU64>,
+    decoded_frames: Arc<AtomicU64>,
     rendered_frames: Arc<AtomicU64>,
     analysis: TapDiagnostics,
 }
@@ -218,6 +224,10 @@ impl PlaybackDiagnostics {
 
     pub fn rendered_frames(&self) -> u64 {
         self.rendered_frames.load(Ordering::Relaxed)
+    }
+
+    pub fn decoded_frames(&self) -> u64 {
+        self.decoded_frames.load(Ordering::Relaxed)
     }
 
     pub fn analysis_accepted(&self) -> u64 {
@@ -440,12 +450,18 @@ where
         config,
         move |output: &mut [T], _| callback.render_output(output, channel_count),
         move |error| {
-            if let Ok(mut slot) = latest_error.try_lock() {
-                *slot = Some(error.to_string());
+            if let Some(message) = stream_error_message(error)
+                && let Ok(mut slot) = latest_error.try_lock()
+            {
+                *slot = Some(message);
             }
         },
         None,
     )
+}
+
+fn stream_error_message(error: cpal::Error) -> Option<String> {
+    (error.kind() != cpal::ErrorKind::Xrun).then(|| error.to_string())
 }
 
 pub struct PlaybackBuffer;
@@ -465,9 +481,11 @@ impl PlaybackBuffer {
             AnalysisTap::bounded(analysis_capacity);
         let volume = VolumeControl::new();
         let underflow_frames = Arc::new(AtomicU64::new(0));
+        let decoded_frames = Arc::new(AtomicU64::new(0));
         let rendered_frames = Arc::new(AtomicU64::new(0));
         let diagnostics = PlaybackDiagnostics {
             underflow_frames: underflow_frames.clone(),
+            decoded_frames: decoded_frames.clone(),
             rendered_frames: rendered_frames.clone(),
             analysis: analysis_diagnostics,
         };
@@ -475,6 +493,7 @@ impl PlaybackBuffer {
         (
             FrameProducer {
                 producer: frame_producer,
+                decoded_frames,
             },
             AudioCallback {
                 consumer: frame_consumer,
@@ -491,11 +510,24 @@ impl PlaybackBuffer {
 
 #[cfg(test)]
 mod tests {
-    use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfigRange};
+    use cpal::{Error, ErrorKind, SampleFormat, SupportedBufferSize, SupportedStreamConfigRange};
 
     use super::{
         AnalysisTap, OutputSampleFormat, PlaybackBuffer, VolumeControl, select_output_config,
+        stream_error_message,
     };
+
+    #[test]
+    fn stream_xruns_are_recoverable_but_device_loss_remains_visible() {
+        assert_eq!(stream_error_message(Error::new(ErrorKind::Xrun)), None);
+        assert_eq!(
+            stream_error_message(Error::new(ErrorKind::DeviceNotAvailable)),
+            Some(
+                "The requested audio device is not available. It may have been disconnected."
+                    .to_owned()
+            )
+        );
+    }
 
     #[test]
     fn output_selection_uses_the_track_rate_and_prefers_stereo_f32() {

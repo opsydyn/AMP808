@@ -487,6 +487,22 @@ impl PlaybackSession {
         Ok(())
     }
 
+    pub fn poll(&mut self) -> Result<(), PlaybackSessionError> {
+        let decode_ended = self
+            .decode_status
+            .load()
+            .is_some_and(|state| *state == DecodeWorkerState::Ended);
+        let output_drained =
+            self.diagnostics.rendered_frames() >= self.diagnostics.decoded_frames();
+        if self.transport.state() == &TransportState::Playing && decode_ended && output_drained {
+            let mut next = self.transport.clone();
+            next.apply(TransportEvent::EndReached)?;
+            self.output.pause()?;
+            self.transport = next;
+        }
+        Ok(())
+    }
+
     pub fn try_snapshot(&self) -> Option<PlaybackSessionSnapshot> {
         let analysis = if self.transport.state() == &TransportState::Paused {
             Arc::clone(&self.paused_analysis)
@@ -615,6 +631,29 @@ mod tests {
 
         assert!(session.position_seconds() > 0.0);
         assert!(session.position_seconds() <= session.metadata().duration_seconds().unwrap());
+    }
+
+    #[test]
+    fn playback_session_ends_after_decoded_frames_are_drained() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("end-of-stream.wav");
+        write_stereo_wav(&path, 8_000, 2_048);
+        let output_playing = Arc::new(AtomicBool::new(true));
+        let observed_output = Arc::clone(&output_playing);
+        let mut session = PlaybackSession::open_with_output(&path, move |callback, _| {
+            Ok(TestOutput::open_with_state(callback, output_playing))
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        while session.transport_state() != &TransportState::Ended && Instant::now() < deadline {
+            session.poll().unwrap();
+            let _ = session.try_snapshot();
+            std::thread::yield_now();
+        }
+
+        assert_eq!(session.transport_state(), &TransportState::Ended);
+        assert!(!observed_output.load(Ordering::Acquire));
     }
 
     #[test]

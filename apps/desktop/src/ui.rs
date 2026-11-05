@@ -1,8 +1,8 @@
 use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
 use gpui_kit::{
-    Context, IntoElement, PathPromptOptions, Render, Role, TestSupportExt, Window, div, prelude::*,
-    px, rgb,
+    App, Context, FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, Role,
+    TestSupportExt, Window, div, prelude::*, px, rgb,
 };
 
 use crate::app::DesktopApp;
@@ -58,6 +58,7 @@ impl TrackDisplay {
 
 pub struct PlayerView {
     app: DesktopApp,
+    focus: FocusHandle,
     skin: Amp808Skin,
     session: Option<PlaybackSession>,
     error: Option<String>,
@@ -66,9 +67,10 @@ pub struct PlayerView {
 }
 
 impl PlayerView {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             app: DesktopApp::new(),
+            focus: cx.focus_handle(),
             skin: Amp808Skin::built_in(),
             session: None,
             error: None,
@@ -195,9 +197,36 @@ impl PlayerView {
     }
 }
 
+impl Focusable for PlayerView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 fn format_time(seconds: f64) -> String {
     let total_seconds = seconds.max(0.0).floor() as u64;
     format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
+}
+
+fn signal_status(
+    seeking: bool,
+    transport: Option<&TransportState>,
+    decode: Option<&DecodeWorkerState>,
+) -> &'static str {
+    if seeking {
+        return "PCM / BUFFERING";
+    }
+    if transport == Some(&TransportState::Ended) {
+        return "PCM / ENDED";
+    }
+    match decode {
+        None => "PCM / IDLE",
+        Some(DecodeWorkerState::Starting) => "PCM / BUFFERING",
+        Some(DecodeWorkerState::Running) => "PCM / LIVE",
+        Some(DecodeWorkerState::Ended) => "PCM / DRAINING",
+        Some(DecodeWorkerState::Failed(_)) => "PCM / ERROR",
+        Some(DecodeWorkerState::Stopped) => "PCM / STOPPED",
+    }
 }
 
 impl Render for PlayerView {
@@ -217,6 +246,11 @@ impl Render for PlayerView {
             "Standard motion enabled; essential audio levels remain active"
         };
         let status_opacity = if reduce_motion { 0.3 } else { 0.45 };
+        if let Some(session) = self.session.as_mut()
+            && let Err(error) = session.poll()
+        {
+            self.error = Some(error.to_string());
+        }
         let snapshot = self
             .session
             .as_ref()
@@ -332,19 +366,11 @@ impl Render for PlayerView {
             artist,
             album,
         } = track_display;
-        let signal_status = if self.seeking {
-            "PCM / BUFFERING"
-        } else {
-            snapshot
-                .as_ref()
-                .map_or("PCM / IDLE", |snapshot| match snapshot.decode() {
-                    DecodeWorkerState::Starting => "PCM / BUFFERING",
-                    DecodeWorkerState::Running => "PCM / LIVE",
-                    DecodeWorkerState::Ended => "PCM / DRAINING",
-                    DecodeWorkerState::Failed(_) => "PCM / ERROR",
-                    DecodeWorkerState::Stopped => "PCM / STOPPED",
-                })
-        };
+        let signal_status = signal_status(
+            self.seeking,
+            self.session.as_ref().map(PlaybackSession::transport_state),
+            snapshot.as_ref().map(|snapshot| snapshot.decode()),
+        );
         let detail = self.session.as_ref().map_or_else(
             || "SELECT A LOCAL FILE TO BEGIN".to_owned(),
             |session| {
@@ -352,11 +378,19 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
-        if self.session.is_some() {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.transport_state() == &TransportState::Playing)
+        {
             window.request_animation_frame();
         }
 
         div()
+            .id("player-root")
+            .test_support()
+            .track_focus(&self.focus)
+            .tab_group()
             .flex()
             .flex_col()
             .size_full()
@@ -601,11 +635,27 @@ mod tests {
 
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        AppContext, Bounds, Point, Role, TestAppContext, WindowBounds, WindowOptions, px, size,
+        AppContext, Bounds, Focusable, Point, Role, TestAppContext, WindowBounds, WindowOptions,
+        px, size,
     };
     use tempfile::tempdir;
 
-    use super::{PlayerView, TrackDisplay};
+    use crate::app::transport::TransportState;
+    use crate::playback::DecodeWorkerState;
+
+    use super::{PlayerView, TrackDisplay, signal_status};
+
+    #[test]
+    fn drained_transport_is_presented_as_ended() {
+        assert_eq!(
+            signal_status(
+                false,
+                Some(&TransportState::Ended),
+                Some(&DecodeWorkerState::Ended)
+            ),
+            "PCM / ENDED"
+        );
+    }
 
     #[test]
     fn track_display_preserves_available_title_artist_and_album_tags() {
@@ -638,7 +688,7 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |_, cx| cx.new(PlayerView::new),
             )
             .unwrap()
         });
@@ -675,7 +725,7 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |_, cx| cx.new(PlayerView::new),
             )
             .unwrap()
         });
@@ -714,7 +764,7 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |_, cx| cx.new(PlayerView::new),
             )
             .unwrap()
         });
@@ -749,7 +799,7 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |_, cx| cx.new(PlayerView::new),
             )
             .unwrap()
         });
@@ -783,25 +833,40 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |window, cx| {
+                    let view = cx.new(PlayerView::new);
+                    window.focus(&view.read(cx).focus_handle(cx), cx);
+                    view
+                },
             )
             .unwrap()
         });
 
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
-            window.click("visualizer-mode", cx);
+            assert_eq!(window.find("player-root").focused(), Some(true));
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(window.find("open-file").focused(), Some(true));
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
             assert_eq!(window.find("visualizer-mode").focused(), Some(true));
 
             window.press("enter", cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
-                Some("Show waveform visualizer")
+                Some("Show spectrum visualizer")
             );
             window.press("space", cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
-                Some("Show spectrum visualizer")
+                Some("Show waveform visualizer")
             );
         })
         .unwrap();
@@ -823,7 +888,7 @@ mod tests {
                     ..Default::default()
                 },
                 cx,
-                |_, cx| cx.new(|_| PlayerView::new()),
+                |_, cx| cx.new(PlayerView::new),
             )
             .unwrap()
         });
