@@ -44,3 +44,37 @@ assert kit["req"] == "=0.7.3", "gpui-kit must be pinned exactly to 0.7.3"
 for forbidden in ("gpui", "gpui-pre", "gpui-platform", "gpui-unofficial"):
     assert forbidden not in dependencies, f"desktop must not directly depend on {forbidden}"
 '
+
+moon query projects | python3 -c '
+import json
+import sys
+
+projects = json.load(sys.stdin)["projects"]
+root = next(project for project in projects if project["id"] == "root")
+tasks = root["tasks"]
+
+expected = {
+    "desktop-check": ["check", "--locked", "-p", "amp808-r3tr0"],
+    "desktop-test": ["test", "--locked", "-p", "amp808-r3tr0"],
+    "desktop-lint": [
+        "clippy",
+        "--locked",
+        "-p",
+        "amp808-r3tr0",
+        "--tests",
+        "--",
+        "-D",
+        "warnings",
+    ],
+    "desktop-build-macos": ["build", "--locked", "-p", "amp808-r3tr0"],
+}
+
+for task_id, args in expected.items():
+    task = tasks.get(task_id)
+    assert task is not None, f"missing Moon task root:{task_id}"
+    assert task["command"] == "cargo", f"root:{task_id} must invoke cargo"
+    assert task["args"] == args, f"root:{task_id} has unexpected arguments: {task['"'"'args'"'"']}"
+    assert task["options"]["runInCI"] is False, (
+        f"root:{task_id} must remain opt-in while desktop support is macOS-first"
+    )
+'
