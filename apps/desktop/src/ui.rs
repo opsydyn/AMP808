@@ -1,6 +1,9 @@
-use gpui_kit::base::{Disableable, StyledExt};
+use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
-use gpui_kit::{Context, IntoElement, PathPromptOptions, Render, Window, div, prelude::*, px, rgb};
+use gpui_kit::{
+    Context, IntoElement, PathPromptOptions, Render, Role, TestSupportExt, Window, div, prelude::*,
+    px, rgb,
+};
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
@@ -207,6 +210,13 @@ impl Render for PlayerView {
         let accent = self.color(self.skin.accent());
         let meter_low = self.color(self.skin.meter_low());
         let meter_high = self.color(self.skin.meter_high());
+        let reduce_motion = cx.reduce_motion();
+        let motion_label = if reduce_motion {
+            "Reduced motion enabled; essential audio levels remain active"
+        } else {
+            "Standard motion enabled; essential audio levels remain active"
+        };
+        let status_opacity = if reduce_motion { 0.3 } else { 0.45 };
         let snapshot = self
             .session
             .as_ref()
@@ -335,15 +345,13 @@ impl Render for PlayerView {
                     DecodeWorkerState::Stopped => "PCM / STOPPED",
                 })
         };
-        let detail = self.error.clone().unwrap_or_else(|| {
-            self.session.as_ref().map_or_else(
-                || "SELECT A LOCAL FILE TO BEGIN".to_owned(),
-                |session| {
-                    let metadata = session.metadata();
-                    format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
-                },
-            )
-        });
+        let detail = self.session.as_ref().map_or_else(
+            || "SELECT A LOCAL FILE TO BEGIN".to_owned(),
+            |session| {
+                let metadata = session.metadata();
+                format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
+            },
+        );
         if self.session.is_some() {
             window.request_animation_frame();
         }
@@ -391,6 +399,32 @@ impl Render for PlayerView {
                             .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
                     ),
             )
+            .when_some(self.error.clone(), |root, error| {
+                root.child(
+                    div()
+                        .id("playback-error")
+                        .test_support()
+                        .role(Role::Alert)
+                        .aria_label(format!("Playback error: {error}"))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(accent)
+                        .bg(panel_raised)
+                        .px_4()
+                        .py_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(accent)
+                                .child("PLAYBACK ERROR"),
+                        )
+                        .child(div().text_sm().text_color(text).child(error)),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -515,15 +549,24 @@ impl Render for PlayerView {
                                     .text_xs()
                                     .text_color(text_muted)
                                     .child(
-                                        Button::new("visualizer-mode")
-                                            .label(visualizer_label)
+                                        BaseButton::new("visualizer-mode")
                                             .accessibility_label(visualizer_action_label)
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(panel_raised)
+                                            .px_2()
+                                            .py_1()
+                                            .child(visualizer_label)
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.toggle_visualizer(cx);
                                             })),
                                     )
                                     .child(
                                         div()
+                                            .id("motion-policy")
+                                            .test_support()
+                                            .role(Role::Status)
+                                            .aria_label(motion_label)
                                             .flex()
                                             .items_center()
                                             .gap_2()
@@ -531,7 +574,7 @@ impl Render for PlayerView {
                                                 div()
                                                     .size_2()
                                                     .rounded_full()
-                                                    .bg(meter_high.opacity(0.45)),
+                                                    .bg(meter_high.opacity(status_opacity)),
                                             )
                                             .child(signal_status),
                                     ),
@@ -554,10 +597,13 @@ impl Render for PlayerView {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
+        AppContext, Bounds, Point, Role, TestAppContext, WindowBounds, WindowOptions, px, size,
     };
+    use tempfile::tempdir;
 
     use super::{PlayerView, TrackDisplay};
 
@@ -611,6 +657,48 @@ mod tests {
             None
         });
         cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn corrupt_file_failure_is_exposed_as_an_accessible_alert(cx: &mut TestAppContext) {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("broken.wav");
+        fs::write(&path, b"not audio").unwrap();
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| PlayerView::new()),
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-file", cx);
+        })
+        .unwrap();
+        cx.simulate_path_prompt_response(move |_| Some(vec![path]));
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("playback-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert!(
+                alert
+                    .label()
+                    .is_some_and(|label| label.contains("broken.wav"))
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -678,6 +766,77 @@ mod tests {
                 window.find("visualizer-mode").label(),
                 Some("Show spectrum visualizer")
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn focused_visualizer_control_accepts_keyboard_activation(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| PlayerView::new()),
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("visualizer-mode", cx);
+            assert_eq!(window.find("visualizer-mode").focused(), Some(true));
+
+            window.press("enter", cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show waveform visualizer")
+            );
+            window.press("space", cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show spectrum visualizer")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn reduced_motion_keeps_essential_audio_visualization_available(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| PlayerView::new()),
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let policy = window.find("motion-policy");
+            assert_eq!(policy.role(), Some(Role::Status));
+            assert_eq!(
+                policy.label(),
+                Some("Reduced motion enabled; essential audio levels remain active")
+            );
+            assert!(window.find("visualizer-mode").visible());
         })
         .unwrap();
     }
