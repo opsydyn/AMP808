@@ -1,7 +1,7 @@
 use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
 use gpui_kit::{
-    App, Context, FocusHandle, Focusable, IntoElement, PathPromptOptions, Render, Role,
+    App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions, Render, Role,
     TestSupportExt, Window, div, prelude::*, px, rgb,
 };
 
@@ -10,10 +10,59 @@ use crate::app::transport::TransportState;
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
 
+gpui_kit::actions!(
+    amp808,
+    [
+        OpenFile,
+        TogglePlayback,
+        SeekBack,
+        SeekForward,
+        VolumeDown,
+        VolumeUp,
+        ToggleVisualizer,
+    ]
+);
+
+pub fn init_keyboard_shortcuts(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-o", OpenFile, Some("Amp808Player")),
+        KeyBinding::new(
+            "space",
+            TogglePlayback,
+            Some("Amp808Player && !Amp808Control"),
+        ),
+        KeyBinding::new("left", SeekBack, Some("Amp808Player")),
+        KeyBinding::new("right", SeekForward, Some("Amp808Player")),
+        KeyBinding::new("down", VolumeDown, Some("Amp808Player")),
+        KeyBinding::new("up", VolumeUp, Some("Amp808Player")),
+        KeyBinding::new("v", ToggleVisualizer, Some("Amp808Player")),
+    ]);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VisualizerMode {
     Spectrum,
     Waveform,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackToggle {
+    Pause,
+    Play,
+    Restart,
+    Ignore,
+}
+
+fn playback_toggle(state: &TransportState) -> PlaybackToggle {
+    match state {
+        TransportState::Playing => PlaybackToggle::Pause,
+        TransportState::Paused | TransportState::Ready => PlaybackToggle::Play,
+        TransportState::Ended => PlaybackToggle::Restart,
+        TransportState::Empty
+        | TransportState::Loading
+        | TransportState::Buffering { .. }
+        | TransportState::Failed(_) => PlaybackToggle::Ignore,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,18 +182,43 @@ impl PlayerView {
     }
 
     fn toggle_playback(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.as_mut() else {
+        if self.seeking {
+            return;
+        }
+        let Some(action) = self
+            .session
+            .as_ref()
+            .map(|session| playback_toggle(session.transport_state()))
+        else {
             return;
         };
-        let result = match session.transport_state() {
-            TransportState::Playing => session.pause(),
-            TransportState::Paused | TransportState::Ready => session.play(),
-            _ => return,
-        };
-        if let Err(error) = result {
-            self.error = Some(error.to_string());
+        match action {
+            PlaybackToggle::Restart => {
+                let position = self
+                    .session
+                    .as_ref()
+                    .map_or(0.0, PlaybackSession::position_seconds);
+                self.seek_by(-position, cx);
+            }
+            PlaybackToggle::Pause | PlaybackToggle::Play => {
+                let session = self
+                    .session
+                    .as_mut()
+                    .expect("playback action requires an active session");
+                let result = match action {
+                    PlaybackToggle::Pause => session.pause(),
+                    PlaybackToggle::Play => session.play(),
+                    PlaybackToggle::Restart | PlaybackToggle::Ignore => unreachable!(
+                        "restart and ignore playback actions are handled before session mutation"
+                    ),
+                };
+                if let Err(error) = result {
+                    self.error = Some(error.to_string());
+                }
+                cx.notify();
+            }
+            PlaybackToggle::Ignore => {}
         }
-        cx.notify();
     }
 
     fn adjust_volume(&mut self, delta: f32, cx: &mut Context<Self>) {
@@ -391,6 +465,22 @@ impl Render for PlayerView {
             .test_support()
             .track_focus(&self.focus)
             .tab_group()
+            .key_context("Amp808Player")
+            .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.choose_file(cx)))
+            .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| {
+                this.toggle_playback(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SeekBack, _, cx| this.seek_by(-10.0, cx)))
+            .on_action(cx.listener(|this, _: &SeekForward, _, cx| this.seek_by(10.0, cx)))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
+                this.adjust_volume(-0.05, cx);
+            }))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
+                this.adjust_volume(0.05, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleVisualizer, _, cx| {
+                this.toggle_visualizer(cx);
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -428,6 +518,7 @@ impl Render for PlayerView {
                     )
                     .child(
                         Button::new("open-file")
+                            .key_context("Amp808Control")
                             .label("OPEN FILE")
                             .accessibility_label("Open a local audio file")
                             .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
@@ -506,6 +597,7 @@ impl Render for PlayerView {
                                     .gap_2()
                                     .child(
                                         Button::new("seek-back")
+                                            .key_context("Amp808Control")
                                             .label("-10S")
                                             .accessibility_label("Seek back 10 seconds")
                                             .disabled(!has_session || self.seeking)
@@ -515,6 +607,7 @@ impl Render for PlayerView {
                                     )
                                     .child(
                                         Button::new("play-pause")
+                                            .key_context("Amp808Control")
                                             .label(play_label)
                                             .accessibility_label(play_accessibility_label)
                                             .disabled(!has_session || self.seeking)
@@ -524,6 +617,7 @@ impl Render for PlayerView {
                                     )
                                     .child(
                                         Button::new("seek-forward")
+                                            .key_context("Amp808Control")
                                             .label("+10S")
                                             .accessibility_label("Seek forward 10 seconds")
                                             .disabled(!has_session || self.seeking)
@@ -539,6 +633,7 @@ impl Render for PlayerView {
                                     .gap_2()
                                     .child(
                                         Button::new("volume-down")
+                                            .key_context("Amp808Control")
                                             .label("VOL-")
                                             .accessibility_label("Decrease volume")
                                             .disabled(!has_session)
@@ -556,6 +651,7 @@ impl Render for PlayerView {
                                     )
                                     .child(
                                         Button::new("volume-up")
+                                            .key_context("Amp808Control")
                                             .label("VOL+")
                                             .accessibility_label("Increase volume")
                                             .disabled(!has_session)
@@ -584,10 +680,14 @@ impl Render for PlayerView {
                                     .text_color(text_muted)
                                     .child(
                                         BaseButton::new("visualizer-mode")
+                                            .key_context("Amp808Control")
                                             .accessibility_label(visualizer_action_label)
                                             .rounded_sm()
                                             .border_1()
                                             .border_color(panel_raised)
+                                            .focus_visible(|style| {
+                                                style.border_2().border_color(accent).text_color(text)
+                                            })
                                             .px_2()
                                             .py_1()
                                             .child(visualizer_label)
@@ -626,6 +726,22 @@ impl Render for PlayerView {
                             ),
                     ),
             )
+            .child(
+                div()
+                    .id("keyboard-help")
+                    .test_support()
+                    .aria_label(
+                        "Keyboard shortcuts: Command O open file, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer",
+                    )
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child(
+                        "⌘O OPEN  ·  SPACE PLAY/PAUSE  ·  ←/→ SEEK  ·  ↑/↓ VOLUME  ·  V VISUALIZER",
+                    ),
+            )
     }
 }
 
@@ -643,7 +759,15 @@ mod tests {
     use crate::app::transport::TransportState;
     use crate::playback::DecodeWorkerState;
 
-    use super::{PlayerView, TrackDisplay, signal_status};
+    use super::{PlaybackToggle, PlayerView, TrackDisplay, playback_toggle, signal_status};
+
+    #[test]
+    fn play_from_ended_requests_a_restart() {
+        assert_eq!(
+            playback_toggle(&TransportState::Ended),
+            PlaybackToggle::Restart
+        );
+    }
 
     #[test]
     fn drained_transport_is_presented_as_ended() {
@@ -822,7 +946,10 @@ mod tests {
 
     #[gpui_kit::test]
     fn focused_visualizer_control_accepts_keyboard_activation(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init_keyboard_shortcuts(cx);
+        });
         let (window, _view) = cx.update(|cx| {
             gpui_kit::open_window(
                 WindowOptions {
@@ -868,6 +995,75 @@ mod tests {
                 window.find("visualizer-mode").label(),
                 Some("Show waveform visualizer")
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn player_keyboard_shortcuts_open_files_and_switch_visualizers(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init_keyboard_shortcuts(cx);
+        });
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let view = cx.new(PlayerView::new);
+                    window.focus(&view.read(cx).focus_handle(cx), cx);
+                    view
+                },
+            )
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("cmd-o", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.press("v", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show spectrum visualizer")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn keyboard_shortcuts_are_visible_and_accessibly_described(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let help = window.find("keyboard-help");
+            assert_eq!(
+                help.label(),
+                Some(
+                    "Keyboard shortcuts: Command O open file, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer"
+                )
+            );
+            assert!(help.visible());
         })
         .unwrap();
     }

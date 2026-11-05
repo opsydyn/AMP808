@@ -15,6 +15,7 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        ui::init_keyboard_shortcuts(cx);
 
         let (width, height) = window_spec.initial_size();
         let (minimum_width, minimum_height) = window_spec.minimum_size();
