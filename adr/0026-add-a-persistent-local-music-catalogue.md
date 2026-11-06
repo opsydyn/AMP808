@@ -179,26 +179,37 @@ application; the catalogue passes a path, not its stored metadata, when playback
 
 ### Verification
 
-- [ ] Opening a new catalogue creates schema version 1 without touching user data in tests.
-- [ ] A persisted local track survives closing and reopening the catalogue.
-- [ ] Scanning a fixture root discovers supported audio recursively and ignores unrelated files.
-- [ ] Directory symlinks are not followed and cannot produce traversal cycles.
-- [ ] Re-scanning updates changed metadata and removes files absent from a successfully scanned root.
-- [ ] A root enumeration failure rolls back and preserves the previous root catalogue.
-- [ ] Corrupt or unsupported audio files are counted as skipped while valid tracks commit.
-- [ ] Case-insensitive search matches title, artist, and album and returns deterministic ordering.
-- [ ] Database and filesystem work execute outside GPUI render and CPAL callback paths.
-- [ ] The Library UI exposes accessible loading, empty, failure, and ready states.
-- [ ] Add Folder accepts a directory, persists it, and refreshes the visible track list.
+- [x] Opening a new catalogue creates schema version 1 without touching user data in tests.
+- [x] A persisted local track survives closing and reopening the catalogue.
+- [x] Scanning a fixture root discovers supported audio recursively and ignores unrelated files.
+- [x] Directory symlinks are not followed and cannot produce traversal cycles.
+- [x] Re-scanning updates changed metadata and removes files absent from a successfully scanned root.
+- [x] A root enumeration failure rolls back and preserves the previous root catalogue.
+- [x] Corrupt or unsupported audio files are counted as skipped while valid tracks commit.
+- [x] Case-insensitive search matches title, artist, and album and returns deterministic ordering.
+- [x] Database and filesystem work execute outside GPUI render and CPAL callback paths.
+- [x] The Library UI exposes accessible loading, empty, failure, and ready states.
+- [x] Add Folder accepts a directory, persists it, and refreshes the visible track list.
 - [ ] Keyboard and VoiceOver users can focus, identify, and activate a local track row.
-- [ ] Activating a result starts the existing local playback path without catalogue coupling.
-- [ ] Relaunching AMP808-R3TR0 reloads the indexed catalogue without rescanning first.
+- [x] Activating a result starts the existing local playback path without catalogue coupling.
+- [x] Relaunching AMP808-R3TR0 reloads the indexed catalogue without rescanning first.
 - [ ] Existing spectrum, waveform, MilkDrop, cosmic background, transport, errors, and shortcuts
       continue to work with library playback.
-- [ ] `cargo test --locked -p amp808-r3tr0` passes.
-- [ ] `cargo test --locked -p amp808-r3tr0 --features milkdrop-projectm` passes on macOS.
-- [ ] Strict desktop test-target Clippy and `cargo fmt --all --check` pass; broader pre-existing
+- [x] `cargo test --locked -p amp808-r3tr0` passes.
+- [x] `cargo test --locked -p amp808-r3tr0 --features milkdrop-projectm` passes on macOS.
+- [x] Strict desktop test-target Clippy and `cargo fmt --all --check` pass; broader pre-existing
       all-target dead-code findings remain reported separately until their own cleanup slice.
+
+Verification evidence on 2026-11-06: the locked base, projectM, test-hook, and workspace suites
+passed after the Library implementation, together with strict focused Clippy and formatting. A
+native disposable-folder run discovered one valid WAV, counted one corrupt WAV as skipped, and
+showed the valid row immediately. Uppercase `COSMIC` search matched the lowercase filename-derived
+title. Tab navigation reached the search field and track row; Enter activated the focused row,
+switched to Player, produced real spectrum energy with `PCM / LIVE`, and reached `PCM / ENDED` at
+00:08. Relaunching and pressing `L` showed the indexed track without rescanning. The pre-acceptance
+catalogue was backed up and restored after the run, verified at zero roots and zero tracks, and the
+temporary fixture directory was removed. VoiceOver and the combined waveform/MilkDrop/error
+regression remain open rather than inferred from this run.
 
 ## Simplicity Check
 
