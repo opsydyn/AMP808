@@ -1,14 +1,17 @@
 use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions, Render, Role,
-    TestSupportExt, Window, canvas as gpui_canvas, deferred, div, prelude::*, px, rgb,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions,
+    Render, Role, Subscription, TestSupportExt, Window, canvas as gpui_canvas, deferred, div,
+    prelude::*, px, rgb,
 };
 use std::time::{Duration, Instant};
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
+use crate::library::{LibraryCatalogue, LibraryTrack, ScanSummary};
 use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
@@ -23,6 +26,7 @@ gpui_kit::actions!(
         VolumeDown,
         VolumeUp,
         ToggleVisualizer,
+        ToggleLibrary,
     ]
 );
 
@@ -39,6 +43,7 @@ pub fn init_keyboard_shortcuts(cx: &mut App) {
         KeyBinding::new("down", VolumeDown, Some("Amp808Player")),
         KeyBinding::new("up", VolumeUp, Some("Amp808Player")),
         KeyBinding::new("v", ToggleVisualizer, Some("Amp808Player")),
+        KeyBinding::new("l", ToggleLibrary, Some("Amp808Player")),
     ]);
 }
 
@@ -55,6 +60,14 @@ enum PlaybackToggle {
     Play,
     Restart,
     Ignore,
+}
+
+#[derive(Debug)]
+enum LibraryStatus {
+    Unloaded,
+    Loading,
+    Ready(Vec<LibraryTrack>),
+    Failed(String),
 }
 
 fn playback_toggle(state: &TransportState) -> PlaybackToggle {
@@ -135,6 +148,13 @@ pub struct PlayerView {
     visualizer_mode: VisualizerMode,
     milkdrop_performance_probe: PerformanceProbe,
     cosmic_performance_probe: PerformanceProbe,
+    library_visible: bool,
+    library_catalogue: Option<LibraryCatalogue>,
+    library_status: LibraryStatus,
+    library_search: Option<Entity<InputState>>,
+    library_search_subscription: Option<Subscription>,
+    library_query_generation: u64,
+    library_scan_summary: Option<ScanSummary>,
 }
 
 impl PlayerView {
@@ -151,6 +171,13 @@ impl PlayerView {
             visualizer_mode: VisualizerMode::Spectrum,
             milkdrop_performance_probe: PerformanceProbe::from_env("AMP808_MILKDROP_METRICS"),
             cosmic_performance_probe: PerformanceProbe::from_env("AMP808_COSMIC_METRICS"),
+            library_visible: false,
+            library_catalogue: None,
+            library_status: LibraryStatus::Unloaded,
+            library_search: None,
+            library_search_subscription: None,
+            library_query_generation: 0,
+            library_scan_summary: None,
         }
     }
 
@@ -210,6 +237,184 @@ impl PlayerView {
                         view.error = Some(error.to_string());
                         view.seeking = false;
                     }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn ensure_library_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.library_search.is_some() {
+            return;
+        }
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search title, artist, or album"));
+        let subscription = cx.subscribe(&search, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.refresh_library(cx);
+            }
+        });
+        self.library_search = Some(search);
+        self.library_search_subscription = Some(subscription);
+    }
+
+    fn toggle_library(&mut self, cx: &mut Context<Self>) {
+        self.library_visible = !self.library_visible;
+        if self.library_visible && matches!(self.library_status, LibraryStatus::Unloaded) {
+            self.load_library(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn load_library(&mut self, cx: &mut Context<Self>) {
+        self.library_query_generation = self.library_query_generation.wrapping_add(1);
+        let generation = self.library_query_generation;
+        self.library_status = LibraryStatus::Loading;
+        let load = cx.background_executor().spawn(async move {
+            let catalogue = LibraryCatalogue::open_default()?;
+            let tracks = catalogue.search("")?;
+            Ok::<_, crate::library::LibraryError>((catalogue, tracks))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = load.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.library_query_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok((catalogue, tracks)) => {
+                        view.library_catalogue = Some(catalogue);
+                        view.library_status = LibraryStatus::Ready(tracks);
+                    }
+                    Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn refresh_library(&mut self, cx: &mut Context<Self>) {
+        if !self.library_visible {
+            return;
+        }
+        let Some(catalogue) = self.library_catalogue.clone() else {
+            return;
+        };
+        let query = self
+            .library_search
+            .as_ref()
+            .map_or_else(String::new, |search| search.read(cx).value().to_string());
+        self.library_query_generation = self.library_query_generation.wrapping_add(1);
+        let generation = self.library_query_generation;
+        self.library_status = LibraryStatus::Loading;
+        let search = cx
+            .background_executor()
+            .spawn(async move { catalogue.search(&query) });
+        cx.spawn(async move |this, cx| {
+            let result = search.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.library_query_generation != generation {
+                    return;
+                }
+                view.library_status = match result {
+                    Ok(tracks) => LibraryStatus::Ready(tracks),
+                    Err(error) => LibraryStatus::Failed(error.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn choose_library_folder(&mut self, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add a music folder to AMP808-R3TR0".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match selection.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.library_status = LibraryStatus::Failed(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.library_status = LibraryStatus::Failed(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let query = this
+                .read_with(cx, |view, cx| {
+                    view.library_search
+                        .as_ref()
+                        .map_or_else(String::new, |search| search.read(cx).value().to_string())
+                })
+                .unwrap_or_default();
+            let generation = this
+                .update(cx, |view, cx| {
+                    view.library_query_generation = view.library_query_generation.wrapping_add(1);
+                    view.library_status = LibraryStatus::Loading;
+                    cx.notify();
+                    view.library_query_generation
+                })
+                .unwrap_or_default();
+            let scan = cx.background_spawn(async move {
+                let catalogue = LibraryCatalogue::open_default()?;
+                let summary = catalogue.scan_root(path)?;
+                let tracks = catalogue.search(&query)?;
+                Ok::<_, crate::library::LibraryError>((catalogue, summary, tracks))
+            });
+            let result = scan.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.library_query_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok((catalogue, summary, tracks)) => {
+                        view.library_catalogue = Some(catalogue);
+                        view.library_scan_summary = Some(summary);
+                        view.library_status = LibraryStatus::Ready(tracks);
+                    }
+                    Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_library_track(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let open = cx
+            .background_executor()
+            .spawn(async move { PlaybackSession::open(path) });
+        cx.spawn(async move |this, cx| {
+            let result = open.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(session) => {
+                        view.install_session(session);
+                        view.error = None;
+                        view.seeking = false;
+                        view.library_visible = false;
+                    }
+                    Err(error) => view.error = Some(error.to_string()),
                 }
                 cx.notify();
             });
@@ -429,6 +634,7 @@ impl PerformanceProbe {
 
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_library_search(window, cx);
         let canvas = self.color(self.skin.canvas());
         let panel = self
             .color(self.skin.panel())
@@ -682,6 +888,132 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
+        let library_visible = self.library_visible;
+        let library_tracks = match &self.library_status {
+            LibraryStatus::Ready(tracks) => tracks.clone(),
+            LibraryStatus::Unloaded | LibraryStatus::Loading | LibraryStatus::Failed(_) => {
+                Vec::new()
+            }
+        };
+        let library_status = match &self.library_status {
+            LibraryStatus::Unloaded => "Local library has not been loaded".to_owned(),
+            LibraryStatus::Loading => "Loading local library".to_owned(),
+            LibraryStatus::Ready(tracks) if tracks.is_empty() => {
+                "No matching local tracks. Add a folder or change the search.".to_owned()
+            }
+            LibraryStatus::Ready(tracks) => format!("{} local tracks", tracks.len()),
+            LibraryStatus::Failed(error) => format!("Library error: {error}"),
+        };
+        let scan_detail = self.library_scan_summary.map(|summary| {
+            format!(
+                "LAST SCAN  {} FOUND  /  {} SKIPPED  /  {} REMOVED",
+                summary.discovered(),
+                summary.skipped(),
+                summary.removed()
+            )
+        });
+        let library_search = self
+            .library_search
+            .as_ref()
+            .expect("library search is initialized before rendering")
+            .clone();
+        let library_panel = div()
+            .id("library-panel")
+            .test_support()
+            .role(Role::Group)
+            .aria_label("Local music library")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(panel_raised)
+            .bg(panel)
+            .p_4()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child("LOCAL LIBRARY"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_muted)
+                                    .child("ON-DEVICE / PERSISTENT / SEARCHABLE"),
+                            ),
+                    )
+                    .child(
+                        Button::new("add-library-folder")
+                            .key_context("Amp808Control")
+                            .label("ADD FOLDER")
+                            .accessibility_label("Add a folder to the local music library")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.choose_library_folder(cx);
+                            })),
+                    ),
+            )
+            .child(Input::new(&library_search).id("library-search").w_full())
+            .child(
+                div()
+                    .id("library-status")
+                    .test_support()
+                    .role(Role::Status)
+                    .aria_label(library_status.clone())
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child(library_status),
+            )
+            .when_some(scan_detail, |panel, detail| {
+                panel.child(div().text_xs().text_color(text_muted).child(detail))
+            })
+            .child(
+                div()
+                    .id("library-track-list")
+                    .test_support()
+                    .role(Role::Group)
+                    .aria_label("Local library tracks")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .gap_2()
+                    .children(
+                        library_tracks
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, track)| {
+                                let path = track.path().to_path_buf();
+                                let artist = track.artist().unwrap_or("Unknown artist");
+                                let album = track.album().unwrap_or("Unknown album");
+                                let label =
+                                    format!("{}  —  {}  /  {}", track.title(), artist, album);
+                                let technical = format!(
+                                    "{} hertz, {} channels, duration {}",
+                                    track.sample_rate(),
+                                    track.channels(),
+                                    track
+                                        .duration_seconds()
+                                        .map_or_else(|| "unknown".to_owned(), format_time)
+                                );
+                                Button::new(("library-track", index))
+                                    .key_context("Amp808Control")
+                                    .label(label.clone())
+                                    .accessibility_label(format!("Play {label}. {technical}"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_library_track(path.clone(), cx);
+                                    }))
+                            }),
+                    ),
+            );
         if !reduce_motion && !matches!(self.cosmic.status(), CosmicStatus::Failed(_)) {
             window.request_animation_frame();
         } else if self.visualizer_mode == VisualizerMode::MilkDrop
@@ -713,6 +1045,9 @@ impl Render for PlayerView {
             }))
             .on_action(cx.listener(|this, _: &ToggleVisualizer, _, cx| {
                 this.toggle_visualizer(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| {
+                this.toggle_library(cx);
             }))
             .flex()
             .flex_col()
@@ -753,11 +1088,30 @@ impl Render for PlayerView {
                             ),
                     )
                     .child(
-                        Button::new("open-file")
-                            .key_context("Amp808Control")
-                            .label("OPEN FILE")
-                            .accessibility_label("Open a local audio file")
-                            .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("toggle-library")
+                                    .key_context("Amp808Control")
+                                    .label(if library_visible { "PLAYER" } else { "LIBRARY" })
+                                    .accessibility_label(if library_visible {
+                                        "Show player"
+                                    } else {
+                                        "Show local music library"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_library(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("open-file")
+                                    .key_context("Amp808Control")
+                                    .label("OPEN FILE")
+                                    .accessibility_label("Open a local audio file")
+                                    .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
+                            ),
                     ),
             )
             .when_some(self.error.clone(), |root, error| {
@@ -786,7 +1140,8 @@ impl Render for PlayerView {
                         .child(div().text_sm().text_color(text).child(error)),
                 )
             })
-            .child(
+            .when(library_visible, |root| root.child(library_panel))
+            .when(!library_visible, |root| root.child(
                 div()
                     .flex()
                     .flex_1()
@@ -978,13 +1333,13 @@ impl Render for PlayerView {
                                     .child(duration),
                             ),
                     ),
-            )
+            ))
             .child(
                 div()
                     .id("keyboard-help")
                     .test_support()
                     .aria_label(
-                        "Keyboard shortcuts: Command O open file, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer",
+                        "Keyboard shortcuts: Command O open file, L switch library and player, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer",
                     )
                     .flex()
                     .items_center()
@@ -996,7 +1351,7 @@ impl Render for PlayerView {
                     .text_xs()
                     .text_color(text_muted)
                     .child(
-                        "⌘O OPEN  ·  SPACE PLAY/PAUSE  ·  ←/→ SEEK  ·  ↑/↓ VOLUME  ·  V VISUALIZER",
+                        "⌘O OPEN  ·  L LIBRARY  ·  SPACE PLAY/PAUSE  ·  ←/→ SEEK  ·  ↑/↓ VOLUME  ·  V VISUALIZER",
                     ),
             );
 
@@ -1043,8 +1398,8 @@ mod tests {
     use crate::playback::DecodeWorkerState;
 
     use super::{
-        PerformanceProbe, PlaybackToggle, PlayerView, TrackDisplay, milkdrop_status_label,
-        playback_toggle, signal_status,
+        LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, TrackDisplay,
+        milkdrop_status_label, playback_toggle, signal_status,
     };
 
     #[test]
@@ -1153,7 +1508,6 @@ mod tests {
             })
             .unwrap()
         });
-
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             let summary = window.find("now-playing-summary");
@@ -1284,6 +1638,52 @@ mod tests {
         cx.simulate_path_prompt_response(|options| {
             assert!(options.files);
             assert!(!options.directories);
+            assert!(!options.multiple);
+            None
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn empty_library_is_accessible_and_add_folder_requests_one_directory(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(Vec::new());
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("library-panel").role(), Some(Role::Group));
+            assert_eq!(
+                window.find("library-panel").label(),
+                Some("Local music library")
+            );
+            assert_eq!(
+                window.find("library-status").label(),
+                Some("No matching local tracks. Add a folder or change the search.")
+            );
+            assert_eq!(
+                window.find("add-library-folder").label(),
+                Some("Add a folder to the local music library")
+            );
+            window.click("add-library-folder", cx);
+        })
+        .unwrap();
+
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(!options.files);
+            assert!(options.directories);
             assert!(!options.multiple);
             None
         });
@@ -1452,6 +1852,12 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
+            assert_eq!(window.find("toggle-library").focused(), Some(true));
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
             assert_eq!(window.find("open-file").focused(), Some(true));
             window.press("tab", cx);
         })
@@ -1485,7 +1891,7 @@ mod tests {
             gpui_kit::init(cx);
             super::init_keyboard_shortcuts(cx);
         });
-        let (window, _view) = cx.update(|cx| {
+        let (window, view) = cx.update(|cx| {
             gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -1502,6 +1908,11 @@ mod tests {
                 },
             )
             .unwrap()
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.library_status = LibraryStatus::Ready(Vec::new());
+            });
         });
 
         cx.update_window(window, |_, window, cx| {
@@ -1520,6 +1931,9 @@ mod tests {
                 window.find("visualizer-mode").label(),
                 Some("Show MilkDrop visualizer")
             );
+            window.press("l", cx);
+            window.render_frame(cx);
+            assert!(window.find("library-panel").visible());
         })
         .unwrap();
     }
@@ -1540,7 +1954,7 @@ mod tests {
             assert_eq!(
                 help.label(),
                 Some(
-                    "Keyboard shortcuts: Command O open file, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer"
+                    "Keyboard shortcuts: Command O open file, L switch library and player, Space play or pause, Left and Right seek, Up and Down adjust volume, V switch visualizer"
                 )
             );
             assert!(help.visible());

@@ -2,6 +2,7 @@ mod analysis;
 mod app;
 mod audio;
 mod cosmic;
+mod library;
 mod media;
 mod milkdrop;
 mod playback;

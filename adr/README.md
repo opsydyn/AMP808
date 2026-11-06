@@ -43,3 +43,5 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0023: Adopt projectM for authentic MilkDrop visualisation](0023-adopt-projectm-for-authentic-milkdrop-visualisation.md) (superseded, 2026-11-05)
 - [ADR-0024: Host projectM in a native macOS OpenGL subview](0024-host-projectm-in-a-native-macos-opengl-subview.md) (accepted, 2026-11-05)
 - [ADR-0025: Add a native cosmic Metal underlay beneath GPUI](0025-add-a-native-cosmic-metal-underlay.md) (accepted, 2026-11-06)
+- [ADR-0026: Add a persistent local music catalogue to AMP808-R3TR0](0026-add-a-persistent-local-music-catalogue.md) (accepted, 2026-11-06)
+- [ADR-0027: Upgrade GPUI Kit to restore native macOS launch](0027-upgrade-gpui-kit-to-restore-native-macos-launch.md) (accepted, 2026-11-06)

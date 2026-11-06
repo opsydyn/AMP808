@@ -26,9 +26,11 @@ undocumented_unsafe_blocks = "warn"
 
 [dependencies]
 cpal = "0.18"
-gpui-kit = { version = "=0.7.3", features = ["gpui-fast"] }
+dirs = "6"
+gpui-kit = { version = "=0.9.0", features = ["gpui-fast"] }
 realfft = "3"
 rtrb = "0.3"
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
 symphonia = { version = "0.6", features = ["all", "opt-simd"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -41,5 +43,5 @@ projectm-sys = { version = "1.2.2", optional = true, default-features = false, f
 raw-window-handle = { version = "0.6", optional = true }
 
 [dev-dependencies]
-gpui-kit = { version = "=0.7.3", features = ["gpui-fast", "test-support"] }
+gpui-kit = { version = "=0.9.0", features = ["gpui-fast", "test-support"] }
 tempfile = "3"

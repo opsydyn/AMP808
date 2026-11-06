@@ -4,7 +4,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use symphonia::core::codecs::CodecParameters;
-use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
@@ -96,6 +96,17 @@ pub struct StreamingDecoder {
     ended: bool,
 }
 
+struct ProbedMedia {
+    format: Box<dyn FormatReader>,
+    codec_params: AudioCodecParameters,
+    track_id: u32,
+    metadata: TrackMetadata,
+}
+
+pub(crate) fn probe_metadata(path: impl AsRef<Path>) -> Result<TrackMetadata, MediaError> {
+    probe(path.as_ref()).map(|probed| probed.metadata)
+}
+
 impl fmt::Debug for StreamingDecoder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -112,86 +123,21 @@ impl fmt::Debug for StreamingDecoder {
 impl StreamingDecoder {
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, TrackMetadata), MediaError> {
         let path = path.as_ref();
-        let file = File::open(path).map_err(|error| MediaError::new(path, error))?;
-        let source = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
-            hint.with_extension(extension);
-        }
-
-        let mut format = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                source,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
-            .map_err(|error| MediaError::new(path, error))?;
-
-        let (track_id, codec_params, sample_rate, channels, duration_seconds) = {
-            let track = format
-                .first_track_known_codec(TrackType::Audio)
-                .ok_or_else(|| MediaError::new(path, "no supported audio track"))?;
-            let codec_params = match track.codec_params.as_ref() {
-                Some(CodecParameters::Audio(params)) => params.clone(),
-                _ => return Err(MediaError::new(path, "audio track has no codec parameters")),
-            };
-            let sample_rate = codec_params
-                .sample_rate
-                .ok_or_else(|| MediaError::new(path, "audio track has no sample rate"))?;
-            let channels = codec_params
-                .channels
-                .as_ref()
-                .map(|channels| channels.count())
-                .ok_or_else(|| MediaError::new(path, "audio track has no channel layout"))?;
-            let duration_seconds = track
-                .time_base
-                .zip(track.duration)
-                .and_then(|(time_base, duration)| time_base.calc_duration(duration))
-                .map(|time| time.as_secs_f64())
-                .or_else(|| {
-                    track
-                        .num_frames
-                        .map(|frames| frames as f64 / f64::from(sample_rate))
-                });
-            (
-                track.id,
-                codec_params,
-                sample_rate,
-                channels,
-                duration_seconds,
-            )
-        };
-
-        let (tag_title, artist, album) = format
-            .metadata()
-            .current()
-            .map(extract_text_metadata)
-            .unwrap_or_default();
-        let title = tag_title.unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("Unknown track")
-                .to_string()
-        });
+        let ProbedMedia {
+            format,
+            codec_params,
+            track_id,
+            metadata,
+        } = probe(path)?;
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
             .map_err(|error| MediaError::new(path, error))?;
-
-        let metadata = TrackMetadata {
-            title,
-            artist,
-            album,
-            sample_rate,
-            channels,
-            duration_seconds,
-        };
         let streaming = Self {
             path: path.to_path_buf(),
             format,
             decoder,
             track_id,
-            sample_rate,
+            sample_rate: metadata.sample_rate,
             pending: VecDeque::new(),
             ended: false,
         };
@@ -272,6 +218,85 @@ impl StreamingDecoder {
             sample_rate: self.sample_rate,
         }))
     }
+}
+
+fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
+    let file = File::open(path).map_err(|error| MediaError::new(path, error))?;
+    let source = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            &hint,
+            source,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|error| MediaError::new(path, error))?;
+
+    let (track_id, codec_params, sample_rate, channels, duration_seconds) = {
+        let track = format
+            .first_track_known_codec(TrackType::Audio)
+            .ok_or_else(|| MediaError::new(path, "no supported audio track"))?;
+        let codec_params = match track.codec_params.as_ref() {
+            Some(CodecParameters::Audio(params)) => params.clone(),
+            _ => return Err(MediaError::new(path, "audio track has no codec parameters")),
+        };
+        let sample_rate = codec_params
+            .sample_rate
+            .ok_or_else(|| MediaError::new(path, "audio track has no sample rate"))?;
+        let channels = codec_params
+            .channels
+            .as_ref()
+            .map(|channels| channels.count())
+            .ok_or_else(|| MediaError::new(path, "audio track has no channel layout"))?;
+        let duration_seconds = track
+            .time_base
+            .zip(track.duration)
+            .and_then(|(time_base, duration)| time_base.calc_duration(duration))
+            .map(|time| time.as_secs_f64())
+            .or_else(|| {
+                track
+                    .num_frames
+                    .map(|frames| frames as f64 / f64::from(sample_rate))
+            });
+        (
+            track.id,
+            codec_params,
+            sample_rate,
+            channels,
+            duration_seconds,
+        )
+    };
+
+    let (tag_title, artist, album) = format
+        .metadata()
+        .current()
+        .map(extract_text_metadata)
+        .unwrap_or_default();
+    let title = tag_title.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("Unknown track")
+            .to_string()
+    });
+
+    Ok(ProbedMedia {
+        format,
+        codec_params,
+        track_id,
+        metadata: TrackMetadata {
+            title,
+            artist,
+            album,
+            sample_rate,
+            channels,
+            duration_seconds,
+        },
+    })
 }
 
 fn extract_text_metadata(
