@@ -45,3 +45,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0025: Add a native cosmic Metal underlay beneath GPUI](0025-add-a-native-cosmic-metal-underlay.md) (accepted, 2026-11-06)
 - [ADR-0026: Add a persistent local music catalogue to AMP808-R3TR0](0026-add-a-persistent-local-music-catalogue.md) (accepted, 2026-11-06)
 - [ADR-0027: Upgrade GPUI Kit to restore native macOS launch](0027-upgrade-gpui-kit-to-restore-native-macos-launch.md) (accepted, 2026-11-06)
+- [ADR-0028: Add persistent local playlists and a session playback queue](0028-add-persistent-local-playlists-and-a-session-queue.md) (accepted, 2026-11-06)

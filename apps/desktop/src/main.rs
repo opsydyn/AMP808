@@ -6,6 +6,7 @@ mod library;
 mod media;
 mod milkdrop;
 mod playback;
+mod queue;
 mod skin;
 mod ui;
 

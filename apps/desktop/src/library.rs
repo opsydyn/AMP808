@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 
 use crate::media::probe_metadata;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "aac", "alac", "flac", "m4a", "m4b", "mp3", "ogg", "opus", "wav", "wma",
 ];
@@ -156,19 +156,208 @@ impl LibraryCatalogue {
                 OR LOWER(COALESCE(album, '')) LIKE ?1
              ORDER BY LOWER(COALESCE(artist, '')), LOWER(COALESCE(album, '')), LOWER(title), path",
         )?;
-        let rows = statement.query_map([pattern], |row| {
-            Ok(LibraryTrack {
-                id: LocalTrackId(row.get(0)?),
-                path: PathBuf::from(row.get::<_, String>(1)?),
-                title: row.get(2)?,
-                artist: row.get(3)?,
-                album: row.get(4)?,
-                duration_seconds: row.get(5)?,
-                sample_rate: row.get::<_, u32>(6)?,
-                channels: usize::try_from(row.get::<_, u32>(7)?)
-                    .expect("u32 channel count fits usize on supported desktop targets"),
+        let rows = statement.query_map([pattern], read_library_track)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn create_playlist(&self, name: &str) -> Result<LocalPlaylist, LibraryError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(LibraryError::InvalidPlaylistName);
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_playlists WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(LibraryError::PlaylistNameTaken(name.to_owned()));
+        }
+        transaction.execute("INSERT INTO local_playlists(name) VALUES (?1)", [name])?;
+        let id = LocalPlaylistId(transaction.last_insert_rowid());
+        transaction.commit()?;
+        Ok(LocalPlaylist {
+            id,
+            name: name.to_owned(),
+            track_count: 0,
+        })
+    }
+
+    pub(crate) fn playlists(&self) -> Result<Vec<LocalPlaylist>, LibraryError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT playlists.id, playlists.name, COUNT(entries.track_id)
+             FROM local_playlists AS playlists
+             LEFT JOIN local_playlist_entries AS entries
+                ON entries.playlist_id = playlists.id
+             GROUP BY playlists.id, playlists.name
+             ORDER BY LOWER(playlists.name), playlists.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(LocalPlaylist {
+                id: LocalPlaylistId(row.get(0)?),
+                name: row.get(1)?,
+                track_count: usize::try_from(row.get::<_, i64>(2)?)
+                    .expect("SQLite playlist count fits usize on supported desktop targets"),
             })
         })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn rename_playlist(
+        &self,
+        playlist_id: LocalPlaylistId,
+        name: &str,
+    ) -> Result<(), LibraryError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(LibraryError::InvalidPlaylistName);
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM local_playlists WHERE name = ?1 AND id != ?2
+             )",
+            params![name, playlist_id.0],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(LibraryError::PlaylistNameTaken(name.to_owned()));
+        }
+        let changed = transaction.execute(
+            "UPDATE local_playlists SET name = ?2 WHERE id = ?1",
+            params![playlist_id.0, name],
+        )?;
+        if changed == 0 {
+            return Err(LibraryError::PlaylistNotFound(playlist_id));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_playlist(&self, playlist_id: LocalPlaylistId) -> Result<(), LibraryError> {
+        let connection = self.connect()?;
+        let changed =
+            connection.execute("DELETE FROM local_playlists WHERE id = ?1", [playlist_id.0])?;
+        if changed == 0 {
+            return Err(LibraryError::PlaylistNotFound(playlist_id));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_to_playlist(
+        &self,
+        playlist_id: LocalPlaylistId,
+        track_id: LocalTrackId,
+    ) -> Result<(), LibraryError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position) + 1, 0)
+             FROM local_playlist_entries
+             WHERE playlist_id = ?1",
+            [playlist_id.0],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO local_playlist_entries(playlist_id, position, track_id)
+             VALUES (?1, ?2, ?3)",
+            params![playlist_id.0, position, track_id.0],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn remove_playlist_position(
+        &self,
+        playlist_id: LocalPlaylistId,
+        position: usize,
+    ) -> Result<bool, LibraryError> {
+        let position = i64::try_from(position)
+            .expect("playlist position fits SQLite on supported desktop targets");
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let removed = transaction.execute(
+            "DELETE FROM local_playlist_entries
+             WHERE playlist_id = ?1 AND position = ?2",
+            params![playlist_id.0, position],
+        )?;
+        if removed == 0 {
+            return Ok(false);
+        }
+        let maximum_position: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(position), -1)
+             FROM local_playlist_entries
+             WHERE playlist_id = ?1",
+            [playlist_id.0],
+            |row| row.get(0),
+        )?;
+        let offset = maximum_position + 1;
+        transaction.execute(
+            "UPDATE local_playlist_entries
+             SET position = position + ?3
+             WHERE playlist_id = ?1 AND position > ?2",
+            params![playlist_id.0, position, offset],
+        )?;
+        transaction.execute(
+            "UPDATE local_playlist_entries
+             SET position = position - ?3 - 1
+             WHERE playlist_id = ?1 AND position > ?2",
+            params![playlist_id.0, maximum_position, offset],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub(crate) fn replace_playlist_tracks(
+        &self,
+        playlist_id: LocalPlaylistId,
+        track_ids: &[LocalTrackId],
+    ) -> Result<(), LibraryError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_playlists WHERE id = ?1)",
+            [playlist_id.0],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(LibraryError::PlaylistNotFound(playlist_id));
+        }
+        transaction.execute(
+            "DELETE FROM local_playlist_entries WHERE playlist_id = ?1",
+            [playlist_id.0],
+        )?;
+        for (position, track_id) in track_ids.iter().enumerate() {
+            let position = i64::try_from(position)
+                .expect("playlist position fits SQLite on supported desktop targets");
+            transaction.execute(
+                "INSERT INTO local_playlist_entries(playlist_id, position, track_id)
+                 VALUES (?1, ?2, ?3)",
+                params![playlist_id.0, position, track_id.0],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn playlist_tracks(
+        &self,
+        playlist_id: LocalPlaylistId,
+    ) -> Result<Vec<LibraryTrack>, LibraryError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT tracks.id, tracks.path, tracks.title, tracks.artist, tracks.album,
+                    tracks.duration_seconds, tracks.sample_rate, tracks.channels
+             FROM local_playlist_entries AS entries
+             INNER JOIN library_tracks AS tracks ON tracks.id = entries.track_id
+             WHERE entries.playlist_id = ?1
+             ORDER BY entries.position",
+        )?;
+        let rows = statement.query_map([playlist_id.0], read_library_track)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -195,6 +384,10 @@ pub(crate) struct LibraryTrack {
 }
 
 impl LibraryTrack {
+    pub(crate) const fn id(&self) -> LocalTrackId {
+        self.id
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -224,6 +417,30 @@ impl LibraryTrack {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct LocalPlaylistId(i64);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalPlaylist {
+    id: LocalPlaylistId,
+    name: String,
+    track_count: usize,
+}
+
+impl LocalPlaylist {
+    pub(crate) const fn id(&self) -> LocalPlaylistId {
+        self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) const fn track_count(&self) -> usize {
+        self.track_count
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ScanSummary {
     discovered: usize,
@@ -245,16 +462,33 @@ impl ScanSummary {
     }
 }
 
+fn read_library_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack> {
+    Ok(LibraryTrack {
+        id: LocalTrackId(row.get(0)?),
+        path: PathBuf::from(row.get::<_, String>(1)?),
+        title: row.get(2)?,
+        artist: row.get(3)?,
+        album: row.get(4)?,
+        duration_seconds: row.get(5)?,
+        sample_rate: row.get::<_, u32>(6)?,
+        channels: usize::try_from(row.get::<_, u32>(7)?)
+            .expect("u32 channel count fits usize on supported desktop targets"),
+    })
+}
+
 #[derive(Debug)]
 pub(crate) enum LibraryError {
     Database(rusqlite::Error),
     DataDirectoryUnavailable,
     FileTooLarge(PathBuf),
+    InvalidPlaylistName,
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
     InvalidRoot(PathBuf),
+    PlaylistNameTaken(String),
+    PlaylistNotFound(LocalPlaylistId),
     UnsupportedSchemaVersion(i32),
 }
 
@@ -280,6 +514,7 @@ impl fmt::Display for LibraryError {
                 "audio file size cannot be indexed by SQLite: {}",
                 path.display()
             ),
+            Self::InvalidPlaylistName => write!(formatter, "playlist name cannot be empty"),
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::InvalidRoot(path) => {
                 write!(
@@ -287,6 +522,12 @@ impl fmt::Display for LibraryError {
                     "library root is not a directory: {}",
                     path.display()
                 )
+            }
+            Self::PlaylistNameTaken(name) => {
+                write!(formatter, "playlist name is already in use: {name}")
+            }
+            Self::PlaylistNotFound(id) => {
+                write!(formatter, "playlist does not exist: {}", id.0)
             }
             Self::UnsupportedSchemaVersion(version) => write!(
                 formatter,
@@ -302,8 +543,12 @@ impl std::error::Error for LibraryError {
             Self::Database(error) => Some(error),
             Self::DataDirectoryUnavailable => None,
             Self::FileTooLarge(_) => None,
+            Self::InvalidPlaylistName => None,
             Self::Io { source, .. } => Some(source),
-            Self::InvalidRoot(_) | Self::UnsupportedSchemaVersion(_) => None,
+            Self::InvalidRoot(_)
+            | Self::PlaylistNameTaken(_)
+            | Self::PlaylistNotFound(_)
+            | Self::UnsupportedSchemaVersion(_) => None,
         }
     }
 }
@@ -386,7 +631,44 @@ fn migrate(connection: &Connection) -> Result<(), LibraryError> {
              );
              CREATE INDEX library_tracks_search
                 ON library_tracks(title, artist, album, path);
-             PRAGMA user_version = 1;
+             CREATE TABLE local_playlists(
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                    CHECK(length(trim(name)) > 0)
+             );
+             CREATE TABLE local_playlist_entries(
+                playlist_id INTEGER NOT NULL
+                    REFERENCES local_playlists(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK(position >= 0),
+                track_id INTEGER NOT NULL
+                    REFERENCES library_tracks(id) ON DELETE CASCADE,
+                PRIMARY KEY(playlist_id, position)
+             );
+             CREATE INDEX local_playlist_entries_track
+                ON local_playlist_entries(track_id);
+             PRAGMA user_version = 2;
+             COMMIT;",
+        )?;
+    } else if version == 1 {
+        // ADR-0028: named playlists extend the local catalogue; the session queue stays in memory.
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE local_playlists(
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                    CHECK(length(trim(name)) > 0)
+             );
+             CREATE TABLE local_playlist_entries(
+                playlist_id INTEGER NOT NULL
+                    REFERENCES local_playlists(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK(position >= 0),
+                track_id INTEGER NOT NULL
+                    REFERENCES library_tracks(id) ON DELETE CASCADE,
+                PRIMARY KEY(playlist_id, position)
+             );
+             CREATE INDEX local_playlist_entries_track
+                ON local_playlist_entries(track_id);
+             PRAGMA user_version = 2;
              COMMIT;",
         )?;
     } else if version != SCHEMA_VERSION {
@@ -442,7 +724,208 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{LibraryCatalogue, LibraryTrack};
+    use super::{LibraryCatalogue, LibraryError, LibraryTrack};
+
+    #[test]
+    fn schema_one_catalogue_migrates_without_losing_tracks() {
+        let directory = tempdir().expect("temporary catalogue directory is created");
+        let database_path = directory.path().join("library.sqlite3");
+        let connection =
+            rusqlite::Connection::open(&database_path).expect("schema-one fixture database opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE library_roots(
+                    id INTEGER PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    scan_generation INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE library_tracks(
+                    id INTEGER PRIMARY KEY,
+                    root_id INTEGER NOT NULL REFERENCES library_roots(id) ON DELETE CASCADE,
+                    path TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    artist TEXT,
+                    album TEXT,
+                    duration_seconds REAL,
+                    sample_rate INTEGER NOT NULL,
+                    channels INTEGER NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    modified_nanos INTEGER NOT NULL,
+                    seen_generation INTEGER NOT NULL
+                 );
+                 CREATE INDEX library_tracks_search
+                    ON library_tracks(title, artist, album, path);
+                 INSERT INTO library_roots(id, path, scan_generation)
+                    VALUES (1, '/Music', 1);
+                 INSERT INTO library_tracks(
+                    id, root_id, path, title, artist, album, duration_seconds, sample_rate,
+                    channels, file_size, modified_nanos, seen_generation
+                 ) VALUES (
+                    7, 1, '/Music/Signal Bloom.wav', 'Signal Bloom', 'Aurora Unit',
+                    'Night Transit', 60.0, 44100, 2, 1024, 99, 1
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .expect("literal schema-one fixture is created");
+        drop(connection);
+
+        let catalogue = LibraryCatalogue::open(&database_path).expect("catalogue migrates");
+        let tracks = catalogue.search("").expect("migrated tracks load");
+        let version: i32 = catalogue
+            .connect()
+            .expect("migrated database connects")
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version loads");
+
+        assert_eq!(version, 2);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title(), "Signal Bloom");
+    }
+
+    #[test]
+    fn named_playlist_preserves_order_and_duplicates_across_reopen() {
+        let directory = tempdir().expect("temporary catalogue directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("First Light.wav"), 8_000, 8_000);
+        write_stereo_wav(&music.join("Second Sun.wav"), 8_000, 8_000);
+        let database_path = directory.path().join("library.sqlite3");
+        let catalogue = LibraryCatalogue::open(&database_path).expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music root scans");
+        let tracks = catalogue.search("").expect("tracks load");
+        let playlist = catalogue
+            .create_playlist("Night Run")
+            .expect("playlist is created");
+        catalogue
+            .append_to_playlist(playlist.id(), tracks[0].id())
+            .expect("first track is appended");
+        catalogue
+            .append_to_playlist(playlist.id(), tracks[1].id())
+            .expect("second track is appended");
+        catalogue
+            .append_to_playlist(playlist.id(), tracks[0].id())
+            .expect("duplicate track is appended");
+        drop(catalogue);
+
+        let reopened = LibraryCatalogue::open(&database_path).expect("catalogue reopens");
+        let playlists = reopened.playlists().expect("playlists load");
+        let entries = reopened
+            .playlist_tracks(playlists[0].id())
+            .expect("playlist entries load");
+
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name(), "Night Run");
+        assert_eq!(
+            entries.iter().map(LibraryTrack::title).collect::<Vec<_>>(),
+            ["First Light", "Second Sun", "First Light"]
+        );
+    }
+
+    #[test]
+    fn playlist_names_are_trimmed_nonempty_and_case_insensitively_unique() {
+        let directory = tempdir().expect("temporary catalogue directory is created");
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+
+        let playlist = catalogue
+            .create_playlist("  Night Run  ")
+            .expect("trimmed playlist is created");
+        let empty_error = catalogue
+            .create_playlist("   ")
+            .expect_err("empty playlist name is rejected");
+        let duplicate_error = catalogue
+            .create_playlist("night run")
+            .expect_err("case-insensitive duplicate name is rejected");
+
+        assert_eq!(playlist.name(), "Night Run");
+        assert!(matches!(empty_error, LibraryError::InvalidPlaylistName));
+        assert!(matches!(
+            duplicate_error,
+            LibraryError::PlaylistNameTaken(name) if name == "night run"
+        ));
+    }
+
+    #[test]
+    fn playlist_can_be_renamed_and_deleted() {
+        let directory = tempdir().expect("temporary catalogue directory is created");
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        let playlist = catalogue
+            .create_playlist("Night Run")
+            .expect("playlist is created");
+
+        catalogue
+            .rename_playlist(playlist.id(), "Morning Signal")
+            .expect("playlist is renamed");
+        let renamed = catalogue.playlists().expect("renamed playlist loads");
+        catalogue
+            .delete_playlist(playlist.id())
+            .expect("playlist is deleted");
+
+        assert_eq!(renamed[0].name(), "Morning Signal");
+        assert!(catalogue.playlists().expect("playlists load").is_empty());
+    }
+
+    #[test]
+    fn playlist_entries_can_be_removed_replaced_and_cascade_with_library_tracks() {
+        let directory = tempdir().expect("temporary catalogue directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        let first_path = music.join("First Light.wav");
+        let second_path = music.join("Second Sun.wav");
+        let third_path = music.join("Third Orbit.wav");
+        write_stereo_wav(&first_path, 8_000, 8_000);
+        write_stereo_wav(&second_path, 8_000, 8_000);
+        write_stereo_wav(&third_path, 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music root scans");
+        let tracks = catalogue.search("").expect("tracks load");
+        let playlist = catalogue
+            .create_playlist("Signal Path")
+            .expect("playlist is created");
+        for track in &tracks {
+            catalogue
+                .append_to_playlist(playlist.id(), track.id())
+                .expect("track is appended");
+        }
+
+        assert!(
+            catalogue
+                .remove_playlist_position(playlist.id(), 1)
+                .expect("middle entry is removed")
+        );
+        let after_remove = catalogue
+            .playlist_tracks(playlist.id())
+            .expect("playlist entries load");
+        assert_eq!(
+            after_remove
+                .iter()
+                .map(LibraryTrack::title)
+                .collect::<Vec<_>>(),
+            ["First Light", "Third Orbit"]
+        );
+
+        catalogue
+            .replace_playlist_tracks(
+                playlist.id(),
+                &[tracks[2].id(), tracks[0].id(), tracks[2].id()],
+            )
+            .expect("playlist order is replaced");
+        fs::remove_file(&third_path).expect("third track fixture is removed");
+        catalogue.scan_root(&music).expect("music root rescans");
+        let after_cascade = catalogue
+            .playlist_tracks(playlist.id())
+            .expect("playlist entries load after cascade");
+
+        assert_eq!(
+            after_cascade
+                .iter()
+                .map(LibraryTrack::title)
+                .collect::<Vec<_>>(),
+            ["First Light"]
+        );
+    }
 
     #[test]
     fn scanned_track_survives_catalogue_reopen() {

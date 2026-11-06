@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
-use crate::library::{LibraryCatalogue, LibraryTrack, ScanSummary};
+use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
 use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
+use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
 use crate::skin::Amp808Skin;
 
 gpui_kit::actions!(
@@ -155,6 +156,13 @@ pub struct PlayerView {
     library_search_subscription: Option<Subscription>,
     library_query_generation: u64,
     library_scan_summary: Option<ScanSummary>,
+    playlists: Vec<LocalPlaylist>,
+    selected_playlist: Option<LocalPlaylistId>,
+    selected_playlist_tracks: Vec<LibraryTrack>,
+    playlist_name: Option<Entity<InputState>>,
+    playlist_error: Option<String>,
+    queue: PlaybackQueue,
+    queue_advance: QueueAdvance,
 }
 
 impl PlayerView {
@@ -178,6 +186,13 @@ impl PlayerView {
             library_search_subscription: None,
             library_query_generation: 0,
             library_scan_summary: None,
+            playlists: Vec::new(),
+            selected_playlist: None,
+            selected_playlist_tracks: Vec::new(),
+            playlist_name: None,
+            playlist_error: None,
+            queue: PlaybackQueue::new(),
+            queue_advance: QueueAdvance::new(),
         }
     }
 
@@ -228,6 +243,7 @@ impl PlayerView {
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(session) => {
+                        view.queue.clear();
                         view.install_session(session);
                         view.error = None;
                         view.seeking = false;
@@ -245,18 +261,22 @@ impl PlayerView {
     }
 
     fn ensure_library_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.library_search.is_some() {
-            return;
+        if self.library_search.is_none() {
+            let search = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Search title, artist, or album")
+            });
+            let subscription = cx.subscribe(&search, |this, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.refresh_library(cx);
+                }
+            });
+            self.library_search = Some(search);
+            self.library_search_subscription = Some(subscription);
         }
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search title, artist, or album"));
-        let subscription = cx.subscribe(&search, |this, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.refresh_library(cx);
-            }
-        });
-        self.library_search = Some(search);
-        self.library_search_subscription = Some(subscription);
+        if self.playlist_name.is_none() {
+            self.playlist_name =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Playlist name")));
+        }
     }
 
     fn toggle_library(&mut self, cx: &mut Context<Self>) {
@@ -275,7 +295,8 @@ impl PlayerView {
         let load = cx.background_executor().spawn(async move {
             let catalogue = LibraryCatalogue::open_default()?;
             let tracks = catalogue.search("")?;
-            Ok::<_, crate::library::LibraryError>((catalogue, tracks))
+            let playlists = catalogue.playlists()?;
+            Ok::<_, crate::library::LibraryError>((catalogue, tracks, playlists))
         });
         cx.spawn(async move |this, cx| {
             let result = load.await;
@@ -284,9 +305,10 @@ impl PlayerView {
                     return;
                 }
                 match result {
-                    Ok((catalogue, tracks)) => {
+                    Ok((catalogue, tracks, playlists)) => {
                         view.library_catalogue = Some(catalogue);
                         view.library_status = LibraryStatus::Ready(tracks);
+                        view.playlists = playlists;
                     }
                     Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
                 }
@@ -379,7 +401,8 @@ impl PlayerView {
                 let catalogue = LibraryCatalogue::open_default()?;
                 let summary = catalogue.scan_root(path)?;
                 let tracks = catalogue.search(&query)?;
-                Ok::<_, crate::library::LibraryError>((catalogue, summary, tracks))
+                let playlists = catalogue.playlists()?;
+                Ok::<_, crate::library::LibraryError>((catalogue, summary, tracks, playlists))
             });
             let result = scan.await;
             let _ = this.update(cx, |view, cx| {
@@ -387,10 +410,11 @@ impl PlayerView {
                     return;
                 }
                 match result {
-                    Ok((catalogue, summary, tracks)) => {
+                    Ok((catalogue, summary, tracks, playlists)) => {
                         view.library_catalogue = Some(catalogue);
                         view.library_scan_summary = Some(summary);
                         view.library_status = LibraryStatus::Ready(tracks);
+                        view.playlists = playlists;
                     }
                     Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
                 }
@@ -400,7 +424,218 @@ impl PlayerView {
         .detach();
     }
 
-    fn open_library_track(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+    fn create_playlist(&mut self, cx: &mut Context<Self>) {
+        let Some(catalogue) = self.library_catalogue.clone() else {
+            self.playlist_error = Some("Load the local library before creating a playlist".into());
+            cx.notify();
+            return;
+        };
+        let name = self
+            .playlist_name
+            .as_ref()
+            .map_or_else(String::new, |input| input.read(cx).value().to_string());
+        let work = cx.background_executor().spawn(async move {
+            let playlist = catalogue.create_playlist(&name)?;
+            let playlists = catalogue.playlists()?;
+            Ok::<_, crate::library::LibraryError>((playlist, playlists))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok((playlist, playlists)) => {
+                        view.selected_playlist = Some(playlist.id());
+                        view.selected_playlist_tracks.clear();
+                        view.playlists = playlists;
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn rename_selected_playlist(&mut self, cx: &mut Context<Self>) {
+        let (Some(catalogue), Some(playlist_id)) =
+            (self.library_catalogue.clone(), self.selected_playlist)
+        else {
+            return;
+        };
+        let name = self
+            .playlist_name
+            .as_ref()
+            .map_or_else(String::new, |input| input.read(cx).value().to_string());
+        let work = cx.background_executor().spawn(async move {
+            catalogue.rename_playlist(playlist_id, &name)?;
+            catalogue.playlists()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(playlists) => {
+                        view.playlists = playlists;
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_selected_playlist(&mut self, cx: &mut Context<Self>) {
+        let (Some(catalogue), Some(playlist_id)) =
+            (self.library_catalogue.clone(), self.selected_playlist)
+        else {
+            return;
+        };
+        let work = cx.background_executor().spawn(async move {
+            catalogue.delete_playlist(playlist_id)?;
+            catalogue.playlists()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(playlists) => {
+                        view.playlists = playlists;
+                        view.selected_playlist = None;
+                        view.selected_playlist_tracks.clear();
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn select_playlist(&mut self, playlist_id: LocalPlaylistId, cx: &mut Context<Self>) {
+        let Some(catalogue) = self.library_catalogue.clone() else {
+            return;
+        };
+        let work = cx
+            .background_executor()
+            .spawn(async move { catalogue.playlist_tracks(playlist_id) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(tracks) => {
+                        view.selected_playlist = Some(playlist_id);
+                        view.selected_playlist_tracks = tracks;
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_track_to_selected_playlist(&mut self, track: LibraryTrack, cx: &mut Context<Self>) {
+        let (Some(catalogue), Some(playlist_id)) =
+            (self.library_catalogue.clone(), self.selected_playlist)
+        else {
+            return;
+        };
+        let work = cx.background_executor().spawn(async move {
+            catalogue.append_to_playlist(playlist_id, track.id())?;
+            let tracks = catalogue.playlist_tracks(playlist_id)?;
+            let playlists = catalogue.playlists()?;
+            Ok::<_, crate::library::LibraryError>((tracks, playlists))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok((tracks, playlists)) => {
+                        view.selected_playlist_tracks = tracks;
+                        view.playlists = playlists;
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_selected_playlist_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        let (Some(catalogue), Some(playlist_id)) =
+            (self.library_catalogue.clone(), self.selected_playlist)
+        else {
+            return;
+        };
+        let work = cx.background_executor().spawn(async move {
+            let _ = catalogue.remove_playlist_position(playlist_id, position)?;
+            let tracks = catalogue.playlist_tracks(playlist_id)?;
+            let playlists = catalogue.playlists()?;
+            Ok::<_, crate::library::LibraryError>((tracks, playlists))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok((tracks, playlists)) => {
+                        view.selected_playlist_tracks = tracks;
+                        view.playlists = playlists;
+                        view.playlist_error = None;
+                    }
+                    Err(error) => view.playlist_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn play_selected_playlist_position(&mut self, position: usize, cx: &mut Context<Self>) {
+        let Some(track) = self.selected_playlist_tracks.get(position).cloned() else {
+            return;
+        };
+        let following = self.selected_playlist_tracks[position + 1..].to_vec();
+        self.queue.clear();
+        for track in &following {
+            self.queue.add(QueuedTrack::from(track));
+        }
+        self.open_queued_track(QueuedTrack::from(&track), cx);
+    }
+
+    fn play_library_track(&mut self, track: QueuedTrack, cx: &mut Context<Self>) {
+        self.queue.clear();
+        self.open_queued_track(track, cx);
+    }
+
+    fn play_track_next(&mut self, track: QueuedTrack, cx: &mut Context<Self>) {
+        self.queue.play_next(track);
+        cx.notify();
+    }
+
+    fn add_track_to_queue(&mut self, track: QueuedTrack, cx: &mut Context<Self>) {
+        self.queue.add(track);
+        cx.notify();
+    }
+
+    fn remove_queued_track(&mut self, position: usize, cx: &mut Context<Self>) {
+        let _ = self.queue.remove(position);
+        cx.notify();
+    }
+
+    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.queue.clear();
+        cx.notify();
+    }
+
+    fn open_queued_track(&mut self, track: QueuedTrack, cx: &mut Context<Self>) {
+        let path = track.path().to_path_buf();
         let open = cx
             .background_executor()
             .spawn(async move { PlaybackSession::open(path) });
@@ -420,6 +655,20 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    fn advance_queue_if_ended(&mut self, cx: &mut Context<Self>) {
+        let transport = self
+            .session
+            .as_ref()
+            .map_or(TransportState::Empty, |session| {
+                session.transport_state().clone()
+            });
+        if self.queue_advance.observe(&transport)
+            && let Some(track) = self.queue.take_next()
+        {
+            self.open_queued_track(track, cx);
+        }
     }
 
     fn toggle_playback(&mut self, cx: &mut Context<Self>) {
@@ -659,6 +908,7 @@ impl Render for PlayerView {
         {
             self.error = Some(error.to_string());
         }
+        self.advance_queue_if_ended(cx);
         let snapshot = self
             .session
             .as_ref()
@@ -895,6 +1145,27 @@ impl Render for PlayerView {
                 Vec::new()
             }
         };
+        let queue_entries = self.queue.entries().to_vec();
+        let queue_is_empty = self.queue.is_empty();
+        let queue_status = match self.queue.len() {
+            0 => "Up next: empty".to_owned(),
+            1 => "Up next: 1 track".to_owned(),
+            count => format!("Up next: {count} tracks"),
+        };
+        let playlists = self.playlists.clone();
+        let selected_playlist = self.selected_playlist;
+        let selected_playlist_tracks = self.selected_playlist_tracks.clone();
+        let selected_playlist_name = selected_playlist.and_then(|selected| {
+            playlists
+                .iter()
+                .find(|playlist| playlist.id() == selected)
+                .map(|playlist| playlist.name().to_owned())
+        });
+        let playlist_status = selected_playlist_name.as_ref().map_or_else(
+            || format!("Local playlists: {}. None selected", playlists.len()),
+            |name| format!("Local playlists: {}. Selected: {name}", playlists.len()),
+        );
+        let library_selected_playlist_name = selected_playlist_name.clone();
         let library_status = match &self.library_status {
             LibraryStatus::Unloaded => "Local library has not been loaded".to_owned(),
             LibraryStatus::Loading => "Loading local library".to_owned(),
@@ -917,6 +1188,191 @@ impl Render for PlayerView {
             .as_ref()
             .expect("library search is initialized before rendering")
             .clone();
+        let playlist_name = self
+            .playlist_name
+            .as_ref()
+            .expect("playlist name input is initialized before rendering")
+            .clone();
+        let playlist_panel =
+            div()
+                .id("playlist-panel")
+                .test_support()
+                .role(Role::Group)
+                .aria_label("Local playlists")
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(panel_raised)
+                .bg(panel_raised)
+                .p_3()
+                .child(Input::new(&playlist_name).id("playlist-name").w_full())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("playlist-create")
+                                .key_context("Amp808Control")
+                                .label("CREATE")
+                                .accessibility_label("Create local playlist")
+                                .on_click(cx.listener(|this, _, _, cx| this.create_playlist(cx))),
+                        )
+                        .child(
+                            Button::new("playlist-rename")
+                                .key_context("Amp808Control")
+                                .label("RENAME")
+                                .accessibility_label("Rename selected local playlist")
+                                .disabled(selected_playlist.is_none())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.rename_selected_playlist(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("playlist-delete")
+                                .key_context("Amp808Control")
+                                .label("DELETE")
+                                .accessibility_label("Delete selected local playlist")
+                                .disabled(selected_playlist.is_none())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.delete_selected_playlist(cx)),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("playlist-status")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(playlist_status.clone())
+                        .text_xs()
+                        .text_color(text_muted)
+                        .child(playlist_status),
+                )
+                .when_some(self.playlist_error.clone(), |panel, error| {
+                    panel.child(
+                        div()
+                            .id("playlist-error")
+                            .test_support()
+                            .role(Role::Alert)
+                            .aria_label(format!("Playlist error: {error}"))
+                            .text_xs()
+                            .text_color(accent)
+                            .child(error),
+                    )
+                })
+                .children(playlists.into_iter().enumerate().map(|(index, playlist)| {
+                    let playlist_id = playlist.id();
+                    let name = playlist.name().to_owned();
+                    let count = playlist.track_count();
+                    Button::new(("playlist-select", index))
+                        .key_context("Amp808Control")
+                        .label(format!("{}  ({count})", playlist.name()))
+                        .accessibility_label(format!("Select playlist {name}, {count} tracks"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_playlist(playlist_id, cx);
+                        }))
+                }))
+                .children(selected_playlist_tracks.into_iter().enumerate().map(
+                    |(position, track)| {
+                        let playlist_name = selected_playlist_name
+                            .clone()
+                            .unwrap_or_else(|| "selected playlist".to_owned());
+                        let remove_name = playlist_name.clone();
+                        let title = track.title().to_owned();
+                        let remove_title = title.clone();
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new(("playlist-track", position))
+                                    .key_context("Amp808Control")
+                                    .label(track.title().to_owned())
+                                    .accessibility_label(format!(
+                                        "Play {title} from {playlist_name} position {}",
+                                        position + 1
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.play_selected_playlist_position(position, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("playlist-remove", position))
+                                    .key_context("Amp808Control")
+                                    .label("REMOVE")
+                                    .accessibility_label(format!(
+                                        "Remove {remove_title} from {remove_name} position {}",
+                                        position + 1
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_selected_playlist_position(position, cx);
+                                    })),
+                            )
+                    },
+                ));
+        let queue_panel = div()
+            .id("queue-panel")
+            .test_support()
+            .role(Role::Group)
+            .aria_label("Up next queue")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(panel_raised)
+            .bg(panel_raised)
+            .p_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("queue-status")
+                            .test_support()
+                            .role(Role::Status)
+                            .aria_label(queue_status.clone())
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child(queue_status),
+                    )
+                    .child(
+                        Button::new("clear-queue")
+                            .key_context("Amp808Control")
+                            .label("CLEAR")
+                            .accessibility_label("Clear up next queue")
+                            .disabled(queue_is_empty)
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                    ),
+            )
+            .children(
+                queue_entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, track)| {
+                        let title = track.title().to_owned();
+                        let artist = track.artist().unwrap_or("Unknown artist");
+                        let album = track.album().unwrap_or("Unknown album");
+                        Button::new(("queue-track", position))
+                            .key_context("Amp808Control")
+                            .label(format!(
+                                "{}  —  {artist}  /  {album}  —  REMOVE",
+                                track.title()
+                            ))
+                            .accessibility_label(format!(
+                                "Remove {title} from queue position {}",
+                                position + 1
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_queued_track(position, cx);
+                            }))
+                    }),
+            );
         let library_panel = div()
             .id("library-panel")
             .test_support()
@@ -974,6 +1430,8 @@ impl Render for PlayerView {
             .when_some(scan_detail, |panel, detail| {
                 panel.child(div().text_xs().text_color(text_muted).child(detail))
             })
+            .child(playlist_panel)
+            .child(queue_panel)
             .child(
                 div()
                     .id("library-track-list")
@@ -991,11 +1449,11 @@ impl Render for PlayerView {
                             .into_iter()
                             .enumerate()
                             .map(|(index, track)| {
-                                let path = track.path().to_path_buf();
                                 let artist = track.artist().unwrap_or("Unknown artist");
                                 let album = track.album().unwrap_or("Unknown album");
                                 let label =
                                     format!("{}  —  {}  /  {}", track.title(), artist, album);
+                                let title = track.title().to_owned();
                                 let technical = format!(
                                     "{} hertz, {} channels, duration {}",
                                     track.sample_rate(),
@@ -1004,13 +1462,63 @@ impl Render for PlayerView {
                                         .duration_seconds()
                                         .map_or_else(|| "unknown".to_owned(), format_time)
                                 );
-                                Button::new(("library-track", index))
-                                    .key_context("Amp808Control")
-                                    .label(label.clone())
-                                    .accessibility_label(format!("Play {label}. {technical}"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_library_track(path.clone(), cx);
-                                    }))
+                                let queued_track = QueuedTrack::from(&track);
+                                let play_now = queued_track.clone();
+                                let play_next = queued_track.clone();
+                                let next_title = title.clone();
+                                let playlist_track = track.clone();
+                                let playlist_name = library_selected_playlist_name
+                                    .clone()
+                                    .unwrap_or_else(|| "selected playlist".to_owned());
+                                let can_add_to_playlist = selected_playlist.is_some();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new(("library-track", index))
+                                            .key_context("Amp808Control")
+                                            .label(label.clone())
+                                            .accessibility_label(format!(
+                                                "Play {label}. {technical}"
+                                            ))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.play_library_track(play_now.clone(), cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("library-play-next", index))
+                                            .key_context("Amp808Control")
+                                            .label("NEXT")
+                                            .accessibility_label(format!("Play {next_title} next"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.play_track_next(play_next.clone(), cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("library-add-queue", index))
+                                            .key_context("Amp808Control")
+                                            .label("QUEUE")
+                                            .accessibility_label(format!("Add {title} to queue"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.add_track_to_queue(queued_track.clone(), cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("library-add-playlist", index))
+                                            .key_context("Amp808Control")
+                                            .label("ADD")
+                                            .accessibility_label(format!(
+                                                "Add {title} to playlist {playlist_name}"
+                                            ))
+                                            .disabled(!can_add_to_playlist)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.add_track_to_selected_playlist(
+                                                    playlist_track.clone(),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
                             }),
                     ),
             );
@@ -1398,7 +1906,7 @@ mod tests {
     use crate::playback::DecodeWorkerState;
 
     use super::{
-        LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView,
+        LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, QueuedTrack,
         TrackDisplay, milkdrop_status_label, playback_toggle, signal_status,
     };
 
@@ -1691,6 +2199,280 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn library_track_exposes_explicit_up_next_actions(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Signal Bloom.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks);
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("queue-status").role(), Some(Role::Status));
+            assert_eq!(window.find("queue-status").label(), Some("Up next: empty"));
+            assert_eq!(
+                window.find(("library-play-next", 0_usize)).label(),
+                Some("Play Signal Bloom next")
+            );
+            assert_eq!(
+                window.find(("library-add-queue", 0_usize)).label(),
+                Some("Add Signal Bloom to queue")
+            );
+            window.click(("library-add-queue", 0_usize), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("queue-status").label(),
+                Some("Up next: 1 track")
+            );
+            assert_eq!(
+                window.find(("queue-track", 0_usize)).label(),
+                Some("Remove Signal Bloom from queue position 1")
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn failed_queued_track_exposes_an_error_without_discarding_the_tail(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary queue directory is created");
+        let failed_path = directory.path().join("Missing Signal.wav");
+        let failed = QueuedTrack::new(failed_path.clone(), "Missing Signal".to_owned(), None, None);
+        let later = QueuedTrack::new(
+            directory.path().join("Later Orbit.wav"),
+            "Later Orbit".to_owned(),
+            None,
+            None,
+        );
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.queue.add(later);
+                view.open_queued_track(failed, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.queue.entries().len(), 1);
+            assert_eq!(view.queue.entries()[0].title(), "Later Orbit");
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("playback-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert!(
+                alert
+                    .label()
+                    .is_some_and(|label| label.contains(failed_path.to_string_lossy().as_ref())),
+                "failed queued path is exposed without consuming later entries"
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn starting_a_playlist_replaces_up_next_with_its_following_entries(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        for title in ["First Light", "Second Sun", "Third Orbit"] {
+            write_stereo_wav(&music.join(format!("{title}.wav")), 8_000, 8_000);
+        }
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+        for track in &tracks {
+            fs::remove_file(track.path()).expect("indexed fixture is removed before playback");
+        }
+
+        cx.update(gpui_kit::init);
+        let (_window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.queue.add(QueuedTrack::new(
+                    directory.path().join("Old Intent.wav"),
+                    "Old Intent".to_owned(),
+                    None,
+                    None,
+                ));
+                view.selected_playlist_tracks = tracks;
+                view.play_selected_playlist_position(1, cx);
+                assert_eq!(view.queue.entries().len(), 1);
+                assert_eq!(view.queue.entries()[0].title(), "Third Orbit");
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn selected_playlist_accepts_a_library_track_and_exposes_ordered_playback(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Signal Bloom.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+        let playlist = catalogue
+            .create_playlist("Night Run")
+            .expect("playlist is created");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_catalogue = Some(catalogue);
+                view.library_status = LibraryStatus::Ready(tracks);
+                view.playlists = vec![playlist.clone()];
+                view.selected_playlist = Some(playlist.id());
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("playlist-status").label(),
+                Some("Local playlists: 1. Selected: Night Run")
+            );
+            assert_eq!(
+                window.find(("library-add-playlist", 0_usize)).label(),
+                Some("Add Signal Bloom to playlist Night Run")
+            );
+            window.click(("library-add-playlist", 0_usize), cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("playlist-track", 0_usize)).label(),
+                Some("Play Signal Bloom from Night Run position 1")
+            );
+            assert_eq!(
+                window.find(("playlist-remove", 0_usize)).label(),
+                Some("Remove Signal Bloom from Night Run position 1")
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn named_playlists_can_be_created_renamed_and_deleted_from_the_library(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_catalogue = Some(catalogue);
+                view.library_status = LibraryStatus::Ready(Vec::new());
+                cx.notify();
+            });
+        });
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("test window remains available");
+        let playlist_name = cx.update(|cx| {
+            view.read(cx)
+                .playlist_name
+                .clone()
+                .expect("playlist name input is initialized")
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            playlist_name.update(cx, |input, cx| input.set_value("Night Run", window, cx));
+            window.click("playlist-create", cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("playlist-status").label(),
+                Some("Local playlists: 1. Selected: Night Run")
+            );
+            assert_eq!(
+                window.find(("playlist-select", 0_usize)).label(),
+                Some("Select playlist Night Run, 0 tracks")
+            );
+            playlist_name.update(cx, |input, cx| input.set_value("Deep Orbit", window, cx));
+            window.click("playlist-rename", cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("playlist-status").label(),
+                Some("Local playlists: 1. Selected: Deep Orbit")
+            );
+            window.click("playlist-delete", cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("playlist-status").label(),
+                Some("Local playlists: 0. None selected")
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
     fn focused_library_track_accepts_keyboard_activation(cx: &mut TestAppContext) {
         let directory = tempdir().expect("temporary library directory is created");
         let music = directory.path().join("Music");
@@ -1728,11 +2510,24 @@ mod tests {
             assert_eq!(window.find("player-root").focused(), Some(true));
         })
         .expect("test window remains available");
-        for _ in 0..5 {
+        let mut track_reached = false;
+        for _ in 0..32 {
             cx.update_window(window, |_, window, cx| window.press("tab", cx))
                 .expect("test window remains available");
             cx.run_until_parked();
+            track_reached = cx
+                .update_window(window, |_, window, _| {
+                    window.find(("library-track", 0_usize)).focused() == Some(true)
+                })
+                .expect("test window remains available");
+            if track_reached {
+                break;
+            }
         }
+        assert!(
+            track_reached,
+            "library track is reachable with Tab navigation"
+        );
 
         cx.update_window(window, |_, window, cx| {
             let track = window.find(("library-track", 0_usize));
