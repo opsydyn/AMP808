@@ -8,8 +8,36 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDe
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTag};
+use symphonia::core::meta::{
+    MetadataOptions, MetadataRevision, StandardTag, StandardVisualKey, Visual,
+};
 use symphonia::core::units::Time;
+
+pub const MAX_COVER_ART_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoverArt {
+    data: Vec<u8>,
+    media_type: String,
+}
+
+impl CoverArt {
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(data: Vec<u8>, media_type: &str) -> Self {
+        Self {
+            data,
+            media_type: media_type.to_owned(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackMetadata {
@@ -19,6 +47,7 @@ pub struct TrackMetadata {
     sample_rate: u32,
     channels: usize,
     duration_seconds: Option<f64>,
+    cover_art: Option<CoverArt>,
 }
 
 impl TrackMetadata {
@@ -44,6 +73,10 @@ impl TrackMetadata {
 
     pub const fn duration_seconds(&self) -> Option<f64> {
         self.duration_seconds
+    }
+
+    pub const fn cover_art(&self) -> Option<&CoverArt> {
+        self.cover_art.as_ref()
     }
 }
 
@@ -272,11 +305,13 @@ fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
         )
     };
 
-    let (tag_title, artist, album) = format
-        .metadata()
-        .current()
-        .map(extract_text_metadata)
-        .unwrap_or_default();
+    let (tag_title, artist, album, cover_art) = match format.metadata().current() {
+        Some(revision) => {
+            let (title, artist, album) = extract_text_metadata(revision);
+            (title, artist, album, extract_cover_art(revision))
+        }
+        None => (None, None, None, None),
+    };
     let title = tag_title.unwrap_or_else(|| {
         path.file_stem()
             .and_then(|value| value.to_str())
@@ -295,8 +330,33 @@ fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
             sample_rate,
             channels,
             duration_seconds,
+            cover_art,
         },
     })
+}
+
+fn extract_cover_art(revision: &MetadataRevision) -> Option<CoverArt> {
+    extract_cover_art_from_visuals(&revision.media.visuals)
+}
+
+fn extract_cover_art_from_visuals(visuals: &[Visual]) -> Option<CoverArt> {
+    let preferred = visuals
+        .iter()
+        .filter(|visual| visual.usage == Some(StandardVisualKey::FrontCover))
+        .chain(
+            visuals
+                .iter()
+                .filter(|visual| visual.usage != Some(StandardVisualKey::FrontCover)),
+        );
+    preferred
+        .filter(|visual| visual.data.len() <= MAX_COVER_ART_BYTES)
+        .find_map(|visual| {
+            let media_type = visual.media_type.as_deref()?.trim();
+            (!media_type.is_empty()).then(|| CoverArt {
+                data: visual.data.to_vec(),
+                media_type: media_type.to_owned(),
+            })
+        })
 }
 
 fn extract_text_metadata(
@@ -321,9 +381,10 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use symphonia::core::meta::{StandardVisualKey, Visual};
     use tempfile::tempdir;
 
-    use super::StreamingDecoder;
+    use super::{MAX_COVER_ART_BYTES, StreamingDecoder, extract_cover_art_from_visuals};
 
     #[test]
     fn local_wav_reports_technical_metadata_and_filename_title() {
@@ -339,6 +400,87 @@ mod tests {
         assert_eq!(metadata.sample_rate(), 8_000);
         assert_eq!(metadata.channels(), 2);
         assert!((metadata.duration_seconds().unwrap() - 0.128).abs() < 0.001);
+        assert_eq!(metadata.cover_art(), None);
+    }
+
+    #[test]
+    fn embedded_art_prefers_a_bounded_front_cover_and_falls_back_to_the_first_visual() {
+        let back = visual(Some(StandardVisualKey::BackCover), "image/png", b"back");
+        let front = visual(Some(StandardVisualKey::FrontCover), "image/jpeg", b"front");
+
+        let art = extract_cover_art_from_visuals(&[back.clone(), front])
+            .expect("front cover is selected");
+        assert_eq!(art.data(), b"front");
+        assert_eq!(art.media_type(), "image/jpeg");
+
+        let fallback = extract_cover_art_from_visuals(&[back]).expect("first visual is selected");
+        assert_eq!(fallback.data(), b"back");
+        assert_eq!(fallback.media_type(), "image/png");
+    }
+
+    #[test]
+    fn oversized_embedded_art_is_not_retained_in_track_metadata() {
+        let oversized = visual(
+            Some(StandardVisualKey::FrontCover),
+            "image/jpeg",
+            &vec![0; MAX_COVER_ART_BYTES + 1],
+        );
+
+        assert_eq!(extract_cover_art_from_visuals(&[oversized]), None);
+    }
+
+    #[test]
+    fn id3_apic_artwork_is_carried_into_local_track_metadata() {
+        let directory = tempdir().expect("temporary media directory is created");
+        let path = directory.path().join("tagged.wav");
+        write_stereo_wav(&path, 8_000, 1_024);
+        let wav = fs::read(&path).expect("WAV fixture is read");
+        let picture = b"literal-png-fixture";
+        let mut apic_body = Vec::new();
+        apic_body.push(0);
+        apic_body.extend_from_slice(b"image/png\0");
+        apic_body.push(3);
+        apic_body.push(0);
+        apic_body.extend_from_slice(picture);
+        let mut apic_frame = Vec::new();
+        apic_frame.extend_from_slice(b"APIC");
+        apic_frame.extend_from_slice(&(apic_body.len() as u32).to_be_bytes());
+        apic_frame.extend_from_slice(&[0, 0]);
+        apic_frame.extend_from_slice(&apic_body);
+        let mut tagged = Vec::new();
+        tagged.extend_from_slice(b"ID3\x03\x00\x00");
+        tagged.extend_from_slice(&syncsafe(apic_frame.len()));
+        tagged.extend_from_slice(&apic_frame);
+        tagged.extend_from_slice(&wav);
+        fs::write(&path, tagged).expect("tagged WAV fixture is written");
+
+        let (_decoder, metadata) = StreamingDecoder::open(&path).expect("tagged WAV opens");
+        let art = metadata
+            .cover_art()
+            .expect("embedded APIC artwork is retained");
+
+        assert_eq!(art.media_type(), "image/png");
+        assert_eq!(art.data(), picture);
+    }
+
+    fn syncsafe(value: usize) -> [u8; 4] {
+        [
+            ((value >> 21) & 0x7f) as u8,
+            ((value >> 14) & 0x7f) as u8,
+            ((value >> 7) & 0x7f) as u8,
+            (value & 0x7f) as u8,
+        ]
+    }
+
+    fn visual(usage: Option<StandardVisualKey>, media_type: &str, data: &[u8]) -> Visual {
+        Visual {
+            media_type: Some(media_type.to_owned()),
+            dimensions: None,
+            color_mode: None,
+            usage,
+            tags: Vec::new(),
+            data: data.to_vec().into_boxed_slice(),
+        }
     }
 
     #[test]

@@ -2,16 +2,18 @@ use gpui_kit::base::{Disableable, StyledExt, box_shadow};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyBinding,
-    PathPromptOptions, Render, Role, Subscription, TestSupportExt, Window, canvas as gpui_canvas,
-    deferred, div, prelude::*, px, rgb,
+    App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, Image, ImageFormat, IntoElement,
+    KeyBinding, ObjectFit, PathPromptOptions, Render, Role, StyledImage, Subscription,
+    TestSupportExt, Window, canvas as gpui_canvas, deferred, div, img, prelude::*, px, rgb,
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
+use crate::media::CoverArt;
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
@@ -25,6 +27,12 @@ enum HardwareButtonTone {
 
 fn skin_hsla(color: crate::skin::SkinColor) -> Hsla {
     rgb(color.hex()).into()
+}
+
+fn cover_image_from_art(art: Option<&CoverArt>) -> Option<Arc<Image>> {
+    let art = art?;
+    let format = ImageFormat::from_mime_type(art.media_type())?;
+    Some(Arc::new(Image::from_bytes(format, art.data().to_vec())))
 }
 
 pub fn init_skin_theme(cx: &mut App) {
@@ -233,6 +241,7 @@ pub struct PlayerView {
     session: Option<PlaybackSession>,
     cosmic: CosmicBackgroundHost,
     milkdrop: MilkdropViewHost,
+    cover_image: Option<Arc<Image>>,
     milkdrop_preset_notice: Option<String>,
     milkdrop_preset_error: Option<String>,
     error: Option<String>,
@@ -265,6 +274,7 @@ impl PlayerView {
             session: None,
             cosmic: CosmicBackgroundHost::new(),
             milkdrop: MilkdropViewHost::new(),
+            cover_image: None,
             milkdrop_preset_notice: None,
             milkdrop_preset_error: None,
             error: None,
@@ -294,12 +304,14 @@ impl PlayerView {
     }
 
     fn install_session(&mut self, mut session: PlaybackSession) {
+        self.cover_image = cover_image_from_art(session.metadata().cover_art());
         self.milkdrop.replace_pcm(session.take_milkdrop_pcm());
         self.session = Some(session);
     }
 
     fn clear_session(&mut self) {
         self.session = None;
+        self.cover_image = None;
         self.milkdrop.replace_pcm(None);
     }
 
@@ -1293,6 +1305,80 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
+        let now_playing_card = if let Some(image) = self.cover_image.clone() {
+            div()
+                .id("now-playing-summary")
+                .test_support()
+                .role(Role::Group)
+                .aria_label(track_accessibility_label.clone())
+                .relative()
+                .aspect_square()
+                .overflow_hidden()
+                .rounded_md()
+                .border_1()
+                .border_color(panel_raised)
+                .bg(canvas.opacity(0.68))
+                .child(
+                    div()
+                        .id("album-art")
+                        .test_support()
+                        .role(Role::Image)
+                        .aria_label(format!("Album artwork for {title}"))
+                        .absolute()
+                        .inset_0()
+                        .child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .bg(panel.opacity(0.9))
+                        .px_3()
+                        .py_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(text)
+                                .child(title.clone()),
+                        )
+                        .child(div().text_xs().text_color(text_muted).child(artist.clone()))
+                        .child(div().text_xs().text_color(text_muted).child(album.clone())),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .id("now-playing-summary")
+                .test_support()
+                .role(Role::Group)
+                .aria_label(track_accessibility_label.clone())
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .aspect_square()
+                .rounded_md()
+                .border_1()
+                .border_color(panel_raised)
+                .bg(canvas.opacity(0.68))
+                .text_color(text_muted)
+                .child(
+                    div()
+                        .text_lg()
+                        .font_semibold()
+                        .text_color(text)
+                        .child(title.clone()),
+                )
+                .child(div().text_sm().child(artist.clone()))
+                .child(div().text_xs().text_color(text_muted).child(album.clone()))
+                .into_any_element()
+        };
         let library_visible = self.library_visible;
         let library_tracks = match &self.library_status {
             LibraryStatus::Ready(tracks) => tracks.clone(),
@@ -1948,33 +2034,7 @@ impl Render for PlayerView {
                             .p_4()
                             .gap_4()
                             .child(div().text_xs().text_color(text_muted).child("NOW PLAYING"))
-                            .child(
-                                div()
-                                    .id("now-playing-summary")
-                                    .test_support()
-                                    .role(Role::Group)
-                                    .aria_label(track_accessibility_label)
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_2()
-                                    .aspect_square()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(panel_raised)
-                                    .bg(canvas.opacity(0.68))
-                                    .text_color(text_muted)
-                                    .child(
-                                        div()
-                                            .text_lg()
-                                            .font_semibold()
-                                            .text_color(text)
-                                            .child(title),
-                                    )
-                                    .child(div().text_sm().child(artist))
-                                    .child(div().text_xs().text_color(text_muted).child(album)),
-                            )
+                            .child(now_playing_card)
                             .child(
                                 div()
                                     .flex()
@@ -2238,13 +2298,14 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::app::transport::TransportState;
+    use crate::media::CoverArt;
     use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
 
     use super::{
         LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, QueuedTrack,
-        TrackDisplay, VisualizerMode, init_skin_theme, milkdrop_status_label, playback_toggle,
-        should_present_milkdrop, signal_status, skin_hsla,
+        TrackDisplay, VisualizerMode, cover_image_from_art, init_skin_theme, milkdrop_status_label,
+        playback_toggle, should_present_milkdrop, signal_status, skin_hsla,
     };
 
     #[gpui_kit::test]
@@ -2374,6 +2435,44 @@ mod tests {
         assert_eq!(display.title(), "Untitled");
         assert_eq!(display.artist(), "UNKNOWN ARTIST");
         assert_eq!(display.album(), "UNKNOWN ALBUM");
+    }
+
+    #[test]
+    fn embedded_cover_art_maps_supported_mime_types_to_gpui_images() {
+        let jpeg = CoverArt::for_test(vec![1, 2, 3], "image/jpg");
+        let unsupported = CoverArt::for_test(vec![4, 5, 6], "application/octet-stream");
+
+        let image = cover_image_from_art(Some(&jpeg)).expect("jpeg artwork is supported");
+
+        assert_eq!(image.format(), gpui_kit::ImageFormat::Jpeg);
+        assert!(cover_image_from_art(Some(&unsupported)).is_none());
+        assert!(cover_image_from_art(None).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn embedded_cover_art_is_exposed_as_an_accessible_now_playing_image(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                let art = CoverArt::for_test(vec![1, 2, 3], "image/png");
+                view.cover_image = cover_image_from_art(Some(&art));
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let artwork = window.find("album-art");
+            assert_eq!(artwork.role(), Some(Role::Image));
+            assert_eq!(artwork.label(), Some("Album artwork for NO TRACK LOADED"));
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
