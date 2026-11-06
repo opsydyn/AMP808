@@ -2,11 +2,13 @@ use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
 use gpui_kit::{
     App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions, Render, Role,
-    TestSupportExt, Window, div, prelude::*, px, rgb,
+    TestSupportExt, Window, canvas as gpui_canvas, div, prelude::*, px, rgb,
 };
+use std::time::{Duration, Instant};
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
+use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
 
@@ -43,6 +45,7 @@ pub fn init_keyboard_shortcuts(cx: &mut App) {
 enum VisualizerMode {
     Spectrum,
     Waveform,
+    MilkDrop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,9 +127,11 @@ pub struct PlayerView {
     focus: FocusHandle,
     skin: Amp808Skin,
     session: Option<PlaybackSession>,
+    milkdrop: MilkdropViewHost,
     error: Option<String>,
     seeking: bool,
     visualizer_mode: VisualizerMode,
+    performance_probe: PerformanceProbe,
 }
 
 impl PlayerView {
@@ -136,14 +141,26 @@ impl PlayerView {
             focus: cx.focus_handle(),
             skin: Amp808Skin::built_in(),
             session: None,
+            milkdrop: MilkdropViewHost::new(),
             error: None,
             seeking: false,
             visualizer_mode: VisualizerMode::Spectrum,
+            performance_probe: PerformanceProbe::from_env(),
         }
     }
 
     fn color(&self, value: crate::skin::SkinColor) -> gpui_kit::Rgba {
         rgb(value.hex())
+    }
+
+    fn install_session(&mut self, mut session: PlaybackSession) {
+        self.milkdrop.replace_pcm(session.take_milkdrop_pcm());
+        self.session = Some(session);
+    }
+
+    fn clear_session(&mut self) {
+        self.session = None;
+        self.milkdrop.replace_pcm(None);
     }
 
     fn choose_file(&mut self, cx: &mut Context<Self>) {
@@ -179,12 +196,12 @@ impl PlayerView {
             let _ = this.update(cx, |view, cx| {
                 match result {
                     Ok(session) => {
-                        view.session = Some(session);
+                        view.install_session(session);
                         view.error = None;
                         view.seeking = false;
                     }
                     Err(error) => {
-                        view.session = None;
+                        view.clear_session();
                         view.error = Some(error.to_string());
                         view.seeking = false;
                     }
@@ -267,7 +284,7 @@ impl PlayerView {
             let _ = this.update(cx, |view, cx| {
                 view.seeking = false;
                 match result {
-                    Ok(session) => view.session = Some(session),
+                    Ok(session) => view.install_session(session),
                     Err(error) => view.error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -279,7 +296,8 @@ impl PlayerView {
     fn toggle_visualizer(&mut self, cx: &mut Context<Self>) {
         self.visualizer_mode = match self.visualizer_mode {
             VisualizerMode::Spectrum => VisualizerMode::Waveform,
-            VisualizerMode::Waveform => VisualizerMode::Spectrum,
+            VisualizerMode::Waveform => VisualizerMode::MilkDrop,
+            VisualizerMode::MilkDrop => VisualizerMode::Spectrum,
         };
         cx.notify();
     }
@@ -317,6 +335,93 @@ fn signal_status(
     }
 }
 
+fn milkdrop_status_label(status: &MilkdropStatus, is_playing: bool) -> String {
+    match status {
+        MilkdropStatus::Unavailable => "MilkDrop unavailable",
+        MilkdropStatus::Initializing => "MilkDrop initializing",
+        MilkdropStatus::Running if is_playing => "MilkDrop active",
+        MilkdropStatus::Running => "MilkDrop paused",
+        MilkdropStatus::Failed(error) => return format!("MilkDrop error: {error}"),
+    }
+    .into()
+}
+
+const PERFORMANCE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PerformanceSample {
+    elapsed: Duration,
+    rendered_frames: u64,
+    average_fps: f64,
+    underflow_frames: u64,
+}
+
+#[derive(Debug)]
+struct PerformanceProbe {
+    enabled: bool,
+    report_interval: Duration,
+    baseline: Option<(Instant, u64, u64)>,
+    last_report_at: Option<Instant>,
+}
+
+impl PerformanceProbe {
+    fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("AMP808_MILKDROP_METRICS").is_ok_and(|value| value == "1"),
+            report_interval: PERFORMANCE_REPORT_INTERVAL,
+            baseline: None,
+            last_report_at: None,
+        }
+    }
+
+    #[cfg(test)]
+    const fn enabled(report_interval: Duration) -> Self {
+        Self {
+            enabled: true,
+            report_interval,
+            baseline: None,
+            last_report_at: None,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        active: bool,
+        rendered_frames: u64,
+        underflow_frames: u64,
+    ) -> Option<PerformanceSample> {
+        if !self.enabled {
+            return None;
+        }
+        if !active {
+            self.baseline = None;
+            self.last_report_at = None;
+            return None;
+        }
+
+        let (started_at, initial_frames, initial_underflows) =
+            *self.baseline.get_or_insert_with(|| {
+                self.last_report_at = Some(now);
+                (now, rendered_frames, underflow_frames)
+            });
+        let last_report_at = self.last_report_at.unwrap_or(started_at);
+        if now.saturating_duration_since(last_report_at) < self.report_interval {
+            return None;
+        }
+
+        self.last_report_at = Some(now);
+        let elapsed = now.saturating_duration_since(started_at);
+        let completed_frames = rendered_frames.saturating_sub(initial_frames);
+        Some(PerformanceSample {
+            elapsed,
+            rendered_frames: completed_frames,
+            average_fps: completed_frames as f64 / elapsed.as_secs_f64(),
+            underflow_frames: underflow_frames.saturating_sub(initial_underflows),
+        })
+    }
+}
+
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let canvas = self.color(self.skin.canvas());
@@ -350,9 +455,39 @@ impl Render for PlayerView {
                 self.error = Some(error.clone());
             }
         }
+        let has_session = self.session.is_some();
+        let is_playing = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.transport_state() == &TransportState::Playing);
+        let milkdrop_active = self.visualizer_mode == VisualizerMode::MilkDrop
+            && is_playing
+            && matches!(self.milkdrop.status(), MilkdropStatus::Running);
+        let underflow_frames = self
+            .session
+            .as_ref()
+            .map_or(0, PlaybackSession::underflow_frames);
+        if let Some(sample) = self.performance_probe.observe(
+            Instant::now(),
+            milkdrop_active,
+            self.milkdrop.rendered_frames(),
+            underflow_frames,
+        ) {
+            eprintln!(
+                "AMP808_MILKDROP_METRICS elapsed_s={:.3} rendered_frames={} average_fps={:.3} underflow_frames={}",
+                sample.elapsed.as_secs_f64(),
+                sample.rendered_frames,
+                sample.average_fps,
+                sample.underflow_frames
+            );
+        }
+        if self.visualizer_mode != VisualizerMode::MilkDrop {
+            self.milkdrop.hide();
+        }
         let (visualizer_label, visualizer_action_label) = match self.visualizer_mode {
             VisualizerMode::Spectrum => ("SPECTRUM", "Show waveform visualizer"),
-            VisualizerMode::Waveform => ("WAVEFORM", "Show spectrum visualizer"),
+            VisualizerMode::Waveform => ("WAVEFORM", "Show MilkDrop visualizer"),
+            VisualizerMode::MilkDrop => ("MILKDROP", "Show spectrum visualizer"),
         };
         let visualizer = match self.visualizer_mode {
             VisualizerMode::Spectrum => {
@@ -417,12 +552,49 @@ impl Render for PlayerView {
                     }))
                     .into_any_element()
             }
+            VisualizerMode::MilkDrop => {
+                let status = self.milkdrop.status();
+                let status_label = milkdrop_status_label(&status, is_playing);
+                let status_message = match &status {
+                    MilkdropStatus::Unavailable if !has_session => {
+                        Some("LOAD A TRACK FOR MILKDROP")
+                    }
+                    MilkdropStatus::Unavailable => Some("MILKDROP UNAVAILABLE"),
+                    MilkdropStatus::Initializing => None,
+                    MilkdropStatus::Failed(_) => Some("MILKDROP RENDERER ERROR"),
+                    MilkdropStatus::Running => None,
+                };
+                let mut visualizer = div()
+                    .id("milkdrop-status")
+                    .test_support()
+                    .role(Role::Status)
+                    .aria_label(status_label)
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(canvas)
+                    .text_sm()
+                    .text_color(text_muted);
+                if matches!(
+                    status,
+                    MilkdropStatus::Initializing | MilkdropStatus::Running
+                ) {
+                    let host = self.milkdrop.clone();
+                    let surface = gpui_canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| host.present(bounds, window, is_playing),
+                    )
+                    .size_full();
+                    visualizer = visualizer.child(surface);
+                }
+                if let Some(message) = status_message {
+                    visualizer = visualizer.child(message);
+                }
+                visualizer.into_any_element()
+            }
         };
-        let has_session = self.session.is_some();
-        let is_playing = self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.transport_state() == &TransportState::Playing);
         let play_label = if is_playing { "PAUSE" } else { "PLAY" };
         let play_accessibility_label = if is_playing { "Pause" } else { "Play" };
         let position = self.session.as_ref().map_or_else(
@@ -480,6 +652,13 @@ impl Render for PlayerView {
             .as_ref()
             .is_some_and(|session| session.transport_state() == &TransportState::Playing)
         {
+            window.request_animation_frame();
+        } else if self.visualizer_mode == VisualizerMode::MilkDrop
+            && has_session
+            && matches!(self.milkdrop.status(), MilkdropStatus::Initializing)
+        {
+            // The native view attaches during canvas paint. Request one follow-up frame so GPUI's
+            // status text reflects the result without animating indefinitely while paused.
             window.request_animation_frame();
         }
 
@@ -788,6 +967,7 @@ impl Render for PlayerView {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::{Duration, Instant};
 
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
@@ -797,9 +977,52 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::app::transport::TransportState;
+    use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
 
-    use super::{PlaybackToggle, PlayerView, TrackDisplay, playback_toggle, signal_status};
+    use super::{
+        PerformanceProbe, PlaybackToggle, PlayerView, TrackDisplay, milkdrop_status_label,
+        playback_toggle, signal_status,
+    };
+
+    #[test]
+    fn performance_probe_reports_average_fps_and_underflow_delta_from_its_active_baseline() {
+        let mut probe = PerformanceProbe::enabled(Duration::from_secs(5));
+        let started_at = Instant::now();
+
+        assert_eq!(probe.observe(started_at, true, 100, 7), None);
+        let sample = probe
+            .observe(started_at + Duration::from_secs(5), true, 400, 9)
+            .expect("five active seconds produce a performance sample");
+
+        assert_eq!(sample.elapsed, Duration::from_secs(5));
+        assert_eq!(sample.rendered_frames, 300);
+        assert!((sample.average_fps - 60.0).abs() < f64::EPSILON);
+        assert_eq!(sample.underflow_frames, 2);
+    }
+
+    #[test]
+    fn performance_probe_restarts_qualification_after_milkdrop_becomes_inactive() {
+        let mut probe = PerformanceProbe::enabled(Duration::from_secs(5));
+        let started_at = Instant::now();
+
+        assert_eq!(probe.observe(started_at, true, 100, 3), None);
+        assert_eq!(
+            probe.observe(started_at + Duration::from_secs(3), false, 280, 4),
+            None
+        );
+        assert_eq!(
+            probe.observe(started_at + Duration::from_secs(4), true, 300, 5),
+            None
+        );
+        let sample = probe
+            .observe(started_at + Duration::from_secs(9), true, 450, 5)
+            .expect("the restarted active interval produces its own sample");
+
+        assert_eq!(sample.elapsed, Duration::from_secs(5));
+        assert_eq!(sample.rendered_frames, 150);
+        assert_eq!(sample.underflow_frames, 0);
+    }
 
     #[test]
     fn play_from_ended_requests_a_restart() {
@@ -818,6 +1041,26 @@ mod tests {
                 Some(&DecodeWorkerState::Ended)
             ),
             "PCM / ENDED"
+        );
+    }
+
+    #[test]
+    fn milkdrop_status_distinguishes_initializing_active_paused_and_failed() {
+        assert_eq!(
+            milkdrop_status_label(&MilkdropStatus::Initializing, true),
+            "MilkDrop initializing"
+        );
+        assert_eq!(
+            milkdrop_status_label(&MilkdropStatus::Running, true),
+            "MilkDrop active"
+        );
+        assert_eq!(
+            milkdrop_status_label(&MilkdropStatus::Running, false),
+            "MilkDrop paused"
+        );
+        assert_eq!(
+            milkdrop_status_label(&MilkdropStatus::Failed("preset rejected".into()), true),
+            "MilkDrop error: preset rejected"
         );
     }
 
@@ -1038,7 +1281,9 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn visualizer_control_switches_between_spectrum_and_waveform(cx: &mut TestAppContext) {
+    fn visualizer_control_cycles_through_milkdrop_with_honest_unavailable_state(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(gpui_kit::init);
         let (window, _view) = cx.update(|cx| {
             gpui_kit::open_window(
@@ -1065,7 +1310,23 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
+                Some("Show MilkDrop visualizer")
+            );
+            window.click("visualizer-mode", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
                 Some("Show spectrum visualizer")
+            );
+            assert_eq!(
+                window.find("milkdrop-status").label(),
+                Some("MilkDrop unavailable")
+            );
+            window.click("visualizer-mode", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show waveform visualizer")
             );
         })
         .unwrap();
@@ -1115,9 +1376,14 @@ mod tests {
             window.press("enter", cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
-                Some("Show spectrum visualizer")
+                Some("Show MilkDrop visualizer")
             );
             window.press("space", cx);
+            assert_eq!(
+                window.find("visualizer-mode").label(),
+                Some("Show spectrum visualizer")
+            );
+            window.press("enter", cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
                 Some("Show waveform visualizer")
@@ -1165,7 +1431,7 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
-                Some("Show spectrum visualizer")
+                Some("Show MilkDrop visualizer")
             );
         })
         .unwrap();

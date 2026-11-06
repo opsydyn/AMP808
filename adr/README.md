@@ -40,3 +40,5 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0019: Define the web external provider and ffmpeg.wasm boundary](0019-web-external-provider-and-ffmpeg-wasm-boundary.md) (accepted, 2026-06-21)
 - [ADR-0021: Adopt a Moon-orchestrated Cargo monorepo layout](0021-adopt-moon-cargo-monorepo-layout.md) (accepted, 2026-11-04)
 - [ADR-0022: Add the macOS-first AMP808-R3TR0 desktop player with GPUI Kit](0022-add-amp808-r3tr0-macos-desktop-player.md) (accepted, 2026-11-04)
+- [ADR-0023: Adopt projectM for authentic MilkDrop visualisation](0023-adopt-projectm-for-authentic-milkdrop-visualisation.md) (superseded, 2026-11-05)
+- [ADR-0024: Host projectM in a native macOS OpenGL subview](0024-host-projectm-in-a-native-macos-opengl-subview.md) (accepted, 2026-11-05)

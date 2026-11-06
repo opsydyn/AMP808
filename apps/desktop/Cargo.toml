@@ -6,8 +6,19 @@ publish = false
 description = "AMP808-R3TR0 macOS-first desktop music player."
 license = "MIT"
 
+[features]
+milkdrop-projectm = [
+    "dep:cocoa",
+    "dep:libc",
+    "dep:objc",
+    "dep:projectm-sys",
+    "dep:raw-window-handle",
+]
+milkdrop-test-hooks = ["milkdrop-projectm"]
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }
 
 [lints.clippy]
 allow_attributes_without_reason = "warn"
@@ -21,6 +32,13 @@ gpui-kit = "=0.7.3"
 realfft = "3"
 rtrb = "0.3"
 symphonia = { version = "0.6", features = ["all", "opt-simd"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = { version = "0.26", optional = true }
+libc = { version = "0.2", optional = true }
+objc = { version = "0.2", optional = true }
+projectm-sys = { version = "1.2.2", optional = true, default-features = false, features = ["static"] }
+raw-window-handle = { version = "0.6", optional = true }
 
 [dev-dependencies]
 gpui-kit = { version = "=0.7.3", features = ["test-support"] }

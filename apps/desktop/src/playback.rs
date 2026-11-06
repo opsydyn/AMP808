@@ -15,9 +15,11 @@ use crate::audio::{
     PlaybackDiagnostics, VolumeControl,
 };
 use crate::media::{DecodedChunk, MediaError, StreamingDecoder, TrackMetadata};
+use crate::milkdrop::{MilkdropPcm, MilkdropPcmConsumer};
 
 const FRAME_CAPACITY: usize = 16_384;
 const ANALYSIS_CAPACITY: usize = 8_192;
+const MILKDROP_CAPACITY: usize = 8_192;
 const DECODE_CHUNK_SIZE: usize = 2_048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +344,7 @@ pub struct PlaybackSession {
     diagnostics: PlaybackDiagnostics,
     path: PathBuf,
     start_position_seconds: f64,
+    milkdrop_pcm: Option<MilkdropPcmConsumer>,
 }
 
 impl PlaybackSession {
@@ -419,8 +422,13 @@ impl PlaybackSession {
             0,
             analysis_config,
         ));
-        let analysis_worker =
-            AnalysisWorker::spawn(analysis_consumer, latest_analysis.clone(), analysis_config)?;
+        let (milkdrop_producer, milkdrop_pcm) = MilkdropPcm::bounded(MILKDROP_CAPACITY);
+        let analysis_worker = AnalysisWorker::spawn_with_milkdrop(
+            analysis_consumer,
+            latest_analysis.clone(),
+            analysis_config,
+            milkdrop_producer,
+        )?;
         let output = open_output(callback, metadata.sample_rate())?;
         let volume = output.volume_control();
         let (decode_worker, decode_status) =
@@ -443,6 +451,7 @@ impl PlaybackSession {
             diagnostics,
             path,
             start_position_seconds,
+            milkdrop_pcm: Some(milkdrop_pcm),
         })
     }
 
@@ -452,6 +461,10 @@ impl PlaybackSession {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn take_milkdrop_pcm(&mut self) -> Option<MilkdropPcmConsumer> {
+        self.milkdrop_pcm.take()
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -465,6 +478,10 @@ impl PlaybackSession {
     pub fn position_seconds(&self) -> f64 {
         self.start_position_seconds
             + self.diagnostics.rendered_frames() as f64 / f64::from(self.metadata.sample_rate())
+    }
+
+    pub fn underflow_frames(&self) -> u64 {
+        self.diagnostics.underflow_frames()
     }
 
     pub const fn transport_state(&self) -> &TransportState {
@@ -552,6 +569,7 @@ mod tests {
 
         assert_eq!(session.metadata().title(), "session");
         assert_eq!(session.metadata().sample_rate(), 8_000);
+        assert_eq!(session.underflow_frames(), 0);
         session.set_volume(0.35);
         assert!((session.volume() - 0.35).abs() < f32::EPSILON);
 
@@ -570,6 +588,37 @@ mod tests {
         };
 
         assert!(produced_analysis, "session did not publish PCM analysis");
+    }
+
+    #[test]
+    fn playback_session_exposes_bounded_pcm_for_the_milkdrop_view() {
+        let directory = tempdir().expect("temporary media directory is available");
+        let path = directory.path().join("milkdrop-session.wav");
+        write_stereo_wav(&path, 8_000, 8_192);
+        let mut session =
+            PlaybackSession::open_with_output(&path, |callback, _| Ok(TestOutput::open(callback)))
+                .expect("test playback session opens");
+        let mut milkdrop = session
+            .take_milkdrop_pcm()
+            .expect("new playback session owns a MilkDrop PCM consumer");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut samples = [0.0; 2_048];
+
+        let mut received = 0;
+        while received < samples.len() {
+            received += milkdrop.pop_into(&mut samples[received..]);
+            assert!(
+                Instant::now() < deadline,
+                "complete MilkDrop PCM window did not arrive before timeout"
+            );
+            std::thread::yield_now();
+        }
+
+        assert_eq!(received, 2_048, "analysis forwards one complete PCM window");
+        assert!(
+            session.take_milkdrop_pcm().is_none(),
+            "the bounded consumer has a single owner"
+        );
     }
 
     #[test]

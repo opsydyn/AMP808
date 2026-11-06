@@ -8,6 +8,7 @@ use realfft::num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
 
 use crate::audio::AnalysisTapConsumer;
+use crate::milkdrop::MilkdropPcmProducer;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnalysisAvailability {
@@ -293,13 +294,33 @@ pub struct AnalysisPump {
     window: Vec<f32>,
     filled: usize,
     sequence: u64,
+    milkdrop: Option<MilkdropPcmProducer>,
 }
 
 impl AnalysisPump {
+    #[cfg(test)]
     pub fn new(
         consumer: AnalysisTapConsumer,
         latest: LatestAnalysis,
         config: AnalyzerConfig,
+    ) -> Result<Self, AnalysisError> {
+        Self::new_with_milkdrop(consumer, latest, config, None)
+    }
+
+    pub fn with_milkdrop(
+        consumer: AnalysisTapConsumer,
+        latest: LatestAnalysis,
+        config: AnalyzerConfig,
+        milkdrop: MilkdropPcmProducer,
+    ) -> Result<Self, AnalysisError> {
+        Self::new_with_milkdrop(consumer, latest, config, Some(milkdrop))
+    }
+
+    fn new_with_milkdrop(
+        consumer: AnalysisTapConsumer,
+        latest: LatestAnalysis,
+        config: AnalyzerConfig,
+        milkdrop: Option<MilkdropPcmProducer>,
     ) -> Result<Self, AnalysisError> {
         Ok(Self {
             consumer,
@@ -308,6 +329,7 @@ impl AnalysisPump {
             window: vec![0.0; config.fft_size()],
             filled: 0,
             sequence: 0,
+            milkdrop,
         })
     }
 
@@ -319,6 +341,9 @@ impl AnalysisPump {
 
         self.sequence = self.sequence.wrapping_add(1);
         let snapshot = self.analyzer.analyze(&self.window, self.sequence)?;
+        if let Some(milkdrop) = self.milkdrop.as_mut() {
+            let _ = milkdrop.push_samples(&self.window);
+        }
         self.filled = 0;
         Ok(self.latest.publish(snapshot))
     }
@@ -330,12 +355,27 @@ pub struct AnalysisWorker {
 }
 
 impl AnalysisWorker {
+    #[cfg(test)]
     pub fn spawn(
         consumer: AnalysisTapConsumer,
         latest: LatestAnalysis,
         config: AnalyzerConfig,
     ) -> Result<Self, AnalysisError> {
-        let mut pump = AnalysisPump::new(consumer, latest, config)?;
+        Self::spawn_pump(AnalysisPump::new(consumer, latest, config)?)
+    }
+
+    pub fn spawn_with_milkdrop(
+        consumer: AnalysisTapConsumer,
+        latest: LatestAnalysis,
+        config: AnalyzerConfig,
+        milkdrop: MilkdropPcmProducer,
+    ) -> Result<Self, AnalysisError> {
+        Self::spawn_pump(AnalysisPump::with_milkdrop(
+            consumer, latest, config, milkdrop,
+        )?)
+    }
+
+    fn spawn_pump(mut pump: AnalysisPump) -> Result<Self, AnalysisError> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let join = thread::Builder::new()
@@ -393,6 +433,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::audio::AnalysisTap;
+    use crate::milkdrop::MilkdropPcm;
 
     use super::{
         AnalysisAvailability, AnalysisPump, AnalysisSnapshot, AnalysisWorker, Analyzer,
@@ -436,6 +477,25 @@ mod tests {
         assert_eq!(snapshot.availability(), AnalysisAvailability::Available);
         assert_eq!(snapshot.sequence(), 1);
         assert!((snapshot.peak() - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn analysis_pump_forwards_complete_pcm_windows_to_milkdrop_off_the_audio_thread() {
+        let config = AnalyzerConfig::default();
+        let (mut analysis_producer, analysis_consumer, _diagnostics) = AnalysisTap::bounded(2_048);
+        let (milkdrop_producer, mut milkdrop_consumer) = MilkdropPcm::bounded(2_048);
+        let latest = LatestAnalysis::new(config);
+        let mut pump =
+            AnalysisPump::with_milkdrop(analysis_consumer, latest, config, milkdrop_producer)
+                .expect("analysis and MilkDrop test configuration is valid");
+        let expected = vec![0.25; config.fft_size()];
+        analysis_producer.push_samples(&expected);
+
+        assert!(pump.poll_once().expect("analysis window is valid"));
+
+        let mut forwarded = vec![0.0; config.fft_size()];
+        assert_eq!(milkdrop_consumer.pop_into(&mut forwarded), expected.len());
+        assert_eq!(forwarded, expected);
     }
 
     #[test]
