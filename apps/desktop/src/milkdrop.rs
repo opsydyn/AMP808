@@ -1,8 +1,9 @@
 use std::cell::RefCell;
-use std::rc::Rc;
-
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 use std::fmt;
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::Path;
+use std::rc::Rc;
 
 use gpui_kit::{Bounds, Pixels, Window};
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -12,6 +13,115 @@ mod macos;
 
 #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 const AMP808_FIRST_LIGHT: &str = include_str!("../assets/presets/amp808-first-light.milk");
+
+pub const MAX_MILKDROP_PRESET_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MilkdropPreset {
+    name: String,
+    source: String,
+}
+
+impl MilkdropPreset {
+    pub fn read(path: &Path) -> Result<Self, MilkdropPresetError> {
+        let is_milk = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("milk"));
+        if !is_milk {
+            return Err(MilkdropPresetError::WrongExtension);
+        }
+
+        let file = File::open(path).map_err(MilkdropPresetError::Io)?;
+        let mut bytes = Vec::new();
+        file.take((MAX_MILKDROP_PRESET_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(MilkdropPresetError::Io)?;
+        if bytes.len() > MAX_MILKDROP_PRESET_BYTES {
+            return Err(MilkdropPresetError::TooLarge {
+                maximum: MAX_MILKDROP_PRESET_BYTES,
+            });
+        }
+        let source = String::from_utf8(bytes).map_err(|_| MilkdropPresetError::InvalidUtf8)?;
+        if source.contains('\0') {
+            return Err(MilkdropPresetError::InteriorNul);
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("local preset.milk")
+            .to_owned();
+        Ok(Self { name, source })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+#[derive(Debug)]
+pub enum MilkdropPresetError {
+    WrongExtension,
+    TooLarge { maximum: usize },
+    InvalidUtf8,
+    InteriorNul,
+    Io(io::Error),
+}
+
+impl fmt::Display for MilkdropPresetError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WrongExtension => write!(formatter, "select a file with the .milk extension"),
+            Self::TooLarge { maximum } => write!(
+                formatter,
+                "preset exceeds the {} MiB local file limit",
+                maximum / 1024 / 1024
+            ),
+            Self::InvalidUtf8 => write!(formatter, "preset is not valid UTF-8 text"),
+            Self::InteriorNul => write!(formatter, "preset contains an interior nul byte"),
+            Self::Io(error) => write!(formatter, "preset could not be read: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for MilkdropPresetError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum PresetSwapError {
+    Rejected(String),
+    RollbackFailed { candidate: String, rollback: String },
+}
+
+pub(super) fn install_candidate_with_rollback(
+    active: &mut String,
+    candidate: &str,
+    mut install: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), PresetSwapError> {
+    match install(candidate) {
+        Ok(()) => {
+            *active = candidate.to_owned();
+            Ok(())
+        }
+        Err(candidate_error) => match install(active) {
+            Ok(()) => Err(PresetSwapError::Rejected(candidate_error)),
+            Err(rollback_error) => Err(PresetSwapError::RollbackFailed {
+                candidate: candidate_error,
+                rollback: rollback_error,
+            }),
+        },
+    }
+}
+
+fn readable_projectm_error(error: &str) -> String {
+    match error.trim() {
+        "" | "std::exception" => "projectM could not parse the preset".to_owned(),
+        error => error.to_owned(),
+    }
+}
 
 #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -148,13 +258,11 @@ impl MilkdropPcm {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 #[derive(Debug)]
 pub struct MilkdropError {
     message: String,
 }
 
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 impl MilkdropError {
     fn backend(message: impl Into<String>) -> Self {
         Self {
@@ -163,14 +271,12 @@ impl MilkdropError {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 impl fmt::Display for MilkdropError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "MilkDrop backend failed: {}", self.message)
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 impl std::error::Error for MilkdropError {}
 
 #[derive(Clone)]
@@ -248,6 +354,10 @@ impl MilkdropViewHost {
     pub fn present(&self, bounds: Bounds<Pixels>, window: &mut Window, advance: bool) {
         self.inner.borrow_mut().present(bounds, window, advance);
     }
+
+    pub fn install_preset(&self, preset: &MilkdropPreset) -> Result<(), MilkdropError> {
+        self.inner.borrow_mut().install_preset(preset)
+    }
 }
 
 impl Default for MilkdropViewHost {
@@ -257,6 +367,50 @@ impl Default for MilkdropViewHost {
 }
 
 impl MilkdropViewHostInner {
+    #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
+    fn install_preset(&mut self, preset: &MilkdropPreset) -> Result<(), MilkdropError> {
+        let result = self
+            .view
+            .as_mut()
+            .ok_or_else(|| {
+                MilkdropError::backend(
+                    "start local playback and select MilkDrop before loading a preset",
+                )
+            })?
+            .install_preset(preset.source());
+        match result {
+            Ok(()) => {
+                self.status = MilkdropStatus::Running;
+                Ok(())
+            }
+            Err(PresetSwapError::Rejected(error)) => {
+                let error = readable_projectm_error(&error);
+                Err(MilkdropError::backend(format!(
+                    "selected preset was rejected ({error}); restored the previous preset"
+                )))
+            }
+            Err(PresetSwapError::RollbackFailed {
+                candidate,
+                rollback,
+            }) => {
+                let candidate = readable_projectm_error(&candidate);
+                let rollback = readable_projectm_error(&rollback);
+                let error = MilkdropError::backend(format!(
+                    "selected preset failed ({candidate}) and the previous preset could not be restored ({rollback})"
+                ));
+                self.view = None;
+                self.status = MilkdropStatus::Failed(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(not(all(target_os = "macos", feature = "milkdrop-projectm")))]
+    fn install_preset(&mut self, _preset: &MilkdropPreset) -> Result<(), MilkdropError> {
+        Err(MilkdropError::backend(
+            "projectM support is unavailable in this build",
+        ))
+    }
     #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
     fn take_failure_injection(&mut self) -> Option<MilkdropFailureMode> {
         self.failure_injection.take()
@@ -331,7 +485,14 @@ impl MilkdropViewHostInner {
 
 #[cfg(test)]
 mod tests {
-    use super::{MilkdropMetrics, MilkdropPcm, MilkdropStatus, MilkdropViewHost};
+    use std::fs;
+
+    use super::{
+        MAX_MILKDROP_PRESET_BYTES, MilkdropMetrics, MilkdropPcm, MilkdropPreset,
+        MilkdropPresetError, MilkdropStatus, MilkdropViewHost, PresetSwapError,
+        install_candidate_with_rollback, readable_projectm_error,
+    };
+    use tempfile::tempdir;
 
     #[cfg(all(target_os = "macos", feature = "milkdrop-test-hooks"))]
     use super::{MilkdropFailureInjection, MilkdropFailureMode};
@@ -426,6 +587,117 @@ mod tests {
         let host = MilkdropViewHost::new();
 
         assert_eq!(host.status(), MilkdropStatus::Unavailable);
+    }
+
+    #[test]
+    fn local_milkdrop_preset_accepts_bounded_utf8_milk_files() {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let path = directory.path().join("Cosmic Bloom.MILK");
+        fs::write(&path, b"[preset00]\nfRating=5.0\n")
+            .expect("valid MilkDrop preset fixture is written");
+
+        let preset = MilkdropPreset::read(&path).expect("valid .milk preset loads");
+
+        assert_eq!(preset.name(), "Cosmic Bloom.MILK");
+        assert_eq!(preset.source(), "[preset00]\nfRating=5.0\n");
+    }
+
+    #[test]
+    fn local_milkdrop_preset_rejects_wrong_extension_invalid_text_and_nul() {
+        let directory = tempdir().expect("temporary preset directory is created");
+
+        let wrong_extension = directory.path().join("preset.txt");
+        fs::write(&wrong_extension, b"[preset00]").expect("fixture is written");
+        assert!(matches!(
+            MilkdropPreset::read(&wrong_extension),
+            Err(MilkdropPresetError::WrongExtension)
+        ));
+
+        let invalid_text = directory.path().join("invalid.milk");
+        fs::write(&invalid_text, [0xff, 0xfe]).expect("fixture is written");
+        assert!(matches!(
+            MilkdropPreset::read(&invalid_text),
+            Err(MilkdropPresetError::InvalidUtf8)
+        ));
+
+        let nul = directory.path().join("nul.milk");
+        fs::write(&nul, b"[preset00]\0fRating=5.0").expect("fixture is written");
+        assert!(matches!(
+            MilkdropPreset::read(&nul),
+            Err(MilkdropPresetError::InteriorNul)
+        ));
+    }
+
+    #[test]
+    fn local_milkdrop_preset_enforces_the_read_limit() {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let path = directory.path().join("too-large.milk");
+        fs::write(&path, vec![b'x'; MAX_MILKDROP_PRESET_BYTES + 1])
+            .expect("oversized preset fixture is written");
+
+        assert!(matches!(
+            MilkdropPreset::read(&path),
+            Err(MilkdropPresetError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn rejected_preset_restores_the_last_known_good_preset() {
+        let mut active = "bundled".to_owned();
+        let mut attempts = Vec::new();
+
+        let error = install_candidate_with_rollback(&mut active, "broken", |preset| {
+            attempts.push(preset.to_owned());
+            (preset != "broken")
+                .then_some(())
+                .ok_or("parse error".to_owned())
+        })
+        .expect_err("broken candidate is rejected");
+
+        assert_eq!(active, "bundled");
+        assert_eq!(attempts, ["broken", "bundled"]);
+        assert_eq!(error, PresetSwapError::Rejected("parse error".to_owned()));
+    }
+
+    #[test]
+    fn accepted_preset_becomes_the_next_rollback_target() {
+        let mut active = "bundled".to_owned();
+
+        install_candidate_with_rollback(&mut active, "cosmic", |_| Ok(()))
+            .expect("candidate installs");
+
+        assert_eq!(active, "cosmic");
+    }
+
+    #[test]
+    fn failed_rollback_is_distinguished_from_a_recoverable_rejection() {
+        let mut active = "bundled".to_owned();
+
+        let error = install_candidate_with_rollback(&mut active, "broken", |preset| {
+            Err(format!("{preset} failed"))
+        })
+        .expect_err("candidate and rollback both fail");
+
+        assert_eq!(
+            error,
+            PresetSwapError::RollbackFailed {
+                candidate: "broken failed".to_owned(),
+                rollback: "bundled failed".to_owned(),
+            }
+        );
+        assert_eq!(active, "bundled");
+    }
+
+    #[test]
+    fn opaque_projectm_exception_is_presented_as_a_useful_preset_error() {
+        assert_eq!(
+            readable_projectm_error("std::exception"),
+            "projectM could not parse the preset"
+        );
+        assert_eq!(
+            readable_projectm_error("unknown function `warp_99`"),
+            "unknown function `warp_99`"
+        );
     }
 
     #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]

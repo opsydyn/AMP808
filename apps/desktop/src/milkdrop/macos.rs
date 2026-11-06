@@ -19,7 +19,10 @@ use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use super::{MilkdropError, MilkdropFailureMode, MilkdropPcmConsumer};
+use super::{
+    MilkdropError, MilkdropFailureMode, MilkdropPcmConsumer, PresetSwapError,
+    install_candidate_with_rollback,
+};
 
 const TARGET_FPS: i32 = 60;
 
@@ -30,6 +33,7 @@ pub(super) struct ProjectmView {
     preset_error: Box<PresetErrorState>,
     pcm_scratch: Box<[f32]>,
     drawable_size: (usize, usize),
+    active_preset: String,
 }
 
 impl ProjectmView {
@@ -122,11 +126,15 @@ impl ProjectmView {
             preset_error: Box::new(PresetErrorState::default()),
             pcm_scratch: vec![0.0; max_samples].into_boxed_slice(),
             drawable_size: (0, 0),
+            active_preset: String::new(),
         };
         if inject_preset_failure {
             return Err(MilkdropFailureMode::Preset.into_error());
         }
-        result.install_preset(preset)?;
+        result.load_preset_data(preset).map_err(|error| {
+            MilkdropError::backend(format!("original AMP808 preset could not load: {error}"))
+        })?;
+        result.active_preset = preset.to_owned();
         result.resize(bounds)?;
         result.show();
         Ok(result)
@@ -164,7 +172,7 @@ impl ProjectmView {
         unsafe { NSOpenGLContext::flushBuffer(self.context) };
         if let Some(error) = self.preset_error.message.take() {
             return Err(MilkdropError::backend(format!(
-                "original AMP808 preset could not render: {error}"
+                "active MilkDrop preset could not render: {error}"
             )));
         }
         self.show();
@@ -192,9 +200,18 @@ impl ProjectmView {
         }
     }
 
-    fn install_preset(&mut self, preset: &str) -> Result<(), MilkdropError> {
+    pub(super) fn install_preset(&mut self, preset: &str) -> Result<(), PresetSwapError> {
+        let mut active = std::mem::take(&mut self.active_preset);
+        let result = install_candidate_with_rollback(&mut active, preset, |source| {
+            self.load_preset_data(source)
+        });
+        self.active_preset = active;
+        result
+    }
+
+    fn load_preset_data(&mut self, preset: &str) -> Result<(), String> {
         let preset = CString::new(preset)
-            .map_err(|_| MilkdropError::backend("MilkDrop preset contains an interior nul byte"))?;
+            .map_err(|_| "MilkDrop preset contains an interior nul byte".to_owned())?;
         let error_state: *mut PresetErrorState = &mut *self.preset_error;
         // SAFETY: projectM is live; `error_state` points to a pinned Box owned by this view for the
         // callback lifetime; the preset CString outlives the synchronous load call.
@@ -208,9 +225,7 @@ impl ProjectmView {
             projectm_sys::projectm_load_preset_data(self.projectm.as_ptr(), preset.as_ptr(), false);
         }
         if let Some(error) = self.preset_error.message.take() {
-            return Err(MilkdropError::backend(format!(
-                "original AMP808 preset could not load: {error}"
-            )));
+            return Err(error);
         }
         Ok(())
     }

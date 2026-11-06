@@ -12,7 +12,7 @@ use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
-use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
+use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
 use crate::skin::Amp808Skin;
@@ -233,6 +233,8 @@ pub struct PlayerView {
     session: Option<PlaybackSession>,
     cosmic: CosmicBackgroundHost,
     milkdrop: MilkdropViewHost,
+    milkdrop_preset_notice: Option<String>,
+    milkdrop_preset_error: Option<String>,
     error: Option<String>,
     seeking: bool,
     visualizer_mode: VisualizerMode,
@@ -263,6 +265,8 @@ impl PlayerView {
             session: None,
             cosmic: CosmicBackgroundHost::new(),
             milkdrop: MilkdropViewHost::new(),
+            milkdrop_preset_notice: None,
+            milkdrop_preset_error: None,
             error: None,
             seeking: false,
             visualizer_mode: VisualizerMode::Spectrum,
@@ -341,6 +345,65 @@ impl PlayerView {
                         view.clear_session();
                         view.error = Some(error.to_string());
                         view.seeking = false;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn choose_milkdrop_preset(&mut self, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Load a .milk preset".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match selection.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let load = cx
+                .background_executor()
+                .spawn(async move { MilkdropPreset::read(&path) });
+            let result = load.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(preset) => match view.milkdrop.install_preset(&preset) {
+                        Ok(()) => {
+                            view.milkdrop_preset_notice =
+                                Some(format!("Loaded MilkDrop preset: {}", preset.name()));
+                            view.milkdrop_preset_error = None;
+                        }
+                        Err(error) => {
+                            view.milkdrop_preset_notice = None;
+                            view.milkdrop_preset_error = Some(error.to_string());
+                        }
+                    },
+                    Err(error) => {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
                     }
                 }
                 cx.notify();
@@ -1822,6 +1885,50 @@ impl Render for PlayerView {
                         .child(div().text_sm().text_color(text).child(error)),
                 )
             })
+            .when_some(self.milkdrop_preset_error.clone(), |root, error| {
+                root.child(
+                    div()
+                        .id("milkdrop-preset-error")
+                        .test_support()
+                        .role(Role::Alert)
+                        .aria_label(format!("MilkDrop preset error: {error}"))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(accent)
+                        .bg(panel_raised)
+                        .px_4()
+                        .py_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(accent)
+                                .child("PRESET ERROR"),
+                        )
+                        .child(div().text_sm().text_color(text).child(error)),
+                )
+            })
+            .when_some(self.milkdrop_preset_notice.clone(), |root, notice| {
+                root.child(
+                    div()
+                        .id("milkdrop-preset-status")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(notice.clone())
+                        .rounded_md()
+                        .border_1()
+                        .border_color(panel_raised)
+                        .bg(panel)
+                        .px_4()
+                        .py_2()
+                        .text_sm()
+                        .text_color(text)
+                        .child(notice),
+                )
+            })
             .when(library_visible, |root| root.child(library_panel))
             .when(!library_visible, |root| root.child(
                 div()
@@ -1985,20 +2092,51 @@ impl Render for PlayerView {
                                     .text_xs()
                                     .text_color(text_muted)
                                     .child(
-                                        hardware_button(
-                                            "visualizer-mode",
-                                            HardwareButtonTone::Neutral,
-                                            self.skin,
-                                            cx,
-                                        )
-                                            .key_context("Amp808Control")
-                                            .accessibility_label(visualizer_action_label)
-                                            .px_2()
-                                            .py_1()
-                                            .label(visualizer_label)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.toggle_visualizer(cx);
-                                            })),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                hardware_button(
+                                                    "visualizer-mode",
+                                                    HardwareButtonTone::Neutral,
+                                                    self.skin,
+                                                    cx,
+                                                )
+                                                    .key_context("Amp808Control")
+                                                    .accessibility_label(visualizer_action_label)
+                                                    .px_2()
+                                                    .py_1()
+                                                    .label(visualizer_label)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_visualizer(cx);
+                                                    })),
+                                            )
+                                            .when(
+                                                self.visualizer_mode == VisualizerMode::MilkDrop,
+                                                |controls| {
+                                                    controls.child(
+                                                        hardware_button(
+                                                            "load-milkdrop-preset",
+                                                            HardwareButtonTone::Neutral,
+                                                            self.skin,
+                                                            cx,
+                                                        )
+                                                            .key_context("Amp808Control")
+                                                            .label("LOAD PRESET")
+                                                            .accessibility_label(
+                                                                "Load a local MilkDrop preset",
+                                                            )
+                                                            .px_2()
+                                                            .py_1()
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    this.choose_milkdrop_preset(cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                },
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -2105,7 +2243,7 @@ mod tests {
 
     use super::{
         LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, QueuedTrack,
-        TrackDisplay, init_skin_theme, milkdrop_status_label, playback_toggle,
+        TrackDisplay, VisualizerMode, init_skin_theme, milkdrop_status_label, playback_toggle,
         should_present_milkdrop, signal_status, skin_hsla,
     };
 
@@ -2907,11 +3045,67 @@ mod tests {
                 window.find("milkdrop-status").label(),
                 Some("MilkDrop unavailable")
             );
+            assert_eq!(
+                window.find("load-milkdrop-preset").label(),
+                Some("Load a local MilkDrop preset")
+            );
+            window.click("load-milkdrop-preset", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(!options.multiple);
+            assert_eq!(options.prompt.as_deref(), Some("Load a .milk preset"));
+            None
+        });
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
             window.click("visualizer-mode", cx);
             window.render_frame(cx);
             assert_eq!(
                 window.find("visualizer-mode").label(),
                 Some("Show waveform visualizer")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn invalid_local_milkdrop_file_is_reported_as_an_accessible_alert(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let path = directory.path().join("not-a-preset.txt");
+        fs::write(&path, b"[preset00]").expect("invalid preset fixture is written");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                cx.notify();
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("load-milkdrop-preset", cx);
+        })
+        .unwrap();
+        cx.simulate_path_prompt_response(move |_| Some(vec![path]));
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert_eq!(
+                alert.label(),
+                Some("MilkDrop preset error: select a file with the .milk extension")
             );
         })
         .unwrap();
