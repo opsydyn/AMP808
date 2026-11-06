@@ -2,12 +2,13 @@ use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
 use gpui_kit::component::button::Button;
 use gpui_kit::{
     App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions, Render, Role,
-    TestSupportExt, Window, canvas as gpui_canvas, div, prelude::*, px, rgb,
+    TestSupportExt, Window, canvas as gpui_canvas, deferred, div, prelude::*, px, rgb,
 };
 use std::time::{Duration, Instant};
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
+use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::skin::Amp808Skin;
@@ -127,11 +128,13 @@ pub struct PlayerView {
     focus: FocusHandle,
     skin: Amp808Skin,
     session: Option<PlaybackSession>,
+    cosmic: CosmicBackgroundHost,
     milkdrop: MilkdropViewHost,
     error: Option<String>,
     seeking: bool,
     visualizer_mode: VisualizerMode,
-    performance_probe: PerformanceProbe,
+    milkdrop_performance_probe: PerformanceProbe,
+    cosmic_performance_probe: PerformanceProbe,
 }
 
 impl PlayerView {
@@ -141,11 +144,13 @@ impl PlayerView {
             focus: cx.focus_handle(),
             skin: Amp808Skin::built_in(),
             session: None,
+            cosmic: CosmicBackgroundHost::new(),
             milkdrop: MilkdropViewHost::new(),
             error: None,
             seeking: false,
             visualizer_mode: VisualizerMode::Spectrum,
-            performance_probe: PerformanceProbe::from_env(),
+            milkdrop_performance_probe: PerformanceProbe::from_env("AMP808_MILKDROP_METRICS"),
+            cosmic_performance_probe: PerformanceProbe::from_env("AMP808_COSMIC_METRICS"),
         }
     }
 
@@ -365,9 +370,9 @@ struct PerformanceProbe {
 }
 
 impl PerformanceProbe {
-    fn from_env() -> Self {
+    fn from_env(variable: &str) -> Self {
         Self {
-            enabled: std::env::var("AMP808_MILKDROP_METRICS").is_ok_and(|value| value == "1"),
+            enabled: std::env::var(variable).is_ok_and(|value| value == "1"),
             report_interval: PERFORMANCE_REPORT_INTERVAL,
             baseline: None,
             last_report_at: None,
@@ -425,8 +430,12 @@ impl PerformanceProbe {
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let canvas = self.color(self.skin.canvas());
-        let panel = self.color(self.skin.panel());
-        let panel_raised = self.color(self.skin.panel_raised());
+        let panel = self
+            .color(self.skin.panel())
+            .opacity(self.skin.panel_opacity().unit());
+        let panel_raised = self
+            .color(self.skin.panel_raised())
+            .opacity(self.skin.raised_panel_opacity().unit());
         let text = self.color(self.skin.text());
         let text_muted = self.color(self.skin.text_muted());
         let accent = self.color(self.skin.accent());
@@ -448,6 +457,13 @@ impl Render for PlayerView {
             .session
             .as_ref()
             .and_then(PlaybackSession::try_snapshot);
+        let cosmic_signal =
+            CosmicSignal::from_snapshot(snapshot.as_ref().map(|snapshot| snapshot.analysis()));
+        let cosmic_motion = if reduce_motion {
+            CosmicMotion::Reduced
+        } else {
+            CosmicMotion::Standard
+        };
         if let Some(snapshot) = &snapshot {
             if let Some(error) = snapshot.output_error() {
                 self.error = Some(error.to_owned());
@@ -467,7 +483,7 @@ impl Render for PlayerView {
             .session
             .as_ref()
             .map_or(0, PlaybackSession::underflow_frames);
-        if let Some(sample) = self.performance_probe.observe(
+        if let Some(sample) = self.milkdrop_performance_probe.observe(
             Instant::now(),
             milkdrop_active,
             self.milkdrop.rendered_frames(),
@@ -475,6 +491,25 @@ impl Render for PlayerView {
         ) {
             eprintln!(
                 "AMP808_MILKDROP_METRICS elapsed_s={:.3} rendered_frames={} average_fps={:.3} underflow_frames={}",
+                sample.elapsed.as_secs_f64(),
+                sample.rendered_frames,
+                sample.average_fps,
+                sample.underflow_frames
+            );
+        }
+        let cosmic_active = !reduce_motion
+            && matches!(
+                self.cosmic.status(),
+                CosmicStatus::Running | CosmicStatus::Initializing
+            );
+        if let Some(sample) = self.cosmic_performance_probe.observe(
+            Instant::now(),
+            cosmic_active,
+            self.cosmic.rendered_frames(),
+            underflow_frames,
+        ) {
+            eprintln!(
+                "AMP808_COSMIC_METRICS elapsed_s={:.3} rendered_frames={} average_fps={:.3} underflow_frames={}",
                 sample.elapsed.as_secs_f64(),
                 sample.rendered_frames,
                 sample.average_fps,
@@ -501,7 +536,7 @@ impl Render for PlayerView {
                     .items_end()
                     .gap_1()
                     .rounded_md()
-                    .bg(canvas)
+                    .bg(canvas.opacity(0.64))
                     .p_4()
                     .children(spectrum.into_iter().map(|magnitude| {
                         div()
@@ -522,7 +557,7 @@ impl Render for PlayerView {
                     .flex_1()
                     .items_center()
                     .rounded_md()
-                    .bg(canvas)
+                    .bg(canvas.opacity(0.64))
                     .p_4()
                     .children(waveform.into_iter().map(|sample| {
                         let positive = sample.max(0.0);
@@ -574,7 +609,7 @@ impl Render for PlayerView {
                     .items_center()
                     .justify_center()
                     .rounded_md()
-                    .bg(canvas)
+                    .bg(canvas.opacity(0.64))
                     .text_sm()
                     .text_color(text_muted);
                 if matches!(
@@ -647,11 +682,7 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.transport_state() == &TransportState::Playing)
-        {
+        if !reduce_motion && !matches!(self.cosmic.status(), CosmicStatus::Failed(_)) {
             window.request_animation_frame();
         } else if self.visualizer_mode == VisualizerMode::MilkDrop
             && has_session
@@ -662,7 +693,7 @@ impl Render for PlayerView {
             window.request_animation_frame();
         }
 
-        div()
+        let player = div()
             .id("player-root")
             .test_support()
             .track_focus(&self.focus)
@@ -686,7 +717,6 @@ impl Render for PlayerView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(canvas)
             .text_color(text)
             .p_5()
             .gap_4()
@@ -695,6 +725,10 @@ impl Render for PlayerView {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .rounded_md()
+                    .bg(panel)
+                    .px_3()
+                    .pt_2()
                     .border_b_1()
                     .border_color(accent)
                     .pb_3()
@@ -785,7 +819,7 @@ impl Render for PlayerView {
                                     .rounded_md()
                                     .border_1()
                                     .border_color(panel_raised)
-                                    .bg(canvas)
+                                    .bg(canvas.opacity(0.68))
                                     .text_color(text_muted)
                                     .child(
                                         div()
@@ -955,12 +989,40 @@ impl Render for PlayerView {
                     .flex()
                     .items_center()
                     .justify_center()
+                    .rounded_md()
+                    .bg(panel)
+                    .px_3()
+                    .py_2()
                     .text_xs()
                     .text_color(text_muted)
                     .child(
                         "⌘O OPEN  ·  SPACE PLAY/PAUSE  ·  ←/→ SEEK  ·  ↑/↓ VOLUME  ·  V VISUALIZER",
                     ),
-            )
+            );
+
+        let cosmic = self.cosmic.clone();
+        let background = div()
+            .id("cosmic-background")
+            .test_support()
+            .absolute()
+            .inset_0()
+            .child(
+                gpui_canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        cosmic.present(bounds, window, cosmic_motion, cosmic_signal);
+                    },
+                )
+                .size_full(),
+            );
+
+        div()
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(canvas)
+            .child(background)
+            .child(deferred(player))
     }
 }
 
@@ -1119,6 +1181,31 @@ mod tests {
             let volume = window.find("volume-status");
             assert_eq!(volume.role(), Some(Role::Status));
             assert_eq!(volume.label(), Some("Volume 100 percent"));
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn cosmic_background_keeps_gpui_overlay_controls_observable(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let view = cx.new(PlayerView::new);
+                window.focus(&view.read(cx).focus_handle(cx), cx);
+                view
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+
+            assert!(window.find("cosmic-background").visible());
+            assert_eq!(
+                window.find("open-file").label(),
+                Some("Open a local audio file")
+            );
+            assert_eq!(window.find("player-root").focused(), Some(true));
         })
         .unwrap();
     }

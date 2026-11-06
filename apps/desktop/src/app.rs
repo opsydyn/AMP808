@@ -83,6 +83,16 @@ mod tests {
     }
 
     #[test]
+    fn built_in_skin_uses_readable_translucent_hardware_surfaces() {
+        let skin = Amp808Skin::built_in();
+
+        assert!(skin.panel_opacity().unit() >= 0.72);
+        assert!(skin.panel_opacity().unit() < 1.0);
+        assert!(skin.raised_panel_opacity().unit() > skin.panel_opacity().unit());
+        assert!(skin.raised_panel_opacity().unit() < 1.0);
+    }
+
+    #[test]
     fn transport_covers_load_play_pause_seek_resume_and_end() {
         let mut transport = Transport::new();
         assert_eq!(transport.state(), &TransportState::Empty);

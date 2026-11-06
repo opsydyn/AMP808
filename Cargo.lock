@@ -221,9 +221,11 @@ name = "amp808-r3tr0"
 version = "0.1.0"
 dependencies = [
  "cocoa 0.26.0",
+ "core-graphics-types 0.2.0",
  "cpal",
  "gpui-kit",
  "libc",
+ "metal",
  "objc",
  "projectm-sys",
  "raw-window-handle",
@@ -3258,6 +3260,7 @@ dependencies = [
  "gpui-component",
  "gpui-fast",
  "gpui-fast-platform",
+ "gpui-fast-web",
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-macros",
@@ -3272,6 +3275,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7abc281dcbfe51c16a7e73189521a3a771168c31e3ab0db99e21e481d1b1b9a"
 dependencies = [
  "anyhow",
+ "gpui-fast",
  "gpui-pre",
  "gpui-pre-reqwest",
  "log",

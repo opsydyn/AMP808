@@ -12,6 +12,19 @@ impl SkinColor {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SkinOpacity(u8);
+
+impl SkinOpacity {
+    pub const fn new(alpha: u8) -> Self {
+        Self(alpha)
+    }
+
+    pub const fn unit(self) -> f32 {
+        self.0 as f32 / u8::MAX as f32
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Amp808Skin {
     canvas: SkinColor,
     panel: SkinColor,
@@ -21,6 +34,8 @@ pub struct Amp808Skin {
     accent: SkinColor,
     meter_low: SkinColor,
     meter_high: SkinColor,
+    panel_opacity: SkinOpacity,
+    raised_panel_opacity: SkinOpacity,
 }
 
 impl Amp808Skin {
@@ -34,6 +49,8 @@ impl Amp808Skin {
             accent: SkinColor::new(0xf8_a1_25),
             meter_low: SkinColor::new(0xf1_f8_27),
             meter_high: SkinColor::new(0xe7_2e_2e),
+            panel_opacity: SkinOpacity::new(204),
+            raised_panel_opacity: SkinOpacity::new(230),
         }
     }
 
@@ -67,5 +84,13 @@ impl Amp808Skin {
 
     pub const fn meter_high(self) -> SkinColor {
         self.meter_high
+    }
+
+    pub const fn panel_opacity(self) -> SkinOpacity {
+        self.panel_opacity
+    }
+
+    pub const fn raised_panel_opacity(self) -> SkinOpacity {
+        self.raised_panel_opacity
     }
 }
