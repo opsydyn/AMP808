@@ -93,6 +93,34 @@ mod tests {
     }
 
     #[test]
+    fn built_in_skin_defines_dark_tactile_button_states() {
+        let skin = Amp808Skin::built_in();
+
+        assert_eq!(skin.control().hex(), 0x24_25_2b);
+        assert_eq!(skin.control_hover().hex(), 0x31_33_3b);
+        assert_eq!(skin.control_active().hex(), 0x17_18_1c);
+        assert_eq!(skin.control_border().hex(), 0x4a_4c_55);
+        assert_eq!(skin.control_primary().hex(), 0xd8_4b_25);
+        assert_eq!(skin.control_primary_hover().hex(), 0xed_63_36);
+        assert_eq!(skin.control_primary_active().hex(), 0xb7_39_1d);
+        assert_ne!(skin.control().hex(), skin.canvas().hex());
+        assert_ne!(skin.control_primary().hex(), skin.accent().hex());
+    }
+
+    #[test]
+    fn built_in_skin_meets_enhanced_text_and_visible_field_contrast() {
+        let skin = Amp808Skin::built_in();
+
+        for surface in [skin.canvas(), skin.panel(), skin.panel_raised()] {
+            assert!(skin.text_muted().contrast_ratio(surface) >= 7.0);
+        }
+        assert!(skin.text().contrast_ratio(skin.field()) >= 7.0);
+        assert!(skin.text_muted().contrast_ratio(skin.field()) >= 7.0);
+        assert!(skin.field_border().contrast_ratio(skin.panel_raised()) >= 3.0);
+        assert_ne!(skin.field().hex(), 0xff_ff_ff);
+    }
+
+    #[test]
     fn transport_covers_load_play_pause_seek_resume_and_end() {
         let mut transport = Transport::new();
         assert_eq!(transport.state(), &TransportState::Empty);

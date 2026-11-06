@@ -19,6 +19,7 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        ui::init_skin_theme(cx);
         ui::init_keyboard_shortcuts(cx);
 
         let (width, height) = window_spec.initial_size();

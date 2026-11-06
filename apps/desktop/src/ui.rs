@@ -1,10 +1,10 @@
-use gpui_kit::base::{Button as BaseButton, Disableable, StyledExt};
-use gpui_kit::component::button::Button;
+use gpui_kit::base::{Disableable, StyledExt, box_shadow};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, PathPromptOptions,
-    Render, Role, Subscription, TestSupportExt, Window, canvas as gpui_canvas, deferred, div,
-    prelude::*, px, rgb,
+    App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyBinding,
+    PathPromptOptions, Render, Role, Subscription, TestSupportExt, Window, canvas as gpui_canvas,
+    deferred, div, prelude::*, px, rgb,
 };
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,91 @@ use crate::milkdrop::{MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
 use crate::skin::Amp808Skin;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HardwareButtonTone {
+    Neutral,
+    Primary,
+}
+
+fn skin_hsla(color: crate::skin::SkinColor) -> Hsla {
+    rgb(color.hex()).into()
+}
+
+pub fn init_skin_theme(cx: &mut App) {
+    let skin = Amp808Skin::built_in();
+    gpui_kit::component::Theme::update(cx, |theme| {
+        theme.background = skin_hsla(skin.field());
+        theme.input = skin_hsla(skin.field_border());
+        theme.foreground = skin_hsla(skin.text());
+        theme.muted_foreground = skin_hsla(skin.text_muted());
+        theme.ring = skin_hsla(skin.accent());
+        theme.caret = skin_hsla(skin.accent());
+        theme.selection = skin_hsla(skin.accent()).opacity(0.35);
+    });
+}
+
+fn hardware_input(state: &Entity<InputState>, id: impl Into<ElementId>, skin: Amp808Skin) -> Input {
+    Input::new(state)
+        .id(id)
+        .w_full()
+        .rounded(px(6.0))
+        .border_color(skin_hsla(skin.field_border()))
+        .bg(skin_hsla(skin.field()))
+        .text_color(skin_hsla(skin.text()))
+        .shadow(vec![box_shadow(
+            0.0,
+            2.0,
+            5.0,
+            -1.0,
+            skin_hsla(crate::skin::SkinColor::new(0x00_00_00)).opacity(0.5),
+        )])
+}
+
+fn hardware_button(
+    id: impl Into<ElementId>,
+    tone: HardwareButtonTone,
+    skin: Amp808Skin,
+    cx: &App,
+) -> Button {
+    let (surface, hover, active, foreground, border) = match tone {
+        HardwareButtonTone::Neutral => (
+            skin.control(),
+            skin.control_hover(),
+            skin.control_active(),
+            skin.text(),
+            skin.control_border(),
+        ),
+        HardwareButtonTone::Primary => (
+            skin.control_primary(),
+            skin.control_primary_hover(),
+            skin.control_primary_active(),
+            skin.text(),
+            skin.accent(),
+        ),
+    };
+
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(skin_hsla(surface))
+                .hover(skin_hsla(hover))
+                .active(skin_hsla(active))
+                .foreground(skin_hsla(foreground))
+                .shadow(true),
+        )
+        .outline()
+        .rounded(px(6.0))
+        .border_color(skin_hsla(border))
+        .text_color(skin_hsla(foreground))
+        .shadow(vec![box_shadow(
+            0.0,
+            2.0,
+            5.0,
+            -1.0,
+            skin_hsla(crate::skin::SkinColor::new(0x00_00_00)).opacity(0.62),
+        )])
+}
 
 gpui_kit::actions!(
     amp808,
@@ -53,6 +138,10 @@ enum VisualizerMode {
     Spectrum,
     Waveform,
     MilkDrop,
+}
+
+const fn should_present_milkdrop(library_visible: bool, visualizer_mode: VisualizerMode) -> bool {
+    !library_visible && matches!(visualizer_mode, VisualizerMode::MilkDrop)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +370,9 @@ impl PlayerView {
 
     fn toggle_library(&mut self, cx: &mut Context<Self>) {
         self.library_visible = !self.library_visible;
+        if self.library_visible {
+            self.milkdrop.hide();
+        }
         if self.library_visible && matches!(self.library_status, LibraryStatus::Unloaded) {
             self.load_library(cx);
         } else {
@@ -972,7 +1064,7 @@ impl Render for PlayerView {
                 sample.underflow_frames
             );
         }
-        if self.visualizer_mode != VisualizerMode::MilkDrop {
+        if !should_present_milkdrop(self.library_visible, self.visualizer_mode) {
             self.milkdrop.hide();
         }
         let (visualizer_label, visualizer_action_label) = match self.visualizer_mode {
@@ -1193,90 +1285,112 @@ impl Render for PlayerView {
             .as_ref()
             .expect("playlist name input is initialized before rendering")
             .clone();
-        let playlist_panel =
-            div()
-                .id("playlist-panel")
-                .test_support()
-                .role(Role::Group)
-                .aria_label("Local playlists")
-                .flex()
-                .flex_col()
-                .gap_2()
-                .rounded_md()
-                .border_1()
-                .border_color(panel_raised)
-                .bg(panel_raised)
-                .p_3()
-                .child(Input::new(&playlist_name).id("playlist-name").w_full())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            Button::new("playlist-create")
-                                .key_context("Amp808Control")
-                                .label("CREATE")
-                                .accessibility_label("Create local playlist")
-                                .on_click(cx.listener(|this, _, _, cx| this.create_playlist(cx))),
+        let playlist_panel = div()
+            .id("playlist-panel")
+            .test_support()
+            .role(Role::Group)
+            .aria_label("Local playlists")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(panel_raised)
+            .bg(panel_raised)
+            .p_3()
+            .child(hardware_input(&playlist_name, "playlist-name", self.skin))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        hardware_button(
+                            "playlist-create",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
                         )
-                        .child(
-                            Button::new("playlist-rename")
-                                .key_context("Amp808Control")
-                                .label("RENAME")
-                                .accessibility_label("Rename selected local playlist")
-                                .disabled(selected_playlist.is_none())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.rename_selected_playlist(cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("playlist-delete")
-                                .key_context("Amp808Control")
-                                .label("DELETE")
-                                .accessibility_label("Delete selected local playlist")
-                                .disabled(selected_playlist.is_none())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.delete_selected_playlist(cx)),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("playlist-status")
-                        .test_support()
-                        .role(Role::Status)
-                        .aria_label(playlist_status.clone())
-                        .text_xs()
-                        .text_color(text_muted)
-                        .child(playlist_status),
-                )
-                .when_some(self.playlist_error.clone(), |panel, error| {
-                    panel.child(
-                        div()
-                            .id("playlist-error")
-                            .test_support()
-                            .role(Role::Alert)
-                            .aria_label(format!("Playlist error: {error}"))
-                            .text_xs()
-                            .text_color(accent)
-                            .child(error),
-                    )
-                })
-                .children(playlists.into_iter().enumerate().map(|(index, playlist)| {
-                    let playlist_id = playlist.id();
-                    let name = playlist.name().to_owned();
-                    let count = playlist.track_count();
-                    Button::new(("playlist-select", index))
                         .key_context("Amp808Control")
-                        .label(format!("{}  ({count})", playlist.name()))
-                        .accessibility_label(format!("Select playlist {name}, {count} tracks"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_playlist(playlist_id, cx);
-                        }))
+                        .label("CREATE")
+                        .accessibility_label("Create local playlist")
+                        .on_click(cx.listener(|this, _, _, cx| this.create_playlist(cx))),
+                    )
+                    .child(
+                        hardware_button(
+                            "playlist-rename",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .key_context("Amp808Control")
+                        .label("RENAME")
+                        .accessibility_label("Rename selected local playlist")
+                        .disabled(selected_playlist.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.rename_selected_playlist(cx))),
+                    )
+                    .child(
+                        hardware_button(
+                            "playlist-delete",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .key_context("Amp808Control")
+                        .label("DELETE")
+                        .accessibility_label("Delete selected local playlist")
+                        .disabled(selected_playlist.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.delete_selected_playlist(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("playlist-status")
+                    .test_support()
+                    .role(Role::Status)
+                    .aria_label(playlist_status.clone())
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child(playlist_status),
+            )
+            .when_some(self.playlist_error.clone(), |panel, error| {
+                panel.child(
+                    div()
+                        .id("playlist-error")
+                        .test_support()
+                        .role(Role::Alert)
+                        .aria_label(format!("Playlist error: {error}"))
+                        .text_xs()
+                        .text_color(accent)
+                        .child(error),
+                )
+            })
+            .children(playlists.into_iter().enumerate().map(|(index, playlist)| {
+                let playlist_id = playlist.id();
+                let name = playlist.name().to_owned();
+                let count = playlist.track_count();
+                hardware_button(
+                    ("playlist-select", index),
+                    if selected_playlist == Some(playlist_id) {
+                        HardwareButtonTone::Primary
+                    } else {
+                        HardwareButtonTone::Neutral
+                    },
+                    self.skin,
+                    cx,
+                )
+                .key_context("Amp808Control")
+                .label(format!("{}  ({count})", playlist.name()))
+                .accessibility_label(format!("Select playlist {name}, {count} tracks"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.select_playlist(playlist_id, cx);
                 }))
-                .children(selected_playlist_tracks.into_iter().enumerate().map(
-                    |(position, track)| {
+            }))
+            .children(
+                selected_playlist_tracks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, track)| {
                         let playlist_name = selected_playlist_name
                             .clone()
                             .unwrap_or_else(|| "selected playlist".to_owned());
@@ -1288,31 +1402,45 @@ impl Render for PlayerView {
                             .items_center()
                             .gap_2()
                             .child(
-                                Button::new(("playlist-track", position))
-                                    .key_context("Amp808Control")
-                                    .label(track.title().to_owned())
-                                    .accessibility_label(format!(
-                                        "Play {title} from {playlist_name} position {}",
-                                        position + 1
-                                    ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                hardware_button(
+                                    ("playlist-track", position),
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
+                                .key_context("Amp808Control")
+                                .label(track.title().to_owned())
+                                .accessibility_label(format!(
+                                    "Play {title} from {playlist_name} position {}",
+                                    position + 1
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.play_selected_playlist_position(position, cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new(("playlist-remove", position))
-                                    .key_context("Amp808Control")
-                                    .label("REMOVE")
-                                    .accessibility_label(format!(
-                                        "Remove {remove_title} from {remove_name} position {}",
-                                        position + 1
-                                    ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                hardware_button(
+                                    ("playlist-remove", position),
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
+                                .key_context("Amp808Control")
+                                .label("REMOVE")
+                                .accessibility_label(format!(
+                                    "Remove {remove_title} from {remove_name} position {}",
+                                    position + 1
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.remove_selected_playlist_position(position, cx);
-                                    })),
+                                    },
+                                )),
                             )
-                    },
-                ));
+                    }),
+            );
         let queue_panel = div()
             .id("queue-panel")
             .test_support()
@@ -1342,7 +1470,7 @@ impl Render for PlayerView {
                             .child(queue_status),
                     )
                     .child(
-                        Button::new("clear-queue")
+                        hardware_button("clear-queue", HardwareButtonTone::Neutral, self.skin, cx)
                             .key_context("Amp808Control")
                             .label("CLEAR")
                             .accessibility_label("Clear up next queue")
@@ -1358,19 +1486,24 @@ impl Render for PlayerView {
                         let title = track.title().to_owned();
                         let artist = track.artist().unwrap_or("Unknown artist");
                         let album = track.album().unwrap_or("Unknown album");
-                        Button::new(("queue-track", position))
-                            .key_context("Amp808Control")
-                            .label(format!(
-                                "{}  —  {artist}  /  {album}  —  REMOVE",
-                                track.title()
-                            ))
-                            .accessibility_label(format!(
-                                "Remove {title} from queue position {}",
-                                position + 1
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_queued_track(position, cx);
-                            }))
+                        hardware_button(
+                            ("queue-track", position),
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .key_context("Amp808Control")
+                        .label(format!(
+                            "{}  —  {artist}  /  {album}  —  REMOVE",
+                            track.title()
+                        ))
+                        .accessibility_label(format!(
+                            "Remove {title} from queue position {}",
+                            position + 1
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_queued_track(position, cx);
+                        }))
                     }),
             );
         let library_panel = div()
@@ -1407,16 +1540,21 @@ impl Render for PlayerView {
                             ),
                     )
                     .child(
-                        Button::new("add-library-folder")
-                            .key_context("Amp808Control")
-                            .label("ADD FOLDER")
-                            .accessibility_label("Add a folder to the local music library")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.choose_library_folder(cx);
-                            })),
+                        hardware_button(
+                            "add-library-folder",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .key_context("Amp808Control")
+                        .label("ADD FOLDER")
+                        .accessibility_label("Add a folder to the local music library")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.choose_library_folder(cx);
+                        })),
                     ),
             )
-            .child(Input::new(&library_search).id("library-search").w_full())
+            .child(hardware_input(&library_search, "library-search", self.skin))
             .child(
                 div()
                     .id("library-status")
@@ -1476,48 +1614,74 @@ impl Render for PlayerView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        Button::new(("library-track", index))
-                                            .key_context("Amp808Control")
-                                            .label(label.clone())
-                                            .accessibility_label(format!(
-                                                "Play {label}. {technical}"
-                                            ))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        hardware_button(
+                                            ("library-track", index),
+                                            HardwareButtonTone::Primary,
+                                            self.skin,
+                                            cx,
+                                        )
+                                        .key_context("Amp808Control")
+                                        .label(label.clone())
+                                        .accessibility_label(format!("Play {label}. {technical}"))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.play_library_track(play_now.clone(), cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        Button::new(("library-play-next", index))
-                                            .key_context("Amp808Control")
-                                            .label("NEXT")
-                                            .accessibility_label(format!("Play {next_title} next"))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        hardware_button(
+                                            ("library-play-next", index),
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
+                                        .key_context("Amp808Control")
+                                        .label("NEXT")
+                                        .accessibility_label(format!("Play {next_title} next"))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.play_track_next(play_next.clone(), cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        Button::new(("library-add-queue", index))
-                                            .key_context("Amp808Control")
-                                            .label("QUEUE")
-                                            .accessibility_label(format!("Add {title} to queue"))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        hardware_button(
+                                            ("library-add-queue", index),
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
+                                        .key_context("Amp808Control")
+                                        .label("QUEUE")
+                                        .accessibility_label(format!("Add {title} to queue"))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.add_track_to_queue(queued_track.clone(), cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        Button::new(("library-add-playlist", index))
-                                            .key_context("Amp808Control")
-                                            .label("ADD")
-                                            .accessibility_label(format!(
-                                                "Add {title} to playlist {playlist_name}"
-                                            ))
-                                            .disabled(!can_add_to_playlist)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        hardware_button(
+                                            ("library-add-playlist", index),
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
+                                        .key_context("Amp808Control")
+                                        .label("ADD")
+                                        .accessibility_label(format!(
+                                            "Add {title} to playlist {playlist_name}"
+                                        ))
+                                        .disabled(!can_add_to_playlist)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.add_track_to_selected_playlist(
                                                     playlist_track.clone(),
                                                     cx,
                                                 );
-                                            })),
+                                            }),
+                                        ),
                                     )
                             }),
                     ),
@@ -1601,7 +1765,12 @@ impl Render for PlayerView {
                             .items_center()
                             .gap_2()
                             .child(
-                                Button::new("toggle-library")
+                                hardware_button(
+                                    "toggle-library",
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
                                     .key_context("Amp808Control")
                                     .label(if library_visible { "PLAYER" } else { "LIBRARY" })
                                     .accessibility_label(if library_visible {
@@ -1614,7 +1783,12 @@ impl Render for PlayerView {
                                     })),
                             )
                             .child(
-                                Button::new("open-file")
+                                hardware_button(
+                                    "open-file",
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
                                     .key_context("Amp808Control")
                                     .label("OPEN FILE")
                                     .accessibility_label("Open a local audio file")
@@ -1699,7 +1873,12 @@ impl Render for PlayerView {
                                     .flex()
                                     .gap_2()
                                     .child(
-                                        Button::new("seek-back")
+                                        hardware_button(
+                                            "seek-back",
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .label("-10S")
                                             .accessibility_label("Seek back 10 seconds")
@@ -1709,7 +1888,12 @@ impl Render for PlayerView {
                                             })),
                                     )
                                     .child(
-                                        Button::new("play-pause")
+                                        hardware_button(
+                                            "play-pause",
+                                            HardwareButtonTone::Primary,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .label(play_label)
                                             .accessibility_label(play_accessibility_label)
@@ -1719,7 +1903,12 @@ impl Render for PlayerView {
                                             })),
                                     )
                                     .child(
-                                        Button::new("seek-forward")
+                                        hardware_button(
+                                            "seek-forward",
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .label("+10S")
                                             .accessibility_label("Seek forward 10 seconds")
@@ -1735,7 +1924,12 @@ impl Render for PlayerView {
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        Button::new("volume-down")
+                                        hardware_button(
+                                            "volume-down",
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .label("VOL-")
                                             .accessibility_label("Decrease volume")
@@ -1757,7 +1951,12 @@ impl Render for PlayerView {
                                             .child(format!("VOL {volume:03}%")),
                                     )
                                     .child(
-                                        Button::new("volume-up")
+                                        hardware_button(
+                                            "volume-up",
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .label("VOL+")
                                             .accessibility_label("Increase volume")
@@ -1786,18 +1985,17 @@ impl Render for PlayerView {
                                     .text_xs()
                                     .text_color(text_muted)
                                     .child(
-                                        BaseButton::new("visualizer-mode")
+                                        hardware_button(
+                                            "visualizer-mode",
+                                            HardwareButtonTone::Neutral,
+                                            self.skin,
+                                            cx,
+                                        )
                                             .key_context("Amp808Control")
                                             .accessibility_label(visualizer_action_label)
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(panel_raised)
-                                            .focus_visible(|style| {
-                                                style.border_2().border_color(accent).text_color(text)
-                                            })
                                             .px_2()
                                             .py_1()
-                                            .child(visualizer_label)
+                                            .label(visualizer_label)
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.toggle_visualizer(cx);
                                             })),
@@ -1907,8 +2105,41 @@ mod tests {
 
     use super::{
         LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, QueuedTrack,
-        TrackDisplay, milkdrop_status_label, playback_toggle, signal_status,
+        TrackDisplay, init_skin_theme, milkdrop_status_label, playback_toggle,
+        should_present_milkdrop, signal_status, skin_hsla,
     };
+
+    #[gpui_kit::test]
+    fn skin_theme_projects_field_text_placeholder_and_focus_colors(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            init_skin_theme(cx);
+
+            let skin = crate::skin::Amp808Skin::built_in();
+            let theme = gpui_kit::component::Theme::global(cx);
+            assert_eq!(theme.background, skin_hsla(skin.field()));
+            assert_eq!(theme.input, skin_hsla(skin.field_border()));
+            assert_eq!(theme.foreground, skin_hsla(skin.text()));
+            assert_eq!(theme.muted_foreground, skin_hsla(skin.text_muted()));
+            assert_eq!(theme.ring, skin_hsla(skin.accent()));
+        });
+    }
+
+    #[test]
+    fn milkdrop_visibility_policy_hides_native_surface_in_library() {
+        assert!(should_present_milkdrop(
+            false,
+            super::VisualizerMode::MilkDrop
+        ));
+        assert!(!should_present_milkdrop(
+            true,
+            super::VisualizerMode::MilkDrop
+        ));
+        assert!(!should_present_milkdrop(
+            false,
+            super::VisualizerMode::Spectrum
+        ));
+    }
 
     #[test]
     fn performance_probe_reports_average_fps_and_underflow_delta_from_its_active_baseline() {
