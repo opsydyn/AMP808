@@ -113,6 +113,23 @@
 
 - [ ] **MPRIS2 D-Bus** (Linux) — Media key control, desktop widget integration, metadata push (`org.mpris.MediaPlayer2.Player`), volume sync, ICY title in metadata
 
+### DJ Mode — Hardware-grade visual fidelity
+
+- [ ] **DJ performance surface fidelity** — Build a dedicated DJ mode with the visual presence of
+      premium physical music hardware: a deep near-black chassis, restrained translucent inset
+      panels, large tactile rotary controls, illuminated performance pads, and a high-contrast BPM
+      and deck-state display.
+  - Bevels and control edges should catch moving light with SDF-quality depth rather than flat CSS-
+    style borders.
+  - Pads and indicators should communicate active, cued, playing, and unavailable states through
+    shape, luminance, and text as well as colour.
+  - Motion should react to audio and interaction without compromising reduced-motion behavior,
+    keyboard operation, screen-reader labels, or legibility in dark environments.
+  - Establish a measurable native GPU performance budget before selecting the final GPUI/Metal
+    rendering path; keep the fidelity layer decoupled from deck, mixer, and playback state.
+  - Treat the supplied control-surface image as an art-direction reference, not a layout or brand
+    to reproduce literally; preserve the AMP808-R3TR0 identity.
+
 ### Low Priority — Distribution & Polish
 
 - [ ] **`install.sh`** — Curl-pipe installer from GitHub releases
