@@ -1398,8 +1398,8 @@ mod tests {
     use crate::playback::DecodeWorkerState;
 
     use super::{
-        LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, TrackDisplay,
-        milkdrop_status_label, playback_toggle, signal_status,
+        LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView,
+        TrackDisplay, milkdrop_status_label, playback_toggle, signal_status,
     };
 
     #[test]
@@ -1688,6 +1688,78 @@ mod tests {
             None
         });
         cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn focused_library_track_accepts_keyboard_activation(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        let track_path = music.join("Signal Bloom.wav");
+        write_stereo_wav(&track_path, 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+        fs::remove_file(&track_path).expect("track is removed after indexing");
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init_keyboard_shortcuts(cx);
+        });
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                let view = cx.new(PlayerView::new);
+                window.focus(&view.read(cx).focus_handle(cx), cx);
+                view
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks);
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("player-root").focused(), Some(true));
+        })
+        .expect("test window remains available");
+        for _ in 0..5 {
+            cx.update_window(window, |_, window, cx| window.press("tab", cx))
+                .expect("test window remains available");
+            cx.run_until_parked();
+        }
+
+        cx.update_window(window, |_, window, cx| {
+            let track = window.find(("library-track", 0_usize));
+            assert_eq!(track.focused(), Some(true));
+            assert!(
+                track
+                    .label()
+                    .is_some_and(|label| label.starts_with("Play Signal Bloom")),
+                "focused row exposes its playback action"
+            );
+            window.press("enter", cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("playback-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert!(
+                alert
+                    .label()
+                    .is_some_and(|label| label.contains("Signal Bloom.wav")),
+                "Enter activates the focused row through the production playback path"
+            );
+        })
+        .expect("test window remains available");
     }
 
     #[gpui_kit::test]
@@ -1996,5 +2068,30 @@ mod tests {
             assert!(window.find("visualizer-mode").visible());
         })
         .unwrap();
+    }
+
+    fn write_stereo_wav(path: &std::path::Path, sample_rate: u32, frame_count: u32) {
+        let channel_count = 2_u16;
+        let bits_per_sample = 16_u16;
+        let bytes_per_sample = u32::from(bits_per_sample / 8);
+        let data_size = frame_count * u32::from(channel_count) * bytes_per_sample;
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&channel_count.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(
+            &(sample_rate * u32::from(channel_count) * bytes_per_sample).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&(channel_count * (bits_per_sample / 8)).to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.resize(44 + data_size as usize, 0);
+
+        fs::write(path, bytes).expect("WAV fixture is written");
     }
 }

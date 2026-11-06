@@ -190,10 +190,10 @@ application; the catalogue passes a path, not its stored metadata, when playback
 - [x] Database and filesystem work execute outside GPUI render and CPAL callback paths.
 - [x] The Library UI exposes accessible loading, empty, failure, and ready states.
 - [x] Add Folder accepts a directory, persists it, and refreshes the visible track list.
-- [ ] Keyboard and VoiceOver users can focus, identify, and activate a local track row.
+- [x] Keyboard and VoiceOver users can focus, identify, and activate a local track row.
 - [x] Activating a result starts the existing local playback path without catalogue coupling.
 - [x] Relaunching AMP808-R3TR0 reloads the indexed catalogue without rescanning first.
-- [ ] Existing spectrum, waveform, MilkDrop, cosmic background, transport, errors, and shortcuts
+- [x] Existing spectrum, waveform, MilkDrop, cosmic background, transport, errors, and shortcuts
       continue to work with library playback.
 - [x] `cargo test --locked -p amp808-r3tr0` passes.
 - [x] `cargo test --locked -p amp808-r3tr0 --features milkdrop-projectm` passes on macOS.
@@ -209,7 +209,20 @@ switched to Player, produced real spectrum energy with `PCM / LIVE`, and reached
 00:08. Relaunching and pressing `L` showed the indexed track without rescanning. The pre-acceptance
 catalogue was backed up and restored after the run, verified at zero roots and zero tracks, and the
 temporary fixture directory was removed. VoiceOver and the combined waveform/MilkDrop/error
-regression remain open rather than inferred from this run.
+regression remained open rather than being inferred from that run.
+
+Follow-up verification on 2026-11-06 closed those gaps. A GPUI headless regression tabs from the
+player root to the first local track, asserts the accessible `Play Signal Bloom` action, presses
+Enter, and observes the production playback error after the indexed fixture is deliberately
+removed. In a native macOS run, VoiceOver was enabled while AMP808 exposed the library row as a
+button labelled `Play voiceover-milkdrop — Unknown artist / Unknown album`, including its 44.1 kHz,
+two-channel, one-minute technical description; the focus ring tracked native controls and the row
+action started playback. The same projectM-enabled run showed live Spectrum and Waveform output,
+live native MilkDrop output, the animated cosmic background, responsive transport, an explicit
+corrupt-WAV playback alert, and recovery by reopening the valid library track. Automated shortcut
+tests remained green. VoiceOver and AMP808 were stopped afterward, the pre-run catalogue was
+restored and verified at zero roots and zero tracks, and the exact temporary fixture directory was
+removed.
 
 ## Simplicity Check
 
