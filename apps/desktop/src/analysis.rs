@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use amp808_core::bpm::{BpmAnalyzer, BpmEstimate};
 use realfft::num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
 
@@ -50,6 +51,7 @@ pub struct AnalysisSnapshot {
     spectrum: Box<[f32]>,
     peak: f32,
     rms: f32,
+    bpm: BpmEstimate,
 }
 
 impl AnalysisSnapshot {
@@ -65,6 +67,11 @@ impl AnalysisSnapshot {
             spectrum: vec![0.0; config.spectrum_bands].into_boxed_slice(),
             peak: 0.0,
             rms: 0.0,
+            bpm: if availability == AnalysisAvailability::Unavailable {
+                BpmEstimate::Unavailable
+            } else {
+                BpmEstimate::Estimating
+            },
         }
     }
 
@@ -90,6 +97,22 @@ impl AnalysisSnapshot {
 
     pub const fn rms(&self) -> f32 {
         self.rms
+    }
+
+    pub const fn bpm(&self) -> BpmEstimate {
+        self.bpm
+    }
+
+    pub(crate) fn without_signal(&self, availability: AnalysisAvailability) -> Self {
+        Self {
+            sequence: self.sequence,
+            availability,
+            waveform: vec![0.0; self.waveform.len()].into_boxed_slice(),
+            spectrum: vec![0.0; self.spectrum.len()].into_boxed_slice(),
+            peak: 0.0,
+            rms: 0.0,
+            bpm: self.bpm,
+        }
     }
 }
 
@@ -203,6 +226,7 @@ impl Analyzer {
             spectrum: spectrum.into_boxed_slice(),
             peak,
             rms,
+            bpm: BpmEstimate::Estimating,
         })
     }
 
@@ -295,6 +319,8 @@ pub struct AnalysisPump {
     filled: usize,
     sequence: u64,
     milkdrop: Option<MilkdropPcmProducer>,
+    bpm: BpmAnalyzer,
+    sample_rate: u32,
 }
 
 impl AnalysisPump {
@@ -303,8 +329,9 @@ impl AnalysisPump {
         consumer: AnalysisTapConsumer,
         latest: LatestAnalysis,
         config: AnalyzerConfig,
+        sample_rate: u32,
     ) -> Result<Self, AnalysisError> {
-        Self::new_with_milkdrop(consumer, latest, config, None)
+        Self::new_with_milkdrop(consumer, latest, config, None, sample_rate)
     }
 
     pub fn with_milkdrop(
@@ -312,8 +339,9 @@ impl AnalysisPump {
         latest: LatestAnalysis,
         config: AnalyzerConfig,
         milkdrop: MilkdropPcmProducer,
+        sample_rate: u32,
     ) -> Result<Self, AnalysisError> {
-        Self::new_with_milkdrop(consumer, latest, config, Some(milkdrop))
+        Self::new_with_milkdrop(consumer, latest, config, Some(milkdrop), sample_rate)
     }
 
     fn new_with_milkdrop(
@@ -321,7 +349,11 @@ impl AnalysisPump {
         latest: LatestAnalysis,
         config: AnalyzerConfig,
         milkdrop: Option<MilkdropPcmProducer>,
+        sample_rate: u32,
     ) -> Result<Self, AnalysisError> {
+        if sample_rate == 0 {
+            return Err(AnalysisError::InvalidConfig);
+        }
         Ok(Self {
             consumer,
             latest,
@@ -330,6 +362,8 @@ impl AnalysisPump {
             filled: 0,
             sequence: 0,
             milkdrop,
+            bpm: BpmAnalyzer::new(),
+            sample_rate,
         })
     }
 
@@ -340,7 +374,9 @@ impl AnalysisPump {
         }
 
         self.sequence = self.sequence.wrapping_add(1);
-        let snapshot = self.analyzer.analyze(&self.window, self.sequence)?;
+        let mut snapshot = self.analyzer.analyze(&self.window, self.sequence)?;
+        self.bpm.update(&self.window, self.sample_rate);
+        snapshot.bpm = self.bpm.estimate();
         if let Some(milkdrop) = self.milkdrop.as_mut() {
             let _ = milkdrop.push_samples(&self.window);
         }
@@ -360,8 +396,9 @@ impl AnalysisWorker {
         consumer: AnalysisTapConsumer,
         latest: LatestAnalysis,
         config: AnalyzerConfig,
+        sample_rate: u32,
     ) -> Result<Self, AnalysisError> {
-        Self::spawn_pump(AnalysisPump::new(consumer, latest, config)?)
+        Self::spawn_pump(AnalysisPump::new(consumer, latest, config, sample_rate)?)
     }
 
     pub fn spawn_with_milkdrop(
@@ -369,9 +406,14 @@ impl AnalysisWorker {
         latest: LatestAnalysis,
         config: AnalyzerConfig,
         milkdrop: MilkdropPcmProducer,
+        sample_rate: u32,
     ) -> Result<Self, AnalysisError> {
         Self::spawn_pump(AnalysisPump::with_milkdrop(
-            consumer, latest, config, milkdrop,
+            consumer,
+            latest,
+            config,
+            milkdrop,
+            sample_rate,
         )?)
     }
 
@@ -432,6 +474,8 @@ mod tests {
     use std::f32::consts::TAU;
     use std::time::{Duration, Instant};
 
+    use amp808_core::bpm::BpmEstimate;
+
     use crate::audio::AnalysisTap;
     use crate::milkdrop::MilkdropPcm;
 
@@ -462,7 +506,7 @@ mod tests {
         let config = AnalyzerConfig::default();
         let (mut producer, consumer, _diagnostics) = AnalysisTap::bounded(2_048);
         let latest = LatestAnalysis::new(config);
-        let mut pump = AnalysisPump::new(consumer, latest.clone(), config).unwrap();
+        let mut pump = AnalysisPump::new(consumer, latest.clone(), config, 44_100).unwrap();
 
         producer.push_samples(&vec![0.25; 512]);
         assert!(!pump.poll_once().unwrap());
@@ -485,9 +529,14 @@ mod tests {
         let (mut analysis_producer, analysis_consumer, _diagnostics) = AnalysisTap::bounded(2_048);
         let (milkdrop_producer, mut milkdrop_consumer) = MilkdropPcm::bounded(2_048);
         let latest = LatestAnalysis::new(config);
-        let mut pump =
-            AnalysisPump::with_milkdrop(analysis_consumer, latest, config, milkdrop_producer)
-                .expect("analysis and MilkDrop test configuration is valid");
+        let mut pump = AnalysisPump::with_milkdrop(
+            analysis_consumer,
+            latest,
+            config,
+            milkdrop_producer,
+            44_100,
+        )
+        .expect("analysis and MilkDrop test configuration is valid");
         let expected = vec![0.25; config.fft_size()];
         analysis_producer.push_samples(&expected);
 
@@ -499,11 +548,33 @@ mod tests {
     }
 
     #[test]
+    fn analysis_pump_publishes_locked_bpm_from_sampled_pcm() {
+        let config = AnalyzerConfig::default();
+        let sample_rate = 44_100;
+        let (mut producer, consumer, _diagnostics) = AnalysisTap::bounded(2_048);
+        let latest = LatestAnalysis::new(config);
+        let mut pump = AnalysisPump::new(consumer, latest.clone(), config, sample_rate)
+            .expect("analysis configuration is valid");
+        let samples = synthetic_click_track(120.0, sample_rate, 12.0);
+
+        for window in samples.chunks(config.fft_size()) {
+            producer.push_samples(window);
+            let _ = pump.poll_once().expect("PCM window is analyzable");
+        }
+
+        let snapshot = latest.load().expect("analysis snapshot is available");
+        let BpmEstimate::Locked(bpm) = snapshot.bpm() else {
+            panic!("expected locked BPM, got {:?}", snapshot.bpm());
+        };
+        assert!((i32::from(bpm) - 120).abs() <= 2, "locked at {bpm} BPM");
+    }
+
+    #[test]
     fn analysis_worker_publishes_from_the_tap_off_thread() {
         let config = AnalyzerConfig::default();
         let (mut producer, consumer, _diagnostics) = AnalysisTap::bounded(2_048);
         let latest = LatestAnalysis::new(config);
-        let worker = AnalysisWorker::spawn(consumer, latest.clone(), config).unwrap();
+        let worker = AnalysisWorker::spawn(consumer, latest.clone(), config, 44_100).unwrap();
         producer.push_samples(&vec![0.5; config.fft_size()]);
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -620,5 +691,17 @@ mod tests {
 
         assert_eq!(error.required_samples(), 1_024);
         assert_eq!(error.actual_samples(), 256);
+    }
+
+    fn synthetic_click_track(bpm: f32, sample_rate: u32, seconds: f32) -> Vec<f32> {
+        let sample_count = (sample_rate as f32 * seconds) as usize;
+        let beat_interval = ((60.0 / bpm) * sample_rate as f32) as usize;
+        let pulse_width = (sample_rate / 200).max(1) as usize;
+        let mut samples = vec![0.0; sample_count];
+        for beat_start in (0..sample_count).step_by(beat_interval) {
+            let beat_end = (beat_start + pulse_width).min(sample_count);
+            samples[beat_start..beat_end].fill(1.0);
+        }
+        samples
     }
 }

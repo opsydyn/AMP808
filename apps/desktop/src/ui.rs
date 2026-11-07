@@ -17,11 +17,13 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
+use amp808_core::bpm::BpmEstimate;
+
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
-use crate::media::{CoverArt, probe_cover_art};
+use crate::media::{CoverArt, TrackMetadata, probe_cover_art};
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
@@ -915,6 +917,121 @@ impl TrackDisplay {
     #[cfg(test)]
     fn album(&self) -> &str {
         &self.album
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TechnicalMetadataDisplay {
+    bpm: String,
+    bpm_accessibility: String,
+    container: String,
+    codec: String,
+    sample_rate: String,
+    channels: String,
+    bit_depth: String,
+    duration: String,
+    bitrate: String,
+    accessibility_label: String,
+}
+
+impl TechnicalMetadataDisplay {
+    fn new(metadata: Option<&TrackMetadata>, bpm: BpmEstimate) -> Self {
+        let bpm = match bpm {
+            BpmEstimate::Unavailable => ("--".to_owned(), "unavailable".to_owned()),
+            BpmEstimate::Estimating => ("EST".to_owned(), "estimating".to_owned()),
+            BpmEstimate::Locked(bpm) => (bpm.to_string(), bpm.to_string()),
+        };
+        let container = metadata.map_or_else(
+            || "--".to_owned(),
+            |metadata| metadata.container().to_ascii_uppercase(),
+        );
+        let codec = metadata.and_then(TrackMetadata::codec).map_or_else(
+            || "--".to_owned(),
+            |codec| codec.replace('_', " ").to_ascii_uppercase(),
+        );
+        let sample_rate = metadata.map_or_else(
+            || "--".to_owned(),
+            |metadata| format!("{} HZ", metadata.sample_rate()),
+        );
+        let channels = metadata.map_or_else(
+            || "--".to_owned(),
+            |metadata| format!("{} CH", metadata.channels()),
+        );
+        let bit_depth = metadata
+            .and_then(TrackMetadata::bits_per_sample)
+            .map_or_else(|| "--".to_owned(), |bits| format!("{bits} BIT"));
+        let duration = metadata
+            .and_then(TrackMetadata::duration_seconds)
+            .map_or_else(|| "--:--".to_owned(), format_time);
+        let bitrate = "--".to_owned();
+        let accessibility_label = metadata.map_or_else(
+            || {
+                "Audio details. BPM unavailable. Container unavailable. Codec unavailable. Sample rate unavailable. Channels unavailable. Bit depth unavailable. Duration unavailable. Bitrate unavailable."
+                    .to_owned()
+            },
+            |metadata| {
+                let codec = metadata.codec().map_or("unavailable", |value| value);
+                let bits = metadata.bits_per_sample().map_or_else(
+                    || "Bit depth unavailable".to_owned(),
+                    |value| format!("{value} bit"),
+                );
+                let duration = metadata
+                    .duration_seconds()
+                    .map_or_else(|| "unavailable".to_owned(), format_time);
+                format!(
+                    "Audio details. BPM {}. {} container. {} codec. {} hertz. {} channels. {}. Duration {}. Bitrate unavailable.",
+                    bpm.1,
+                    metadata.container().to_ascii_uppercase(),
+                    codec.replace('_', " ").to_ascii_uppercase(),
+                    metadata.sample_rate(),
+                    metadata.channels(),
+                    bits,
+                    duration,
+                )
+            },
+        );
+        Self {
+            bpm: bpm.0,
+            bpm_accessibility: bpm.1,
+            container,
+            codec,
+            sample_rate,
+            channels,
+            bit_depth,
+            duration,
+            bitrate,
+            accessibility_label,
+        }
+    }
+
+    #[cfg(test)]
+    fn bpm(&self) -> &str {
+        &self.bpm
+    }
+
+    #[cfg(test)]
+    fn codec(&self) -> &str {
+        &self.codec
+    }
+
+    #[cfg(test)]
+    fn container(&self) -> &str {
+        &self.container
+    }
+
+    #[cfg(test)]
+    fn bit_depth(&self) -> &str {
+        &self.bit_depth
+    }
+
+    #[cfg(test)]
+    fn bitrate(&self) -> &str {
+        &self.bitrate
+    }
+
+    #[cfg(test)]
+    fn accessibility_label(&self) -> &str {
+        &self.accessibility_label
     }
 }
 
@@ -2041,6 +2158,19 @@ impl Render for PlayerView {
             .session
             .as_ref()
             .and_then(PlaybackSession::try_snapshot);
+        let bpm = if self.session.is_some() {
+            snapshot
+                .as_ref()
+                .map_or(BpmEstimate::Estimating, |snapshot| {
+                    snapshot.analysis().bpm()
+                })
+        } else {
+            BpmEstimate::Unavailable
+        };
+        let technical_metadata = TechnicalMetadataDisplay::new(
+            self.session.as_ref().map(PlaybackSession::metadata),
+            bpm,
+        );
         let cosmic_signal =
             CosmicSignal::from_snapshot(snapshot.as_ref().map(|snapshot| snapshot.analysis()));
         let cosmic_motion = if reduce_motion {
@@ -2389,6 +2519,111 @@ impl Render for PlayerView {
                 .child(div().text_xs().text_color(text_muted).child(album.clone()))
                 .into_any_element()
         };
+        let TechnicalMetadataDisplay {
+            bpm,
+            bpm_accessibility,
+            container,
+            codec,
+            sample_rate,
+            channels,
+            bit_depth,
+            duration: technical_duration,
+            bitrate,
+            accessibility_label,
+        } = technical_metadata;
+        let audio_details = div()
+            .id("audio-details")
+            .test_support()
+            .role(Role::Group)
+            .aria_label(accessibility_label)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_md()
+            .border_1()
+            .border_color(meter_high.opacity(0.48))
+            .bg(panel_raised)
+            .px_3()
+            .py_3()
+            .child(
+                div()
+                    .id("bpm-status")
+                    .test_support()
+                    .role(Role::Status)
+                    .aria_label(format!("BPM {bpm_accessibility}"))
+                    .flex()
+                    .items_end()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(text_muted)
+                            .child("TEMPO"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap_1()
+                            .text_color(meter_high)
+                            .child(div().text_2xl().font_semibold().child(bpm))
+                            .child(div().pb_1().text_xs().child("BPM")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("FORMAT")
+                    .child(
+                        div()
+                            .text_color(text)
+                            .child(format!("{container} / {codec}")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("SIGNAL")
+                    .child(
+                        div()
+                            .text_color(text)
+                            .child(format!("{sample_rate} / {channels}")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("DEPTH")
+                    .child(div().text_color(text).child(bit_depth)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("LENGTH")
+                    .child(div().text_color(text).child(technical_duration)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child("BITRATE")
+                    .child(div().text_color(text).child(bitrate)),
+            );
         let library_visible = self.library_visible;
         let queue_entries = self.queue.entries().to_vec();
         let queue_is_empty = self.queue.is_empty();
@@ -3280,6 +3515,7 @@ impl Render for PlayerView {
                             .gap_4()
                             .child(div().text_xs().text_color(text_muted).child("NOW PLAYING"))
                             .child(now_playing_card)
+                            .child(audio_details)
                             .child(
                                 div()
                                     .flex()
@@ -3542,8 +3778,10 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    use amp808_core::bpm::BpmEstimate;
+
     use crate::app::transport::TransportState;
-    use crate::media::CoverArt;
+    use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
     use crate::remote_transfer::RemoteTransferCoordinator;
@@ -3552,10 +3790,31 @@ mod tests {
     use super::{
         ArtworkCache, ArtworkKey, LibraryCatalogue, LibrarySearchScope, LibrarySortDirection,
         LibrarySortField, LibraryStatus, LibraryTrack, PerformanceProbe, PlaybackToggle,
-        PlayerView, QueuedTrack, TrackDisplay, VisualizerMode, cover_image_from_art,
-        init_skin_theme, library_fuzzy_score, library_metadata_score, milkdrop_status_label,
-        playback_toggle, should_present_milkdrop, signal_status, skin_hsla, sort_library_tracks,
+        PlayerView, QueuedTrack, TechnicalMetadataDisplay, TrackDisplay, VisualizerMode,
+        cover_image_from_art, init_skin_theme, library_fuzzy_score, library_metadata_score,
+        milkdrop_status_label, playback_toggle, should_present_milkdrop, signal_status, skin_hsla,
+        sort_library_tracks,
     };
+
+    #[test]
+    fn technical_metadata_display_uses_decoder_facts_and_honest_fallbacks() {
+        let directory = tempdir().expect("temporary media directory is created");
+        let path = directory.path().join("sidebar.wav");
+        write_stereo_wav(&path, 8_000, 8_000);
+        let metadata = probe_metadata(&path).expect("WAV metadata is readable");
+
+        let display = TechnicalMetadataDisplay::new(Some(&metadata), BpmEstimate::Locked(128));
+
+        assert_eq!(display.bpm(), "128");
+        assert_eq!(display.codec(), "PCM S16LE");
+        assert_eq!(display.container(), "WAVE");
+        assert_eq!(display.bit_depth(), "16 BIT");
+        assert_eq!(display.bitrate(), "--");
+        assert_eq!(
+            display.accessibility_label(),
+            "Audio details. BPM 128. WAVE container. PCM S16LE codec. 8000 hertz. 2 channels. 16 bit. Duration 00:01. Bitrate unavailable."
+        );
+    }
 
     #[test]
     fn library_fuzzy_search_matches_ordered_non_contiguous_characters() {
@@ -4060,6 +4319,31 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_audio_details_expose_honest_unavailable_states(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let details = window.find("audio-details");
+            assert_eq!(details.role(), Some(Role::Group));
+            assert_eq!(
+                details.label(),
+                Some("Audio details. BPM unavailable. Container unavailable. Codec unavailable. Sample rate unavailable. Channels unavailable. Bit depth unavailable. Duration unavailable. Bitrate unavailable.")
+            );
+            let bpm = window.find("bpm-status");
+            assert_eq!(bpm.role(), Some(Role::Status));
+            assert_eq!(bpm.label(), Some("BPM unavailable"));
+        })
+        .expect("window remains available");
     }
 
     #[gpui_kit::test]

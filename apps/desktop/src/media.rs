@@ -44,6 +44,9 @@ pub struct TrackMetadata {
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    container: String,
+    codec: Option<String>,
+    bits_per_sample: Option<u32>,
     sample_rate: u32,
     channels: usize,
     duration_seconds: Option<f64>,
@@ -61,6 +64,18 @@ impl TrackMetadata {
 
     pub fn album(&self) -> Option<&str> {
         self.album.as_deref()
+    }
+
+    pub fn container(&self) -> &str {
+        &self.container
+    }
+
+    pub fn codec(&self) -> Option<&str> {
+        self.codec.as_deref()
+    }
+
+    pub const fn bits_per_sample(&self) -> Option<u32> {
+        self.bits_per_sample
     }
 
     pub const fn sample_rate(&self) -> u32 {
@@ -274,7 +289,8 @@ fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
         )
         .map_err(|error| MediaError::new(path, error))?;
 
-    let (track_id, codec_params, sample_rate, channels, duration_seconds) = {
+    let container = format.format_info().short_name.to_owned();
+    let (track_id, codec_params, codec, bits_per_sample, sample_rate, channels, duration_seconds) = {
         let track = format
             .first_track_known_codec(TrackType::Audio)
             .ok_or_else(|| MediaError::new(path, "no supported audio track"))?;
@@ -300,9 +316,15 @@ fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
                     .num_frames
                     .map(|frames| frames as f64 / f64::from(sample_rate))
             });
+        let codec = symphonia::default::get_codecs()
+            .get_audio_decoder(codec_params.codec)
+            .map(|registration| registration.codec.info.short_name.to_owned());
+        let bits_per_sample = codec_params.bits_per_sample;
         (
             track.id,
             codec_params,
+            codec,
+            bits_per_sample,
             sample_rate,
             channels,
             duration_seconds,
@@ -331,6 +353,9 @@ fn probe(path: &Path) -> Result<ProbedMedia, MediaError> {
             title,
             artist,
             album,
+            container,
+            codec,
+            bits_per_sample,
             sample_rate,
             channels,
             duration_seconds,
@@ -403,6 +428,9 @@ mod tests {
         assert_eq!(metadata.title(), "fixture-tone");
         assert_eq!(metadata.artist(), None);
         assert_eq!(metadata.album(), None);
+        assert_eq!(metadata.container(), "wave");
+        assert_eq!(metadata.codec(), Some("pcm_s16le"));
+        assert_eq!(metadata.bits_per_sample(), Some(16));
         assert_eq!(metadata.sample_rate(), 8_000);
         assert_eq!(metadata.channels(), 2);
         assert!((metadata.duration_seconds().unwrap() - 0.128).abs() < 0.001);

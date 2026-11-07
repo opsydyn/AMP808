@@ -25,6 +25,7 @@ todo = "warn"
 undocumented_unsafe_blocks = "warn"
 
 [dependencies]
+amp808-core = { path = "../../crates/amp808-core" }
 cpal = "0.18"
 dirs = "6"
 gpui-kit = { version = "=0.9.0", features = ["gpui-fast"] }

@@ -25,6 +25,7 @@ todo = "warn"
 undocumented_unsafe_blocks = "warn"
 
 [dependencies]
+amp808-core = { path = "../../crates/amp808-core" }
 # TUI
 ratatui = { version = "0.30", features = ["crossterm", "unstable-widget-ref"] }
 crossterm = "0.29"

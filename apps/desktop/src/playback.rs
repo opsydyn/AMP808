@@ -428,11 +428,12 @@ impl PlaybackSession {
             latest_analysis.clone(),
             analysis_config,
             milkdrop_producer,
+            metadata.sample_rate(),
         )?;
-        let output = open_output(callback, metadata.sample_rate())?;
-        let volume = output.volume_control();
         let (decode_worker, decode_status) =
             DecodeWorker::spawn(decoder, producer, DECODE_CHUNK_SIZE)?;
+        let output = open_output(callback, metadata.sample_rate())?;
+        let volume = output.volume_control();
         let mut transport = Transport::new();
         transport.apply(TransportEvent::LoadRequested)?;
         transport.apply(TransportEvent::Loaded)?;
@@ -492,6 +493,9 @@ impl PlaybackSession {
         let mut next = self.transport.clone();
         next.apply(TransportEvent::PauseRequested)?;
         self.output.pause()?;
+        if let Some(latest) = self.latest_analysis.load() {
+            self.paused_analysis = Arc::new(latest.without_signal(AnalysisAvailability::Paused));
+        }
         self.transport = next;
         Ok(())
     }
@@ -545,6 +549,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tempfile::tempdir;
+
+    use amp808_core::bpm::BpmEstimate;
 
     use crate::analysis::AnalysisAvailability;
     use crate::app::transport::TransportState;
@@ -662,6 +668,40 @@ mod tests {
         session.play().unwrap();
         assert_eq!(session.transport_state(), &TransportState::Playing);
         assert!(observed_output.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn pausing_preserves_the_last_published_bpm() {
+        let directory = tempdir().expect("temporary media directory is available");
+        let path = directory.path().join("pause-bpm.wav");
+        write_click_wav(&path, 44_100, 120.0, 12.0);
+        let mut session =
+            PlaybackSession::open_with_output(&path, |callback, _| Ok(TestOutput::open(callback)))
+                .expect("click-track session opens");
+        let deadline = Instant::now() + Duration::from_secs(4);
+
+        let locked = loop {
+            if let Some(snapshot) = session.try_snapshot()
+                && let BpmEstimate::Locked(bpm) = snapshot.analysis().bpm()
+            {
+                break bpm;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session did not publish a locked BPM before timeout"
+            );
+            std::thread::yield_now();
+        };
+        session.pause().expect("session pauses");
+
+        let paused = session
+            .try_snapshot()
+            .expect("paused snapshot is available");
+        assert_eq!(
+            paused.analysis().availability(),
+            AnalysisAvailability::Paused
+        );
+        assert_eq!(paused.analysis().bpm(), BpmEstimate::Locked(locked));
     }
 
     #[test]
@@ -872,5 +912,40 @@ mod tests {
         }
 
         fs::write(path, bytes).unwrap();
+    }
+
+    fn write_click_wav(path: &Path, sample_rate: u32, bpm: f32, seconds: f32) {
+        let frame_count = (sample_rate as f32 * seconds) as u32;
+        let channel_count = 2_u16;
+        let bits_per_sample = 16_u16;
+        let bytes_per_sample = u32::from(bits_per_sample / 8);
+        let data_size = frame_count * u32::from(channel_count) * bytes_per_sample;
+        let beat_interval = ((60.0 / bpm) * sample_rate as f32) as u32;
+        let pulse_width = (sample_rate / 200).max(1);
+        let mut bytes = Vec::with_capacity(44 + data_size as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&channel_count.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(
+            &(sample_rate * u32::from(channel_count) * bytes_per_sample).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&(channel_count * (bits_per_sample / 8)).to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        for frame in 0..frame_count {
+            let sample = if frame % beat_interval < pulse_width {
+                i16::MAX
+            } else {
+                0
+            };
+            bytes.extend_from_slice(&sample.to_le_bytes());
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("click-track WAV fixture is written");
     }
 }
