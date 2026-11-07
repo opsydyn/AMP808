@@ -14,6 +14,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use crate::app::DesktopApp;
@@ -24,8 +25,10 @@ use crate::media::{CoverArt, probe_cover_art};
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
-use crate::remote::{RemoteSourceEvent, RemoteSourceJob, RemoteSourceState};
+use crate::remote::RemoteSourceState;
+use crate::remote_transfer::RemoteTransferCoordinator;
 use crate::skin::Amp808Skin;
+use crate::yt_dlp::{YtDlpError, YtDlpEvent, YtDlpRequest, YtDlpTransfer};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HardwareButtonTone {
@@ -947,7 +950,11 @@ pub struct PlayerView {
     playlist_error: Option<String>,
     queue: PlaybackQueue,
     queue_advance: QueueAdvance,
-    remote_source_job: Option<RemoteSourceJob>,
+    remote_source_form_visible: bool,
+    remote_source_input: Option<Entity<InputState>>,
+    remote_source_error: Option<String>,
+    remote_source: Option<RemoteTransferCoordinator>,
+    remote_transfer: Option<YtDlpTransfer>,
 }
 
 impl PlayerView {
@@ -984,43 +991,158 @@ impl PlayerView {
             playlist_error: None,
             queue: PlaybackQueue::new(),
             queue_advance: QueueAdvance::new(),
-            remote_source_job: None,
+            remote_source_form_visible: false,
+            remote_source_input: None,
+            remote_source_error: None,
+            remote_source: None,
+            remote_transfer: None,
         }
     }
 
-    fn start_remote_preview(&mut self, cx: &mut Context<Self>) {
-        let mut job = RemoteSourceJob::new("Cosmic relay sample");
-        job.apply(RemoteSourceEvent::InspectionCompleted {
-            total_bytes: Some(1_000),
-        })
-        .expect("preview inspection transition is valid");
-        job.apply(RemoteSourceEvent::DownloadProgressed {
-            received_bytes: 420,
-            total_bytes: Some(1_000),
-        })
-        .expect("preview download progress is valid");
-        self.remote_source_job = Some(job);
+    fn open_remote_source_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.remote_source_input.get_or_insert_with(|| {
+            cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Paste an HTTP(S) audio source URL")
+            })
+        });
+        let focus = input.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        self.remote_source_form_visible = true;
         cx.notify();
     }
 
-    fn cancel_remote_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(job) = self.remote_source_job.as_mut()
-            && job.apply(RemoteSourceEvent::CancelRequested).is_ok()
-        {
+    fn choose_remote_destination(&mut self, cx: &mut Context<Self>) {
+        let source_url = self
+            .remote_source_input
+            .as_ref()
+            .map_or_else(String::new, |input| input.read(cx).value().to_string());
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose where yt-dlp stores the completed file".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let destination = match selection.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.remote_source_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.remote_source_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(destination) = destination else {
+                return;
+            };
+            let transfer =
+                YtDlpRequest::new(source_url, destination).and_then(YtDlpTransfer::start);
+            let _ = this.update(cx, |view, cx| match transfer {
+                Ok(transfer) => {
+                    view.remote_source = Some(RemoteTransferCoordinator::new("yt-dlp source"));
+                    view.remote_transfer = Some(transfer);
+                    view.remote_source_form_visible = false;
+                    view.remote_source_error = None;
+                    view.schedule_remote_poll(cx);
+                    cx.notify();
+                }
+                Err(error) => {
+                    view.remote_source_error = Some(error.to_string());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_remote_source_form(&mut self, cx: &mut Context<Self>) {
+        self.remote_source_form_visible = false;
+        self.remote_source_error = None;
+        cx.notify();
+    }
+
+    fn schedule_remote_poll(&self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_millis(50)).await;
+                let active = this
+                    .update(cx, |view, cx| view.poll_remote_transfer(cx))
+                    .unwrap_or(false);
+                if !active {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn poll_remote_transfer(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        let mut terminal = false;
+        loop {
+            let event = match self.remote_transfer.as_ref().map(YtDlpTransfer::try_recv) {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Empty)) => break,
+                Some(Err(TryRecvError::Disconnected)) => YtDlpEvent::Failed(
+                    YtDlpError::ReadOutput("yt-dlp event channel disconnected".to_owned()),
+                ),
+                None => break,
+            };
+            terminal = matches!(
+                event,
+                YtDlpEvent::Completed { .. } | YtDlpEvent::Cancelled | YtDlpEvent::Failed(_)
+            );
+            let Some(source) = self.remote_source.as_mut() else {
+                self.remote_source_error = Some("yt-dlp transfer state is unavailable".to_owned());
+                terminal = true;
+                break;
+            };
+            if let Err(error) = source.apply(event) {
+                self.remote_source_error = Some(error.to_string());
+                terminal = true;
+            }
+            changed = true;
+            if terminal {
+                break;
+            }
+        }
+        if terminal {
+            self.remote_transfer.take();
+        }
+        if changed || terminal {
+            cx.notify();
+        }
+        self.remote_transfer.is_some()
+    }
+
+    fn cancel_remote_transfer(&mut self, cx: &mut Context<Self>) {
+        if let Some(transfer) = self.remote_transfer.as_ref() {
+            transfer.cancellation_handle().cancel();
             cx.notify();
         }
     }
 
-    fn retry_remote_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(job) = self.remote_source_job.as_mut()
-            && job.apply(RemoteSourceEvent::RetryRequested).is_ok()
-        {
-            cx.notify();
-        }
+    fn retry_remote_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remote_transfer.take();
+        self.remote_source = None;
+        self.remote_source_error = None;
+        self.open_remote_source_form(window, cx);
     }
 
-    fn dismiss_remote_preview(&mut self, cx: &mut Context<Self>) {
-        self.remote_source_job = None;
+    fn dismiss_remote_transfer(&mut self, cx: &mut Context<Self>) {
+        self.remote_transfer.take();
+        self.remote_source = None;
+        self.remote_source_error = None;
         cx.notify();
     }
 
@@ -2144,7 +2266,8 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
-        let remote_source_snapshot = self.remote_source_job.as_ref().map(|job| {
+        let remote_source_snapshot = self.remote_source.as_ref().map(|source| {
+            let job = source.job();
             let (phase, detail) = match job.state() {
                 RemoteSourceState::Inspecting => (
                     "INSPECTING",
@@ -2166,12 +2289,21 @@ impl Render for PlayerView {
                 ),
                 RemoteSourceState::Ready => (
                     "READY",
-                    "Prepared media is ready for playback hand-off".to_owned(),
+                    source.completed_path().map_or_else(
+                        || "Validated local media is ready".to_owned(),
+                        |path| {
+                            let name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("completed media");
+                            format!("Validated local file: {name}")
+                        },
+                    ),
                 ),
                 RemoteSourceState::Failed { message } => ("FAILED", message.clone()),
                 RemoteSourceState::Cancelled => (
                     "CANCELLED",
-                    "yt-dlp preview stopped without changing the library".to_owned(),
+                    "yt-dlp stopped without changing the library".to_owned(),
                 ),
             };
             (
@@ -2767,8 +2899,9 @@ impl Render for PlayerView {
                                 .key_context("Amp808Control")
                                 .label("USE YT-DLP")
                                 .accessibility_label("Use yt-dlp for an audio source")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_remote_preview(cx);
+                                .disabled(self.remote_transfer.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_remote_source_form(window, cx);
                                 })),
                             )
                             .child(
@@ -2803,6 +2936,93 @@ impl Render for PlayerView {
                             ),
                     ),
             )
+            .when(self.remote_source_form_visible, |root| {
+                let input = self
+                    .remote_source_input
+                    .as_ref()
+                    .expect("yt-dlp source input is initialized before rendering")
+                    .clone();
+                root.child(
+                    div()
+                        .id("remote-source-form")
+                        .test_support()
+                        .role(Role::Group)
+                        .aria_label("Use yt-dlp with an HTTP or HTTPS audio source")
+                        .flex()
+                        .items_end()
+                        .gap_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(meter_high.opacity(0.72))
+                        .bg(panel_raised)
+                        .px_4()
+                        .py_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(meter_high)
+                                        .child("YT-DLP SOURCE"),
+                                )
+                                .child(
+                                    hardware_input(&input, "remote-source-url", self.skin)
+                                        .aria_label("yt-dlp source URL"),
+                                ),
+                        )
+                        .child(
+                            hardware_button(
+                                "choose-remote-destination",
+                                HardwareButtonTone::Primary,
+                                self.skin,
+                                cx,
+                            )
+                            .label("CHOOSE LOCATION")
+                            .accessibility_label(
+                                "Choose where yt-dlp stores the completed file",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.choose_remote_destination(cx);
+                            })),
+                        )
+                        .child(
+                            hardware_button(
+                                "cancel-remote-source-form",
+                                HardwareButtonTone::Neutral,
+                                self.skin,
+                                cx,
+                            )
+                            .label("CANCEL")
+                            .accessibility_label("Cancel yt-dlp source entry")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_remote_source_form(cx);
+                            })),
+                        ),
+                )
+            })
+            .when_some(self.remote_source_error.clone(), |root, error| {
+                root.child(
+                    div()
+                        .id("remote-source-error")
+                        .test_support()
+                        .role(Role::Alert)
+                        .aria_label(format!("yt-dlp integration error: {error}"))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(accent)
+                        .bg(panel_raised)
+                        .px_4()
+                        .py_3()
+                        .text_sm()
+                        .text_color(text)
+                        .child(error),
+                )
+            })
             .when_some(remote_source_snapshot, |root, snapshot| {
                 let (source, phase, detail, progress, can_cancel, can_retry) = snapshot;
                 let progress_percent = progress.map(|value| (value * 100.0).round() as u32);
@@ -2819,12 +3039,12 @@ impl Render for PlayerView {
                 let status_label = progress_percent.map_or_else(
                     || {
                         format!(
-                            "yt-dlp integration preview. {phase}: {source}. {detail}. Simulation only; no network or subprocess work is running"
+                            "yt-dlp integration. {phase}: {source}. {detail}"
                         )
                     },
                     |percent| {
                         format!(
-                            "yt-dlp integration preview. {phase}: {source}. {percent} percent complete. {detail}. Simulation only; no network or subprocess work is running"
+                            "yt-dlp integration. {phase}: {source}. {percent} percent complete. {detail}"
                         )
                     },
                 );
@@ -2904,7 +3124,7 @@ impl Render for PlayerView {
                                                 .label("CANCEL")
                                                 .accessibility_label("Cancel yt-dlp transfer")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.cancel_remote_preview(cx);
+                                                    this.cancel_remote_transfer(cx);
                                                 })),
                                             )
                                         })
@@ -2918,8 +3138,8 @@ impl Render for PlayerView {
                                                 )
                                                 .label("RETRY")
                                                 .accessibility_label("Retry yt-dlp integration")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.retry_remote_preview(cx);
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.retry_remote_transfer(window, cx);
                                                 })),
                                             )
                                         })
@@ -2934,7 +3154,7 @@ impl Render for PlayerView {
                                                 .label("DISMISS")
                                                 .accessibility_label("Dismiss yt-dlp integration")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.dismiss_remote_preview(cx);
+                                                    this.dismiss_remote_transfer(cx);
                                                 })),
                                             )
                                         }),
@@ -3326,7 +3546,8 @@ mod tests {
     use crate::media::CoverArt;
     use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
-    use crate::remote::{RemoteSourceEvent, RemoteSourceJob};
+    use crate::remote_transfer::RemoteTransferCoordinator;
+    use crate::yt_dlp::{YtDlpError, YtDlpEvent};
 
     use super::{
         ArtworkCache, ArtworkKey, LibraryCatalogue, LibrarySearchScope, LibrarySortDirection,
@@ -3932,7 +4153,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn remote_preview_exposes_determinate_progress_and_cancel(cx: &mut TestAppContext) {
+    fn yt_dlp_action_opens_an_accessible_source_form(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (window, _view) = cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
@@ -3943,12 +4164,128 @@ mod tests {
 
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
+            window.click("preview-remote-source", cx);
+            window.render_frame(cx);
+
+            assert_eq!(window.find("remote-source-form").role(), Some(Role::Group));
+            assert_eq!(
+                window.find("remote-source-form").label(),
+                Some("Use yt-dlp with an HTTP or HTTPS audio source")
+            );
+            assert_eq!(
+                window.find("remote-source-url").label(),
+                Some("yt-dlp source URL")
+            );
+            assert_eq!(
+                window.find("choose-remote-destination").label(),
+                Some("Choose where yt-dlp stores the completed file")
+            );
+            assert_eq!(
+                window.find("cancel-remote-source-form").label(),
+                Some("Cancel yt-dlp source entry")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn yt_dlp_form_requests_one_destination_directory(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("preview-remote-source", cx);
+            window.render_frame(cx);
+            window.click("choose-remote-destination", cx);
+        })
+        .unwrap();
+
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(!options.files);
+            assert!(options.directories);
+            assert!(!options.multiple);
+            None
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn yt_dlp_form_rejects_option_shaped_input_before_process_start(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let destination = tempfile::tempdir().expect("destination directory is created");
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("preview-remote-source", cx);
+            let input = view
+                .read(cx)
+                .remote_source_input
+                .as_ref()
+                .expect("source input is initialized")
+                .clone();
+            input.update(cx, |input, cx| {
+                input.set_value("--exec=touch /tmp/amp808-nope", window, cx);
+            });
+            window.render_frame(cx);
+            window.click("choose-remote-destination", cx);
+        })
+        .unwrap();
+        cx.simulate_path_prompt_response(|_| Some(vec![destination.path().to_path_buf()]));
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("remote-source-error")
+                    .label()
+                    .is_some_and(|label| label.contains("HTTP(S) URL"))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn remote_transfer_exposes_determinate_progress_and_cancel(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                let mut source = RemoteTransferCoordinator::new("yt-dlp source");
+                source
+                    .apply(YtDlpEvent::Progress {
+                        transferred_bytes: 420,
+                        total_bytes: Some(1_000),
+                    })
+                    .unwrap();
+                view.remote_source = Some(source);
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(
                 window.find("preview-remote-source").label(),
                 Some("Use yt-dlp for an audio source")
             );
-            window.click("preview-remote-source", cx);
-            window.render_frame(cx);
 
             let progress = window.find("remote-source-progress");
             assert_eq!(progress.role(), Some(Role::ProgressIndicator));
@@ -3960,7 +4297,10 @@ mod tests {
                 window
                     .find("remote-source-status")
                     .label()
-                    .is_some_and(|label| !label.to_ascii_lowercase().contains("download"))
+                    .is_some_and(|label| {
+                        !label.to_ascii_lowercase().contains("download")
+                            && !label.to_ascii_lowercase().contains("preview")
+                    })
             );
             assert_eq!(
                 window.find("cancel-remote-source").label(),
@@ -3971,20 +4311,23 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn cancelled_remote_preview_exposes_status_and_dismiss(cx: &mut TestAppContext) {
+    fn confirmed_remote_cancellation_exposes_status_and_dismiss(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (window, _view) = cx.update(|cx| {
+        let (window, view) = cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
                 cx.new(PlayerView::new)
             })
             .unwrap()
         });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                let mut source = RemoteTransferCoordinator::new("yt-dlp source");
+                source.apply(YtDlpEvent::Cancelled).unwrap();
+                view.remote_source = Some(source);
+            });
+        });
 
         cx.update_window(window, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("preview-remote-source", cx);
-            window.render_frame(cx);
-            window.click("cancel-remote-source", cx);
             window.render_frame(cx);
 
             assert!(
@@ -4002,7 +4345,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn failed_remote_preview_exposes_retry(cx: &mut TestAppContext) {
+    fn failed_remote_transfer_exposes_retry_form(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (window, view) = cx.update(|cx| {
             gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
@@ -4012,12 +4355,11 @@ mod tests {
         });
         cx.update(|cx| {
             view.update(cx, |view, _| {
-                let mut job = RemoteSourceJob::new("Cosmic relay sample");
-                job.apply(RemoteSourceEvent::Failed {
-                    message: "Preview relay unavailable".into(),
-                })
-                .unwrap();
-                view.remote_source_job = Some(job);
+                let mut source = RemoteTransferCoordinator::new("yt-dlp source");
+                source
+                    .apply(YtDlpEvent::Failed(YtDlpError::MissingOutput))
+                    .unwrap();
+                view.remote_source = Some(source);
             });
         });
 
@@ -4029,11 +4371,9 @@ mod tests {
             );
             window.click("retry-remote-source", cx);
             window.render_frame(cx);
-            assert!(
-                window
-                    .find("remote-source-status")
-                    .label()
-                    .is_some_and(|label| label.contains("INSPECTING"))
+            assert_eq!(
+                window.find("remote-source-form").label(),
+                Some("Use yt-dlp with an HTTP or HTTPS audio source")
             );
         })
         .unwrap();

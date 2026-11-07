@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -128,6 +128,10 @@ impl YtDlpTransfer {
 
     pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<YtDlpEvent, RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
+    }
+
+    pub(crate) fn try_recv(&self) -> Result<YtDlpEvent, TryRecvError> {
+        self.receiver.try_recv()
     }
 }
 

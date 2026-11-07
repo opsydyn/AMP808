@@ -8,6 +8,7 @@ mod milkdrop;
 mod playback;
 mod queue;
 mod remote;
+mod remote_transfer;
 mod skin;
 mod ui;
 mod yt_dlp;

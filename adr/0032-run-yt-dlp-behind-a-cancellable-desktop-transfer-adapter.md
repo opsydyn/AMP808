@@ -121,6 +121,21 @@ formatting, and whitespace checks passed. No real provider request was made, and
 installed on the qualification host, so live SoundCloud or other provider behavior remains an
 explicit later acceptance gate.
 
+### 2026-11-07 UI coordinator follow-up
+
+The accepted boundary now has a visible GPUI coordinator. `USE YT-DLP` opens an accessible
+HTTP(S)-source form, validates the source before process startup, and asks the user for exactly one
+destination directory. A private `remote_transfer` coordinator translates typed adapter events
+into ADR-0031's provider-neutral lifecycle; GPUI polls the adapter channel without blocking the UI
+thread, and cancellation remains pending until the adapter confirms process termination. Success
+exposes only the adapter-validated local path. It does not imply playback, queue insertion, library
+import, FFmpeg conversion, or a successful live-provider qualification.
+
+The follow-up qualification passed 142 base desktop tests and 144 projectM-enabled tests. Tests
+cover the accessible form, directory picker, invalid option-shaped input, determinate progress,
+validated completion, confirmed cancellation, failure, and retry. No live provider request was
+made; the host still has no verified `yt-dlp` installation.
+
 ## Options Considered
 
 ### Copy the Ratatui resolver and temporary-file tracker
