@@ -206,6 +206,23 @@ copyright status as technical metadata.
   Light card. Failed-preset recovery, keyboard traversal, and spoken VoiceOver output remain
   deliberately unchecked for this gallery slice.
 
+### 2026-11-07 keyboard and recovery follow-up
+
+- A GPUI regression test verifies that the virtual gallery exposes one selected-row tab stop,
+  Up/Down changes selection without previewing, focus follows the selected row, and Tab leaves the
+  virtual rows for the Preview action rather than walking every card.
+- A gallery integration test loads an invalid UTF-8 local preset through the asynchronous preview
+  path, verifies the visible error alert, and verifies that First Light remains the applied preset.
+  The existing projectM-host test separately verifies renderer rejection restores the last-known-
+  good preset.
+- The base desktop suite passed 155 tests and the `milkdrop-projectm` suite passed 157 tests.
+  Strict desktop test-target Clippy, `cargo fmt --all -- --check`, and `git diff --check` passed.
+- Native macOS acceptance imported the bundled preset folder, moved selection from First Light to
+  the local preset with Down, then used Tab and Return to activate Preview. The player exposed
+  `Previewing: amp808-first-light` while PCM and MilkDrop remained live.
+- Spoken VoiceOver output and a native rejected-preset injection remain unchecked. The broader
+  native-acceptance checkbox therefore remains open.
+
 - ADR-0024: [Host projectM in a native macOS OpenGL subview](0024-host-projectm-in-a-native-macos-opengl-subview.md)
 - ADR-0025: [Add a native cosmic Metal underlay beneath GPUI](0025-add-a-native-cosmic-metal-underlay.md)
 - projectM collection: <https://github.com/projectM-visualizer/presets-cream-of-the-crop>

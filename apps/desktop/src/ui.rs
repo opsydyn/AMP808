@@ -6,8 +6,8 @@ use gpui_kit::component::table::{
 };
 use gpui_kit::{
     App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, Image, ImageFormat, IntoElement,
-    KeyBinding, ObjectFit, PathPromptOptions, Render, Role, SharedString, StyledImage,
-    Subscription, TestSupportExt, UniformListScrollHandle, WeakEntity, Window,
+    KeyBinding, ObjectFit, PathPromptOptions, Render, Role, ScrollStrategy, SharedString,
+    StyledImage, Subscription, TestSupportExt, UniformListScrollHandle, WeakEntity, Window,
     canvas as gpui_canvas, deferred, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use std::cmp::Ordering;
@@ -807,6 +807,8 @@ gpui_kit::actions!(
         ToggleVisualizer,
         ToggleLibrary,
         ActivateLibraryTrack,
+        SelectPreviousPreset,
+        SelectNextPreset,
     ]
 );
 
@@ -820,11 +822,13 @@ pub fn init_keyboard_shortcuts(cx: &mut App) {
         ),
         KeyBinding::new("left", SeekBack, Some("Amp808Player")),
         KeyBinding::new("right", SeekForward, Some("Amp808Player")),
-        KeyBinding::new("down", VolumeDown, Some("Amp808Player")),
-        KeyBinding::new("up", VolumeUp, Some("Amp808Player")),
+        KeyBinding::new("down", VolumeDown, Some("Amp808Player && !PresetGallery")),
+        KeyBinding::new("up", VolumeUp, Some("Amp808Player && !PresetGallery")),
         KeyBinding::new("v", ToggleVisualizer, Some("Amp808Player")),
         KeyBinding::new("l", ToggleLibrary, Some("Amp808Player")),
         KeyBinding::new("enter", ActivateLibraryTrack, Some("DataTable")),
+        KeyBinding::new("up", SelectPreviousPreset, Some("PresetGallery")),
+        KeyBinding::new("down", SelectNextPreset, Some("PresetGallery")),
     ]);
 }
 
@@ -1042,6 +1046,12 @@ struct PresetPreviewState {
     previewed: Option<MilkdropPreset>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresetSelectionDirection {
+    Previous,
+    Next,
+}
+
 impl PresetPreviewState {
     fn new(applied: MilkdropPreset) -> Self {
         Self {
@@ -1099,6 +1109,7 @@ pub struct PlayerView {
     preset_search_subscription: Option<Subscription>,
     preset_category: Option<String>,
     preset_selected_id: Option<String>,
+    preset_focus: FocusHandle,
     preset_scroll: UniformListScrollHandle,
     preset_preview: PresetPreviewState,
     preset_folder_loading: bool,
@@ -1155,6 +1166,7 @@ impl PlayerView {
             preset_search_subscription: None,
             preset_category: None,
             preset_selected_id,
+            preset_focus: cx.focus_handle().tab_stop(true),
             preset_scroll: UniformListScrollHandle::new(),
             preset_preview: PresetPreviewState::new(MilkdropPreset::first_light()),
             preset_folder_loading: false,
@@ -1505,6 +1517,34 @@ impl PlayerView {
 
     fn select_preset(&mut self, id: String, cx: &mut Context<Self>) {
         self.preset_selected_id = Some(id);
+        cx.notify();
+    }
+
+    fn move_preset_selection(
+        &mut self,
+        direction: PresetSelectionDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(last_row) = self.preset_visible_indices.len().checked_sub(1) else {
+            return;
+        };
+        let current_row = self
+            .preset_selected_id
+            .as_deref()
+            .and_then(|selected| {
+                self.preset_visible_indices.iter().position(|entry_index| {
+                    self.preset_catalog.entries()[*entry_index].id() == selected
+                })
+            })
+            .unwrap_or(0);
+        let next_row = match direction {
+            PresetSelectionDirection::Previous => current_row.saturating_sub(1),
+            PresetSelectionDirection::Next => current_row.saturating_add(1).min(last_row),
+        };
+        let entry_index = self.preset_visible_indices[next_row];
+        self.preset_selected_id = Some(self.preset_catalog.entries()[entry_index].id().to_owned());
+        self.preset_scroll
+            .scroll_to_item(next_row, ScrollStrategy::Nearest);
         cx.notify();
     }
 
@@ -2648,26 +2688,33 @@ impl Render for PlayerView {
                             let title = entry.title().to_owned();
                             let category = entry.category().to_owned();
                             let selected = this.preset_selected_id.as_deref() == Some(id.as_str());
-                            Some(
-                                hardware_button(
-                                    ("preset-gallery-row", row),
-                                    if selected {
-                                        HardwareButtonTone::Primary
-                                    } else {
-                                        HardwareButtonTone::Neutral
-                                    },
-                                    this.skin,
-                                    cx,
-                                )
-                                .w_full()
-                                .label(format!("{title}  ·  {category}"))
-                                .accessibility_label(format!("Select {title}, {category} preset"))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.select_preset(id.clone(), cx);
-                                    },
-                                )),
+                            let preset_focus = this.preset_focus.clone();
+                            let button = hardware_button(
+                                ("preset-gallery-row", row),
+                                if selected {
+                                    HardwareButtonTone::Primary
+                                } else {
+                                    HardwareButtonTone::Neutral
+                                },
+                                this.skin,
+                                cx,
                             )
+                            .tab_stop(selected)
+                            .w_full()
+                            .label(format!("{title}  ·  {category}"))
+                            .accessibility_label(format!("Select {title}, {category} preset"))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.select_preset(id.clone(), cx);
+                                    window.focus(&preset_focus, cx);
+                                },
+                            ));
+                            let button = if selected {
+                                button.track_focus(&this.preset_focus)
+                            } else {
+                                button
+                            };
+                            Some(div().w_full().key_context("PresetGallery").child(button))
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -3588,6 +3635,12 @@ impl Render for PlayerView {
             }))
             .on_action(cx.listener(|this, _: &ActivateLibraryTrack, _, cx| {
                 this.activate_selected_library_track(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPreviousPreset, _, cx| {
+                this.move_preset_selection(PresetSelectionDirection::Previous, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNextPreset, _, cx| {
+                this.move_preset_selection(PresetSelectionDirection::Next, cx);
             }))
             .flex()
             .flex_col()
@@ -5835,6 +5888,195 @@ mod tests {
             assert_eq!(window.find("restore-applied-preset").disabled(), Some(true));
         })
         .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn preset_gallery_uses_one_tab_stop_and_arrow_selection(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        fs::create_dir(directory.path().join("Fractal")).expect("fractal category is created");
+        fs::write(
+            directory.path().join("Fractal/Cosmic Bloom.milk"),
+            "[preset00]\n",
+        )
+        .expect("local preset is written");
+        fs::create_dir(directory.path().join("Particles")).expect("particle category is created");
+        fs::write(
+            directory.path().join("Particles/Nebula Tide.milk"),
+            "[preset00]\n",
+        )
+        .expect("second local preset is written");
+        let local_presets = crate::preset_catalog::PresetCatalog::discover_local(directory.path())
+            .expect("local presets are discovered");
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::init_keyboard_shortcuts(cx);
+        });
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let view = cx.new(PlayerView::new);
+                    window.focus(&view.read(cx).focus_handle(cx), cx);
+                    view
+                },
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_catalog.replace_local(local_presets);
+                view.refresh_preset_gallery(cx);
+            });
+        });
+
+        let mut first_row_reached = false;
+        for _ in 0..24 {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                if window.find(("preset-gallery-row", 0_usize)).focused() == Some(true) {
+                    first_row_reached = true;
+                } else {
+                    window.press("tab", cx);
+                }
+            })
+            .expect("test window remains available");
+            cx.run_until_parked();
+            if first_row_reached {
+                break;
+            }
+        }
+        assert!(first_row_reached, "the virtual gallery is reachable by Tab");
+
+        let (first_id, second_id) = cx.update(|cx| {
+            let view = view.read(cx);
+            let first_entry_index = *view
+                .preset_visible_indices
+                .first()
+                .expect("the gallery contains a first preset");
+            let entry_index = *view
+                .preset_visible_indices
+                .get(1)
+                .expect("the gallery contains a second preset");
+            (
+                view.preset_catalog.entries()[first_entry_index]
+                    .id()
+                    .to_owned(),
+                view.preset_catalog.entries()[entry_index].id().to_owned(),
+            )
+        });
+        cx.update_window(window, |_, window, cx| window.press("down", cx))
+            .expect("test window remains available");
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).preset_selected_id.as_deref(),
+                Some(second_id.as_str()),
+                "Down selects the next visible preset without previewing it"
+            );
+        });
+        cx.update_window(window, |_, window, cx| window.press("up", cx))
+            .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                view.read(cx).preset_selected_id.as_deref(),
+                Some(first_id.as_str()),
+                "Up selects the previous visible preset without previewing it"
+            );
+        });
+        cx.update_window(window, |_, window, cx| window.press("down", cx))
+            .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("preset-gallery-row", 1_usize)).focused(),
+                Some(true),
+                "focus follows the selected virtual row"
+            );
+            window.press("tab", cx);
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let focus_states = [
+                ("row 0", window.find(("preset-gallery-row", 0_usize)).focused()),
+                ("row 1", window.find(("preset-gallery-row", 1_usize)).focused()),
+                ("row 2", window.find(("preset-gallery-row", 2_usize)).focused()),
+            ];
+            assert!(
+                focus_states.iter().all(|(_, focused)| *focused == Some(false)),
+                "the next Tab leaves the virtual list instead of visiting another row: {focus_states:?}"
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn failed_gallery_preview_preserves_applied_preset_and_exposes_alert(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let invalid_path = directory.path().join("Broken Signal.milk");
+        fs::write(&invalid_path, [0xff, 0xfe]).expect("invalid UTF-8 preset is written");
+        let local_presets = crate::preset_catalog::PresetCatalog::discover_local(directory.path())
+            .expect("invalid preset metadata is still discoverable");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(PlayerView::new),
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_catalog.replace_local(local_presets);
+                view.refresh_preset_gallery(cx);
+                view.preset_selected_id = view
+                    .preset_catalog
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.title() == "Broken Signal")
+                    .map(|entry| entry.id().to_owned());
+                view.preview_selected_preset(cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert_eq!(
+                alert.label(),
+                Some("MilkDrop preset error: preset is not valid UTF-8 text")
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.preset_preview.applied().name(), "First Light");
+            assert_eq!(view.preset_preview.previewed(), None);
+        });
     }
 
     #[gpui_kit::test]
