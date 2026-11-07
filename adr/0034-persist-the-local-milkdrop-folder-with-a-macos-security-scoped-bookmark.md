@@ -169,8 +169,8 @@ closed until the application has a production packaging pipeline and identity.
 - [x] Bookmark writes are atomic and user-only on macOS.
 - [x] Corrupt bookmark bytes produce a structured error without a panic.
 - [x] Every successful security-scope start is balanced by `Drop`.
-- [ ] Stale resolution renews the persisted bookmark before the restored folder is reported ready.
-- [ ] Add Folder retains its previous working catalogue and grant when create, scan, or save fails.
+- [x] Stale resolution renews the persisted bookmark before the restored folder is reported ready.
+- [x] Add Folder retains its previous working catalogue and grant when create, scan, or save fails.
 - [x] Relaunch restoration rescans off the GPUI render path and exposes an accessible status.
 - [x] Restore failure leaves First Light searchable and exposes an accessible alert.
 - [x] No Foundation type, bookmark byte payload, or music-library database type crosses the
@@ -235,16 +235,21 @@ closed until the application has a production packaging pipeline and identity.
   successful `startAccessingSecurityScopedResource` sets the guard state balanced by `Drop`.
 - GPUI coverage proved corrupt restoration retains First Light and exposes an alert, Add Folder
   persists a bookmark, and a fresh `PlayerView` restores and rescans the selected folder.
-- Automated gates passed with 159 default-feature tests and 164 all-feature/projectM tests, strict
+- Automated gates passed with 164 default-feature tests and 169 all-feature/projectM tests, strict
   test-target Clippy, formatting, diff checks, and entitlement plist linting.
+- A moved-folder integration test proved Foundation resolves the relocated directory and reports
+  stale bookmark bytes. GPUI restoration then proved the renewed bookmark atomically replaces the
+  stale payload and resolves without another renewal.
+- Add Folder failure tests used real Foundation and filesystem failures at bookmark creation,
+  recursive preset scanning, and atomic bookmark persistence. Each retained the active access
+  guard, working gallery entry, and previous bookmark while exposing an accessible error.
 - Native same-bundle evidence used one ad-hoc signed app with the declared bookmark entitlements.
   After selecting the bundled preset folder and terminating the process, the relaunched app
   exposed `Restored 1 local MilkDrop presets from .../apps/desktop/assets/presets`. The generated
   868-byte mode-`0600` acceptance bookmark was then deleted; the pre-existing library database was
   left untouched.
-- Still open: direct stale-bookmark renewal evidence, failure-injection coverage for replacement
-  create/scan/save, native preview after restored access, and production stable-signing plus App
-  Sandbox enforcement.
+- Still open: native preview after restored access and production stable-signing plus App Sandbox
+  enforcement.
 
 - ADR-0022: [Add the macOS-first desktop player](0022-add-amp808-r3tr0-macos-desktop-player.md)
 - ADR-0033: [Add a local-first MilkDrop preset gallery](0033-add-a-local-first-milkdrop-preset-gallery.md)

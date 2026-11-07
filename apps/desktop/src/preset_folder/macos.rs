@@ -146,7 +146,11 @@ fn start_access(url: Retained<NSURL>) -> Result<PresetFolderAccess, PresetFolder
 
 #[cfg(test)]
 mod tests {
-    use super::restore_bookmark;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{create_bookmark, restore_bookmark};
 
     #[test]
     fn corrupt_bookmark_is_rejected_without_panicking() {
@@ -156,6 +160,33 @@ mod tests {
         assert!(
             error.to_string().contains("resolve preset folder bookmark"),
             "error identifies the failed operation: {error}"
+        );
+    }
+
+    #[test]
+    fn moved_folder_resolves_and_renews_its_stale_bookmark() {
+        let directory = tempdir().expect("temporary bookmark directory is created");
+        let original = directory.path().join("Original Presets");
+        let moved = directory.path().join("Moved Presets");
+        fs::create_dir(&original).expect("original preset folder is created");
+        let prepared = create_bookmark(&original).expect("bookmark is created");
+        let bookmark = prepared.bookmark().to_vec();
+        drop(prepared);
+
+        fs::rename(&original, &moved).expect("preset folder is moved on the same volume");
+        let restored = restore_bookmark(&bookmark).expect("moved bookmark resolves");
+        let moved = moved
+            .canonicalize()
+            .expect("moved preset folder has a canonical path");
+
+        assert_eq!(
+            restored.access().path(),
+            moved,
+            "bookmark follows the selected folder after it moves"
+        );
+        assert!(
+            restored.refreshed_bookmark().is_some(),
+            "Foundation marks a moved bookmark stale so AMP808 can renew it"
         );
     }
 }

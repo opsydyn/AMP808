@@ -6277,6 +6277,327 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn stale_restored_preset_folder_renews_the_persisted_bookmark(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let original = directory.path().join("Original Presets");
+        let moved = directory.path().join("Moved Presets");
+        fs::create_dir(&original).expect("original preset folder is created");
+        fs::write(original.join("Return Signal.milk"), "[preset00]\n")
+            .expect("local preset is written");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let prepared = crate::preset_folder::create_bookmark(&original)
+            .expect("selected folder produces a bookmark");
+        let stale_bookmark = prepared.bookmark().to_vec();
+        store
+            .save(&stale_bookmark)
+            .expect("original bookmark is persisted");
+        drop(prepared);
+        fs::rename(&original, &moved).expect("preset folder is moved on the same volume");
+
+        cx.update(gpui_kit::init);
+        let view = cx.update(|cx| cx.new(PlayerView::new));
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.restore_preset_folder(store.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let renewed_bookmark = store
+            .load()
+            .expect("renewed bookmark reopens")
+            .expect("renewed bookmark is present");
+        assert_ne!(
+            renewed_bookmark, stale_bookmark,
+            "stale bookmark bytes are atomically replaced"
+        );
+        let renewed = crate::preset_folder::restore_bookmark(&renewed_bookmark)
+            .expect("renewed bookmark resolves");
+        assert_eq!(
+            renewed.access().path(),
+            moved
+                .canonicalize()
+                .expect("moved preset folder has a canonical path")
+        );
+        assert_eq!(
+            renewed.refreshed_bookmark(),
+            None,
+            "the persisted replacement is no longer stale"
+        );
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert!(view.preset_folder_access.is_some());
+            assert_eq!(view.preset_catalog.entries().len(), 2);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn failed_preset_folder_creation_preserves_the_last_working_folder(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let working = directory.path().join("Working Presets");
+        fs::create_dir(&working).expect("working preset folder is created");
+        fs::write(working.join("Existing Signal.milk"), "[preset00]\n")
+            .expect("working preset is written");
+        let missing = directory.path().join("Missing Presets");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let prepared = crate::preset_folder::create_bookmark(&working)
+            .expect("working folder produces a bookmark");
+        let working_bookmark = prepared.bookmark().to_vec();
+        store
+            .save(&working_bookmark)
+            .expect("working bookmark is persisted");
+        let working_entries = crate::preset_catalog::PresetCatalog::discover_local(&working)
+            .expect("working presets are discovered");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_bookmark_store = Some(store.clone());
+                view.preset_folder_access = Some(prepared.into_access());
+                view.preset_catalog.replace_local(working_entries);
+                view.refresh_preset_gallery(cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("add-preset-folder", cx);
+        })
+        .expect("test window remains available");
+        cx.simulate_path_prompt_response(move |_| Some(vec![missing]));
+        cx.run_until_parked();
+
+        assert_eq!(
+            store.load().expect("working bookmark reopens"),
+            Some(working_bookmark),
+            "failed creation does not replace the persisted grant"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            let label = alert
+                .label()
+                .expect("creation failure has an accessible label");
+            assert!(
+                label.contains("create preset folder bookmark"),
+                "the creation failure remains visible: {label}"
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.preset_folder_access
+                    .as_ref()
+                    .expect("working access remains active")
+                    .path(),
+                working
+            );
+            assert!(
+                view.preset_catalog
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.title() == "Existing Signal"),
+                "the working preset remains in the gallery"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn failed_preset_folder_scan_preserves_the_last_working_folder(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().expect("temporary preset directory is created");
+        let working = directory.path().join("Working Presets");
+        fs::create_dir(&working).expect("working preset folder is created");
+        fs::write(working.join("Existing Signal.milk"), "[preset00]\n")
+            .expect("working preset is written");
+        let replacement = directory.path().join("Replacement Presets");
+        let blocked = replacement.join("Blocked Category");
+        fs::create_dir(&replacement).expect("replacement preset folder is created");
+        fs::create_dir(&blocked).expect("blocked category is created");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
+            .expect("blocked category permissions are set");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let prepared = crate::preset_folder::create_bookmark(&working)
+            .expect("working folder produces a bookmark");
+        let working_bookmark = prepared.bookmark().to_vec();
+        store
+            .save(&working_bookmark)
+            .expect("working bookmark is persisted");
+        let working_entries = crate::preset_catalog::PresetCatalog::discover_local(&working)
+            .expect("working presets are discovered");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_bookmark_store = Some(store.clone());
+                view.preset_folder_access = Some(prepared.into_access());
+                view.preset_catalog.replace_local(working_entries);
+                view.refresh_preset_gallery(cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("add-preset-folder", cx);
+        })
+        .expect("test window remains available");
+        cx.simulate_path_prompt_response(move |_| Some(vec![replacement]));
+        cx.run_until_parked();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700))
+            .expect("blocked category permissions are restored");
+
+        assert_eq!(
+            store.load().expect("working bookmark reopens"),
+            Some(working_bookmark),
+            "failed scanning does not replace the persisted grant"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            let label = alert.label().expect("scan failure has an accessible label");
+            assert!(
+                label.contains("could not scan preset folder"),
+                "the scan failure remains visible: {label}"
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.preset_folder_access
+                    .as_ref()
+                    .expect("working access remains active")
+                    .path(),
+                working
+            );
+            assert!(
+                view.preset_catalog
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.title() == "Existing Signal"),
+                "the working preset remains in the gallery"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn failed_preset_folder_save_preserves_the_last_working_folder(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().expect("temporary preset directory is created");
+        let working = directory.path().join("Working Presets");
+        fs::create_dir(&working).expect("working preset folder is created");
+        fs::write(working.join("Existing Signal.milk"), "[preset00]\n")
+            .expect("working preset is written");
+        let replacement = directory.path().join("Replacement Presets");
+        fs::create_dir(&replacement).expect("replacement preset folder is created");
+        fs::write(replacement.join("New Signal.milk"), "[preset00]\n")
+            .expect("replacement preset is written");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let prepared = crate::preset_folder::create_bookmark(&working)
+            .expect("working folder produces a bookmark");
+        let working_bookmark = prepared.bookmark().to_vec();
+        store
+            .save(&working_bookmark)
+            .expect("working bookmark is persisted");
+        let working_entries = crate::preset_catalog::PresetCatalog::discover_local(&working)
+            .expect("working presets are discovered");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500))
+            .expect("bookmark directory is made read-only");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_bookmark_store = Some(store.clone());
+                view.preset_folder_access = Some(prepared.into_access());
+                view.preset_catalog.replace_local(working_entries);
+                view.refresh_preset_gallery(cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("add-preset-folder", cx);
+        })
+        .expect("test window remains available");
+        cx.simulate_path_prompt_response(move |_| Some(vec![replacement]));
+        cx.run_until_parked();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("bookmark directory permissions are restored");
+
+        assert_eq!(
+            store.load().expect("working bookmark reopens"),
+            Some(working_bookmark),
+            "failed persistence does not replace the previous bookmark"
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            let label = alert.label().expect("save failure has an accessible label");
+            assert!(
+                label.contains("create temporary bookmark"),
+                "the save failure remains visible: {label}"
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(
+                view.preset_folder_access
+                    .as_ref()
+                    .expect("working access remains active")
+                    .path(),
+                working
+            );
+            assert!(
+                view.preset_catalog
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.title() == "Existing Signal"),
+                "the working preset remains in the gallery"
+            );
+            assert!(
+                view.preset_catalog
+                    .entries()
+                    .iter()
+                    .all(|entry| entry.title() != "New Signal"),
+                "the undurable replacement is not published"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
     fn preset_gallery_adds_a_local_folder_then_filters_and_searches_it(cx: &mut TestAppContext) {
         let directory = tempdir().expect("temporary preset directory is created");
         fs::create_dir(directory.path().join("Fractal")).expect("fractal category is created");
