@@ -148,7 +148,8 @@ impl LibraryCatalogue {
         let connection = self.connect()?;
         let pattern = format!("%{}%", query.to_lowercase());
         let mut statement = connection.prepare(
-            "SELECT id, path, title, artist, album, duration_seconds, sample_rate, channels
+            "SELECT id, path, title, artist, album, duration_seconds, sample_rate, channels,
+                    file_size, modified_nanos
              FROM library_tracks
              WHERE ?1 = '%%'
                 OR LOWER(title) LIKE ?1
@@ -351,7 +352,8 @@ impl LibraryCatalogue {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT tracks.id, tracks.path, tracks.title, tracks.artist, tracks.album,
-                    tracks.duration_seconds, tracks.sample_rate, tracks.channels
+                    tracks.duration_seconds, tracks.sample_rate, tracks.channels,
+                    tracks.file_size, tracks.modified_nanos
              FROM local_playlist_entries AS entries
              INNER JOIN library_tracks AS tracks ON tracks.id = entries.track_id
              WHERE entries.playlist_id = ?1
@@ -381,6 +383,8 @@ pub(crate) struct LibraryTrack {
     duration_seconds: Option<f64>,
     sample_rate: u32,
     channels: usize,
+    file_size: i64,
+    modified_nanos: i64,
 }
 
 impl LibraryTrack {
@@ -414,6 +418,10 @@ impl LibraryTrack {
 
     pub(crate) const fn channels(&self) -> usize {
         self.channels
+    }
+
+    pub(crate) const fn file_fingerprint(&self) -> (i64, i64) {
+        (self.file_size, self.modified_nanos)
     }
 }
 
@@ -473,6 +481,8 @@ fn read_library_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryTrack>
         sample_rate: row.get::<_, u32>(6)?,
         channels: usize::try_from(row.get::<_, u32>(7)?)
             .expect("u32 channel count fits usize on supported desktop targets"),
+        file_size: row.get(8)?,
+        modified_nanos: row.get(9)?,
     })
 }
 
@@ -780,6 +790,7 @@ mod tests {
         assert_eq!(version, 2);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].title(), "Signal Bloom");
+        assert_eq!(tracks[0].file_fingerprint(), (1024, 99));
     }
 
     #[test]

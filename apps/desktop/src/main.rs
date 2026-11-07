@@ -7,8 +7,10 @@ mod media;
 mod milkdrop;
 mod playback;
 mod queue;
+mod remote;
 mod skin;
 mod ui;
+mod yt_dlp;
 
 fn main() {
     use gpui_kit::{

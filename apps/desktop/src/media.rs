@@ -140,6 +140,10 @@ pub(crate) fn probe_metadata(path: impl AsRef<Path>) -> Result<TrackMetadata, Me
     probe(path.as_ref()).map(|probed| probed.metadata)
 }
 
+pub(crate) fn probe_cover_art(path: impl AsRef<Path>) -> Result<Option<CoverArt>, MediaError> {
+    probe(path.as_ref()).map(|probed| probed.metadata.cover_art)
+}
+
 impl fmt::Debug for StreamingDecoder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -384,7 +388,9 @@ mod tests {
     use symphonia::core::meta::{StandardVisualKey, Visual};
     use tempfile::tempdir;
 
-    use super::{MAX_COVER_ART_BYTES, StreamingDecoder, extract_cover_art_from_visuals};
+    use super::{
+        MAX_COVER_ART_BYTES, StreamingDecoder, extract_cover_art_from_visuals, probe_cover_art,
+    };
 
     #[test]
     fn local_wav_reports_technical_metadata_and_filename_title() {
@@ -461,6 +467,12 @@ mod tests {
 
         assert_eq!(art.media_type(), "image/png");
         assert_eq!(art.data(), picture);
+
+        let probed_art = probe_cover_art(&path)
+            .expect("tagged WAV metadata probe succeeds")
+            .expect("metadata-only probe retains embedded artwork");
+        assert_eq!(probed_art.media_type(), "image/png");
+        assert_eq!(probed_art.data(), picture);
     }
 
     fn syncsafe(value: usize) -> [u8; 4] {

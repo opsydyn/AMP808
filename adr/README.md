@@ -46,3 +46,7 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0026: Add a persistent local music catalogue to AMP808-R3TR0](0026-add-a-persistent-local-music-catalogue.md) (accepted, 2026-11-06)
 - [ADR-0027: Upgrade GPUI Kit to restore native macOS launch](0027-upgrade-gpui-kit-to-restore-native-macos-launch.md) (accepted, 2026-11-06)
 - [ADR-0028: Add persistent local playlists and a session playback queue](0028-add-persistent-local-playlists-and-a-session-queue.md) (accepted, 2026-11-06)
+- [ADR-0029: Cache embedded artwork for local-library thumbnails](0029-cache-embedded-artwork-for-local-library-thumbnails.md) (accepted, 2026-11-06)
+- [ADR-0030: Use GPUI Kit DataTable for the local library](0030-use-gpui-kit-data-table-for-the-local-library.md) (accepted, 2026-11-07)
+- [ADR-0031: Stage remote media acquisition behind a provider-agnostic desktop job](0031-stage-remote-media-acquisition-behind-a-provider-agnostic-desktop-job.md) (accepted, 2026-11-07)
+- [ADR-0032: Run yt-dlp behind a cancellable desktop transfer adapter](0032-run-yt-dlp-behind-a-cancellable-desktop-transfer-adapter.md) (accepted, 2026-11-07)

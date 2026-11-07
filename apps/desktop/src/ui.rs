@@ -1,11 +1,18 @@
 use gpui_kit::base::{Disableable, StyledExt, box_shadow};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::table::{
+    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+};
 use gpui_kit::{
     App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, Image, ImageFormat, IntoElement,
-    KeyBinding, ObjectFit, PathPromptOptions, Render, Role, StyledImage, Subscription,
-    TestSupportExt, Window, canvas as gpui_canvas, deferred, div, img, prelude::*, px, rgb,
+    KeyBinding, ObjectFit, PathPromptOptions, Render, Role, SharedString, StyledImage,
+    Subscription, TestSupportExt, WeakEntity, Window, canvas as gpui_canvas, deferred, div, img,
+    prelude::*, px, relative, rgb,
 };
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,10 +20,11 @@ use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
-use crate::media::CoverArt;
+use crate::media::{CoverArt, probe_cover_art};
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
+use crate::remote::{RemoteSourceEvent, RemoteSourceJob, RemoteSourceState};
 use crate::skin::Amp808Skin;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +43,665 @@ fn cover_image_from_art(art: Option<&CoverArt>) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(format, art.data().to_vec())))
 }
 
+fn library_fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
+    let query = query.to_lowercase();
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let candidate = candidate.to_lowercase();
+    let candidate_chars = candidate.chars().collect::<Vec<_>>();
+    let mut cursor = 0;
+    let mut previous_match = None;
+    let mut score = 0_i64;
+
+    for needle in query.chars() {
+        let offset = candidate_chars[cursor..]
+            .iter()
+            .position(|character| *character == needle)?;
+        let matched = cursor + offset;
+        score += 10;
+        if previous_match.is_some_and(|previous| matched == previous + 1) {
+            score += 12;
+        }
+        if matched == 0
+            || candidate_chars
+                .get(matched.wrapping_sub(1))
+                .is_some_and(|character| !character.is_alphanumeric())
+        {
+            score += 8;
+        }
+        score -= i64::try_from(offset).unwrap_or(i64::MAX);
+        previous_match = Some(matched);
+        cursor = matched + 1;
+    }
+
+    if candidate.contains(&query) {
+        score += 40;
+    }
+    Some(score)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LibrarySearchScope {
+    All,
+    Title,
+    Artist,
+    Album,
+}
+
+impl LibrarySearchScope {
+    const ALL: [Self; 4] = [Self::All, Self::Title, Self::Artist, Self::Album];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Title => "TITLE",
+            Self::Artist => "ARTIST",
+            Self::Album => "ALBUM",
+        }
+    }
+}
+
+fn library_metadata_score(
+    query: &str,
+    scope: LibrarySearchScope,
+    title: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Option<i64> {
+    let fields = match scope {
+        LibrarySearchScope::All => [Some(title), artist, album],
+        LibrarySearchScope::Title => [Some(title), None, None],
+        LibrarySearchScope::Artist => [artist, None, None],
+        LibrarySearchScope::Album => [album, None, None],
+    };
+
+    query.split_whitespace().try_fold(0_i64, |total, term| {
+        fields
+            .iter()
+            .flatten()
+            .filter_map(|field| library_fuzzy_score(term, field))
+            .max()
+            .map(|score| total.saturating_add(score))
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LibrarySortField {
+    Title,
+    Artist,
+    Album,
+    Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LibrarySortDirection {
+    Ascending,
+    Descending,
+}
+
+#[cfg(test)]
+fn sort_library_tracks(
+    tracks: &mut [LibraryTrack],
+    field: LibrarySortField,
+    direction: LibrarySortDirection,
+) {
+    tracks.sort_by(|left, right| compare_library_tracks(left, right, field, direction));
+}
+
+fn compare_library_tracks(
+    left: &LibraryTrack,
+    right: &LibraryTrack,
+    field: LibrarySortField,
+    direction: LibrarySortDirection,
+) -> Ordering {
+    let field_order = match field {
+        LibrarySortField::Title => compare_text(left.title(), right.title()),
+        LibrarySortField::Artist => compare_text(
+            left.artist().unwrap_or_default(),
+            right.artist().unwrap_or_default(),
+        ),
+        LibrarySortField::Album => compare_text(
+            left.album().unwrap_or_default(),
+            right.album().unwrap_or_default(),
+        ),
+        LibrarySortField::Duration => left
+            .duration_seconds()
+            .unwrap_or(f64::INFINITY)
+            .total_cmp(&right.duration_seconds().unwrap_or(f64::INFINITY)),
+    };
+    let order = field_order
+        .then_with(|| compare_text(left.title(), right.title()))
+        .then_with(|| left.path().cmp(right.path()));
+    match direction {
+        LibrarySortDirection::Ascending => order,
+        LibrarySortDirection::Descending => order.reverse(),
+    }
+}
+
+fn compare_text(left: &str, right: &str) -> Ordering {
+    left.to_lowercase()
+        .cmp(&right.to_lowercase())
+        .then_with(|| left.cmp(right))
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ArtworkKey {
+    path: PathBuf,
+    file_size: i64,
+    modified_nanos: i64,
+}
+
+impl ArtworkKey {
+    #[cfg(test)]
+    fn for_test(path: &str, file_size: i64, modified_nanos: i64) -> Self {
+        Self {
+            path: PathBuf::from(path),
+            file_size,
+            modified_nanos,
+        }
+    }
+}
+
+impl From<&LibraryTrack> for ArtworkKey {
+    fn from(track: &LibraryTrack) -> Self {
+        let (file_size, modified_nanos) = track.file_fingerprint();
+        Self {
+            path: track.path().to_path_buf(),
+            file_size,
+            modified_nanos,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ArtworkState<T> {
+    Loading,
+    Ready(T),
+    Missing,
+}
+
+#[derive(Debug)]
+struct ArtworkEntry<T> {
+    serial: u64,
+    state: ArtworkState<T>,
+}
+
+#[derive(Debug)]
+struct ArtworkCache<T> {
+    entries: HashMap<ArtworkKey, ArtworkEntry<T>>,
+    next_serial: u64,
+    capacity: usize,
+}
+
+impl<T> ArtworkCache<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            next_serial: 0,
+            capacity,
+        }
+    }
+
+    fn request(
+        &mut self,
+        keys: impl IntoIterator<Item = ArtworkKey>,
+        limit: usize,
+    ) -> Vec<ArtworkKey> {
+        let mut requested = Vec::new();
+        for key in keys {
+            if requested.len() >= limit || self.entries.contains_key(&key) {
+                continue;
+            }
+            if self.entries.len() >= self.capacity && !self.evict_oldest_resolved() {
+                break;
+            }
+            let serial = self.take_serial();
+            self.entries.insert(
+                key.clone(),
+                ArtworkEntry {
+                    serial,
+                    state: ArtworkState::Loading,
+                },
+            );
+            requested.push(key);
+        }
+        requested
+    }
+
+    fn resolve(&mut self, key: ArtworkKey, value: Option<T>) {
+        let serial = self.take_serial();
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.serial = serial;
+            entry.state = value.map_or(ArtworkState::Missing, ArtworkState::Ready);
+        }
+    }
+
+    fn value(&self, key: &ArtworkKey) -> Option<&T> {
+        match self.entries.get(key).map(|entry| &entry.state) {
+            Some(ArtworkState::Ready(value)) => Some(value),
+            Some(ArtworkState::Loading | ArtworkState::Missing) | None => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn evict_oldest_resolved(&mut self) -> bool {
+        let oldest = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| !matches!(entry.state, ArtworkState::Loading))
+            .min_by_key(|(_, entry)| entry.serial)
+            .map(|(key, _)| key.clone());
+        oldest.is_some_and(|key| self.entries.remove(&key).is_some())
+    }
+
+    fn take_serial(&mut self) -> u64 {
+        let serial = self.next_serial;
+        self.next_serial = self.next_serial.wrapping_add(1);
+        serial
+    }
+}
+
+struct LibraryTableDelegate {
+    owner: WeakEntity<PlayerView>,
+    skin: Amp808Skin,
+    tracks: Vec<LibraryTrack>,
+    visible: Vec<usize>,
+    query: String,
+    scope: LibrarySearchScope,
+    sort_field: LibrarySortField,
+    sort_direction: LibrarySortDirection,
+    sort_active: bool,
+    selected_playlist_name: Option<String>,
+}
+
+impl LibraryTableDelegate {
+    fn new(owner: WeakEntity<PlayerView>, skin: Amp808Skin) -> Self {
+        Self {
+            owner,
+            skin,
+            tracks: Vec::new(),
+            visible: Vec::new(),
+            query: String::new(),
+            scope: LibrarySearchScope::All,
+            sort_field: LibrarySortField::Title,
+            sort_direction: LibrarySortDirection::Ascending,
+            sort_active: false,
+            selected_playlist_name: None,
+        }
+    }
+
+    fn set_tracks(&mut self, tracks: Vec<LibraryTrack>) {
+        self.tracks = tracks;
+        self.rebuild_visible();
+    }
+
+    fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.rebuild_visible();
+    }
+
+    fn set_scope(&mut self, scope: LibrarySearchScope) {
+        self.scope = scope;
+        self.rebuild_visible();
+    }
+
+    fn set_selected_playlist_name(&mut self, name: Option<String>) {
+        self.selected_playlist_name = name;
+    }
+
+    fn visible_count(&self) -> usize {
+        self.visible.len()
+    }
+
+    fn is_current(
+        &self,
+        tracks: &[LibraryTrack],
+        query: &str,
+        scope: LibrarySearchScope,
+        selected_playlist_name: Option<&str>,
+    ) -> bool {
+        self.tracks == tracks
+            && self.query == query
+            && self.scope == scope
+            && self.selected_playlist_name.as_deref() == selected_playlist_name
+    }
+
+    fn track(&self, row_ix: usize) -> Option<&LibraryTrack> {
+        self.visible
+            .get(row_ix)
+            .and_then(|track_ix| self.tracks.get(*track_ix))
+    }
+
+    fn rebuild_visible(&mut self) {
+        let mut matches = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter_map(|(track_ix, track)| {
+                library_metadata_score(
+                    &self.query,
+                    self.scope,
+                    track.title(),
+                    track.artist(),
+                    track.album(),
+                )
+                .map(|score| (track_ix, score))
+            })
+            .collect::<Vec<_>>();
+        let tracks = &self.tracks;
+        let field = self.sort_field;
+        let direction = self.sort_direction;
+        if !self.query.trim().is_empty() && !self.sort_active {
+            matches.sort_by(|(left_ix, left_score), (right_ix, right_score)| {
+                right_score.cmp(left_score).then_with(|| {
+                    compare_library_tracks(
+                        &tracks[*left_ix],
+                        &tracks[*right_ix],
+                        LibrarySortField::Title,
+                        LibrarySortDirection::Ascending,
+                    )
+                })
+            });
+        } else {
+            matches.sort_by(|(left_ix, _), (right_ix, _)| {
+                compare_library_tracks(&tracks[*left_ix], &tracks[*right_ix], field, direction)
+            });
+        }
+        self.visible = matches.into_iter().map(|(track_ix, _)| track_ix).collect();
+    }
+
+    fn column_sort(&self, field: LibrarySortField) -> ColumnSort {
+        if !self.sort_active || self.sort_field != field {
+            return ColumnSort::Default;
+        }
+        match self.sort_direction {
+            LibrarySortDirection::Ascending => ColumnSort::Ascending,
+            LibrarySortDirection::Descending => ColumnSort::Descending,
+        }
+    }
+
+    fn artwork_for(&self, track: &LibraryTrack, cx: &App) -> Option<Arc<Image>> {
+        let key = ArtworkKey::from(track);
+        self.owner
+            .read_with(cx, |view, _| view.library_artwork.value(&key).cloned())
+            .ok()
+            .flatten()
+    }
+}
+
+impl TableDelegate for LibraryTableDelegate {
+    fn columns_count(&self, _: &App) -> usize {
+        6
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.visible.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        match col_ix {
+            0 => Column::new("artwork", "ART")
+                .width(px(64.0))
+                .resizable(false)
+                .movable(false)
+                .selectable(false),
+            1 => Column::new("title", "TITLE")
+                .sort(self.column_sort(LibrarySortField::Title))
+                .width(px(240.0))
+                .fixed_left(),
+            2 => Column::new("artist", "ARTIST")
+                .sort(self.column_sort(LibrarySortField::Artist))
+                .width(px(170.0)),
+            3 => Column::new("album", "ALBUM")
+                .sort(self.column_sort(LibrarySortField::Album))
+                .width(px(190.0)),
+            4 => Column::new("duration", "TIME")
+                .sort(self.column_sort(LibrarySortField::Duration))
+                .width(px(82.0))
+                .text_right(),
+            5 => Column::new("actions", "ACTIONS")
+                .width(px(278.0))
+                .selectable(false),
+            _ => Column::new("unknown", ""),
+        }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let field = match col_ix {
+            1 => LibrarySortField::Title,
+            2 => LibrarySortField::Artist,
+            3 => LibrarySortField::Album,
+            4 => LibrarySortField::Duration,
+            _ => return,
+        };
+        self.sort_field = field;
+        self.sort_active = true;
+        self.sort_direction = match sort {
+            ColumnSort::Descending => LibrarySortDirection::Descending,
+            ColumnSort::Default | ColumnSort::Ascending => LibrarySortDirection::Ascending,
+        };
+        self.rebuild_visible();
+        cx.notify();
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(track) = self.track(row_ix).cloned() else {
+            return div().into_any_element();
+        };
+        let title = track.title().to_owned();
+        let artist = track.artist().unwrap_or("Unknown artist").to_owned();
+        let album = track.album().unwrap_or("Unknown album").to_owned();
+        match col_ix {
+            0 => self.artwork_for(&track, cx).map_or_else(
+                || {
+                    div()
+                        .id(("library-artwork-placeholder", row_ix))
+                        .test_support()
+                        .flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .text_color(skin_hsla(self.skin.text_muted()))
+                        .child("♪")
+                        .into_any_element()
+                },
+                |image| {
+                    div()
+                        .id(("library-artwork", row_ix))
+                        .test_support()
+                        .role(Role::Image)
+                        .aria_label(format!("Album artwork for {title}"))
+                        .size_full()
+                        .overflow_hidden()
+                        .rounded_md()
+                        .child(img(image).size_full().object_fit(ObjectFit::Cover))
+                        .into_any_element()
+                },
+            ),
+            1 => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .font_semibold()
+                .child(title)
+                .into_any_element(),
+            2 => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .child(artist)
+                .into_any_element(),
+            3 => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .child(album)
+                .into_any_element(),
+            4 => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_end()
+                .child(
+                    track
+                        .duration_seconds()
+                        .map_or_else(|| "--:--".to_owned(), format_time),
+                )
+                .into_any_element(),
+            5 => {
+                let play_label = format!(
+                    "Play {title}  —  {artist}  /  {album}. {} hertz, {} channels, duration {}",
+                    track.sample_rate(),
+                    track.channels(),
+                    track
+                        .duration_seconds()
+                        .map_or_else(|| "unknown".to_owned(), format_time)
+                );
+                let queued = QueuedTrack::from(&track);
+                let play_now = queued.clone();
+                let play_next = queued.clone();
+                let queue_track = queued;
+                let playlist_track = track;
+                let next_title = title.clone();
+                let queue_title = title.clone();
+                let playlist_name = self
+                    .selected_playlist_name
+                    .clone()
+                    .unwrap_or_else(|| "selected playlist".to_owned());
+                let can_add_to_playlist = self.selected_playlist_name.is_some();
+                let play_owner = self.owner.clone();
+                let next_owner = self.owner.clone();
+                let queue_owner = self.owner.clone();
+                let playlist_owner = self.owner.clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        hardware_button(
+                            ("library-track", row_ix),
+                            HardwareButtonTone::Primary,
+                            self.skin,
+                            cx,
+                        )
+                        .label("PLAY")
+                        .accessibility_label(play_label)
+                        .on_click(move |_, _, cx| {
+                            let _ = play_owner.update(cx, |view, cx| {
+                                view.play_library_track(play_now.clone(), cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        hardware_button(
+                            ("library-play-next", row_ix),
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("NEXT")
+                        .accessibility_label(format!("Play {next_title} next"))
+                        .on_click(move |_, _, cx| {
+                            let _ = next_owner.update(cx, |view, cx| {
+                                view.play_track_next(play_next.clone(), cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        hardware_button(
+                            ("library-add-queue", row_ix),
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("QUEUE")
+                        .accessibility_label(format!("Add {queue_title} to queue"))
+                        .on_click(move |_, _, cx| {
+                            let _ = queue_owner.update(cx, |view, cx| {
+                                view.add_track_to_queue(queue_track.clone(), cx);
+                            });
+                        }),
+                    )
+                    .child(
+                        hardware_button(
+                            ("library-add-playlist", row_ix),
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("ADD")
+                        .accessibility_label(format!("Add {title} to playlist {playlist_name}"))
+                        .disabled(!can_add_to_playlist)
+                        .on_click(move |_, _, cx| {
+                            let track = playlist_track.clone();
+                            let _ = playlist_owner.update(cx, |view, cx| {
+                                view.add_track_to_selected_playlist(track, cx);
+                            });
+                        }),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        let track = self.track(row_ix)?;
+        let label = match col_ix {
+            0 => format!("Artwork for {}", track.title()),
+            1 => format!(
+                "Title: {}. {} hertz, {} channels",
+                track.title(),
+                track.sample_rate(),
+                track.channels()
+            ),
+            2 => format!("Artist: {}", track.artist().unwrap_or("Unknown artist")),
+            3 => format!("Album: {}", track.album().unwrap_or("Unknown album")),
+            4 => format!(
+                "Duration: {}",
+                track
+                    .duration_seconds()
+                    .map_or_else(|| "unknown".to_owned(), format_time)
+            ),
+            5 => format!("Actions for {}", track.title()),
+            _ => return None,
+        };
+        Some(label.into())
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("NO MATCHING LOCAL TRACKS")
+    }
+}
+
 pub fn init_skin_theme(cx: &mut App) {
     let skin = Amp808Skin::built_in();
     gpui_kit::component::Theme::update(cx, |theme| {
@@ -45,6 +712,18 @@ pub fn init_skin_theme(cx: &mut App) {
         theme.ring = skin_hsla(skin.accent());
         theme.caret = skin_hsla(skin.accent());
         theme.selection = skin_hsla(skin.accent()).opacity(0.35);
+        theme.border = skin_hsla(skin.control_border());
+        theme.secondary_foreground = skin_hsla(skin.text());
+        theme.table = skin_hsla(skin.panel());
+        theme.table_even = skin_hsla(skin.panel_raised());
+        theme.table_head = skin_hsla(skin.field());
+        theme.table_head_foreground = skin_hsla(skin.text());
+        theme.table_foot = skin_hsla(skin.field());
+        theme.table_foot_foreground = skin_hsla(skin.text());
+        theme.table_hover = skin_hsla(skin.control_hover());
+        theme.table_active = skin_hsla(skin.control_active());
+        theme.table_active_border = skin_hsla(skin.accent());
+        theme.table_row_border = skin_hsla(skin.control_border());
     });
 }
 
@@ -121,6 +800,7 @@ gpui_kit::actions!(
         VolumeUp,
         ToggleVisualizer,
         ToggleLibrary,
+        ActivateLibraryTrack,
     ]
 );
 
@@ -138,6 +818,7 @@ pub fn init_keyboard_shortcuts(cx: &mut App) {
         KeyBinding::new("up", VolumeUp, Some("Amp808Player")),
         KeyBinding::new("v", ToggleVisualizer, Some("Amp808Player")),
         KeyBinding::new("l", ToggleLibrary, Some("Amp808Player")),
+        KeyBinding::new("enter", ActivateLibraryTrack, Some("DataTable")),
     ]);
 }
 
@@ -254,8 +935,11 @@ pub struct PlayerView {
     library_status: LibraryStatus,
     library_search: Option<Entity<InputState>>,
     library_search_subscription: Option<Subscription>,
+    library_table: Option<Entity<TableState<LibraryTableDelegate>>>,
+    library_search_scope: LibrarySearchScope,
     library_query_generation: u64,
     library_scan_summary: Option<ScanSummary>,
+    library_artwork: ArtworkCache<Arc<Image>>,
     playlists: Vec<LocalPlaylist>,
     selected_playlist: Option<LocalPlaylistId>,
     selected_playlist_tracks: Vec<LibraryTrack>,
@@ -263,6 +947,7 @@ pub struct PlayerView {
     playlist_error: Option<String>,
     queue: PlaybackQueue,
     queue_advance: QueueAdvance,
+    remote_source_job: Option<RemoteSourceJob>,
 }
 
 impl PlayerView {
@@ -287,8 +972,11 @@ impl PlayerView {
             library_status: LibraryStatus::Unloaded,
             library_search: None,
             library_search_subscription: None,
+            library_table: None,
+            library_search_scope: LibrarySearchScope::All,
             library_query_generation: 0,
             library_scan_summary: None,
+            library_artwork: ArtworkCache::new(96),
             playlists: Vec::new(),
             selected_playlist: None,
             selected_playlist_tracks: Vec::new(),
@@ -296,7 +984,44 @@ impl PlayerView {
             playlist_error: None,
             queue: PlaybackQueue::new(),
             queue_advance: QueueAdvance::new(),
+            remote_source_job: None,
         }
+    }
+
+    fn start_remote_preview(&mut self, cx: &mut Context<Self>) {
+        let mut job = RemoteSourceJob::new("Cosmic relay sample");
+        job.apply(RemoteSourceEvent::InspectionCompleted {
+            total_bytes: Some(1_000),
+        })
+        .expect("preview inspection transition is valid");
+        job.apply(RemoteSourceEvent::DownloadProgressed {
+            received_bytes: 420,
+            total_bytes: Some(1_000),
+        })
+        .expect("preview download progress is valid");
+        self.remote_source_job = Some(job);
+        cx.notify();
+    }
+
+    fn cancel_remote_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.remote_source_job.as_mut()
+            && job.apply(RemoteSourceEvent::CancelRequested).is_ok()
+        {
+            cx.notify();
+        }
+    }
+
+    fn retry_remote_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(job) = self.remote_source_job.as_mut()
+            && job.apply(RemoteSourceEvent::RetryRequested).is_ok()
+        {
+            cx.notify();
+        }
+    }
+
+    fn dismiss_remote_preview(&mut self, cx: &mut Context<Self>) {
+        self.remote_source_job = None;
+        cx.notify();
     }
 
     fn color(&self, value: crate::skin::SkinColor) -> gpui_kit::Rgba {
@@ -437,6 +1162,48 @@ impl PlayerView {
             self.library_search = Some(search);
             self.library_search_subscription = Some(subscription);
         }
+        if self.library_table.is_none() {
+            let owner = cx.weak_entity();
+            let mut delegate = LibraryTableDelegate::new(owner, self.skin);
+            let tracks = match &self.library_status {
+                LibraryStatus::Ready(tracks) => tracks.clone(),
+                LibraryStatus::Unloaded | LibraryStatus::Loading | LibraryStatus::Failed(_) => {
+                    Vec::new()
+                }
+            };
+            let query = self
+                .library_search
+                .as_ref()
+                .map_or_else(String::new, |search| search.read(cx).value().to_string());
+            let selected_playlist_name = self.selected_playlist.and_then(|selected| {
+                self.playlists
+                    .iter()
+                    .find(|playlist| playlist.id() == selected)
+                    .map(|playlist| playlist.name().to_owned())
+            });
+            delegate.set_tracks(tracks);
+            delegate.set_query(query);
+            delegate.set_scope(self.library_search_scope);
+            delegate.set_selected_playlist_name(selected_playlist_name);
+            let table = cx.new(|cx| {
+                TableState::new(delegate, window, cx)
+                    .row_selectable(true)
+                    .col_selectable(false)
+                    .cell_selectable(false)
+                    .col_movable(true)
+                    .col_resizable(true)
+                    .sortable(true)
+            });
+            cx.subscribe(&table, |this, table, event, cx| {
+                if let TableEvent::DoubleClickedRow(row_ix) = event
+                    && let Some(track) = table.read(cx).delegate().track(*row_ix)
+                {
+                    this.play_library_track(QueuedTrack::from(track), cx);
+                }
+            })
+            .detach();
+            self.library_table = Some(table);
+        }
         if self.playlist_name.is_none() {
             self.playlist_name =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("Playlist name")));
@@ -473,9 +1240,11 @@ impl PlayerView {
                 }
                 match result {
                     Ok((catalogue, tracks, playlists)) => {
+                        view.schedule_library_artwork(&tracks, cx);
                         view.library_catalogue = Some(catalogue);
                         view.library_status = LibraryStatus::Ready(tracks);
                         view.playlists = playlists;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
                 }
@@ -487,37 +1256,75 @@ impl PlayerView {
     }
 
     fn refresh_library(&mut self, cx: &mut Context<Self>) {
-        if !self.library_visible {
+        self.sync_library_table(cx);
+        cx.notify();
+    }
+
+    fn set_library_search_scope(&mut self, scope: LibrarySearchScope, cx: &mut Context<Self>) {
+        self.library_search_scope = scope;
+        self.sync_library_table(cx);
+        cx.notify();
+    }
+
+    fn sync_library_table(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.library_table.clone() else {
             return;
-        }
-        let Some(catalogue) = self.library_catalogue.clone() else {
-            return;
+        };
+        let tracks = match &self.library_status {
+            LibraryStatus::Ready(tracks) => tracks.as_slice(),
+            LibraryStatus::Unloaded | LibraryStatus::Loading | LibraryStatus::Failed(_) => &[],
         };
         let query = self
             .library_search
             .as_ref()
             .map_or_else(String::new, |search| search.read(cx).value().to_string());
-        self.library_query_generation = self.library_query_generation.wrapping_add(1);
-        let generation = self.library_query_generation;
-        self.library_status = LibraryStatus::Loading;
-        let search = cx
-            .background_executor()
-            .spawn(async move { catalogue.search(&query) });
-        cx.spawn(async move |this, cx| {
-            let result = search.await;
-            let _ = this.update(cx, |view, cx| {
-                if view.library_query_generation != generation {
-                    return;
-                }
-                view.library_status = match result {
-                    Ok(tracks) => LibraryStatus::Ready(tracks),
-                    Err(error) => LibraryStatus::Failed(error.to_string()),
-                };
+        let selected_playlist_name = self.selected_playlist.and_then(|selected| {
+            self.playlists
+                .iter()
+                .find(|playlist| playlist.id() == selected)
+                .map(|playlist| playlist.name().to_owned())
+        });
+        if table.read(cx).delegate().is_current(
+            tracks,
+            &query,
+            self.library_search_scope,
+            selected_playlist_name.as_deref(),
+        ) {
+            return;
+        }
+        let tracks = tracks.to_vec();
+        table.update(cx, |state, cx| {
+            state.delegate_mut().set_tracks(tracks);
+            state.delegate_mut().set_query(query);
+            state.delegate_mut().set_scope(self.library_search_scope);
+            state
+                .delegate_mut()
+                .set_selected_playlist_name(selected_playlist_name);
+            state.refresh(cx);
+            cx.notify();
+        });
+    }
+
+    fn refresh_library_table(&mut self, cx: &mut Context<Self>) {
+        if let Some(table) = self.library_table.clone() {
+            table.update(cx, |state, cx| {
+                state.refresh(cx);
                 cx.notify();
             });
-        })
-        .detach();
-        cx.notify();
+        }
+    }
+
+    fn activate_selected_library_track(&mut self, cx: &mut Context<Self>) {
+        let track = self.library_table.as_ref().and_then(|table| {
+            let state = table.read(cx);
+            state
+                .selected_row()
+                .and_then(|row_ix| state.delegate().track(row_ix))
+                .cloned()
+        });
+        if let Some(track) = track {
+            self.play_library_track(QueuedTrack::from(&track), cx);
+        }
     }
 
     fn choose_library_folder(&mut self, cx: &mut Context<Self>) {
@@ -549,13 +1356,6 @@ impl PlayerView {
             let Some(path) = path else {
                 return;
             };
-            let query = this
-                .read_with(cx, |view, cx| {
-                    view.library_search
-                        .as_ref()
-                        .map_or_else(String::new, |search| search.read(cx).value().to_string())
-                })
-                .unwrap_or_default();
             let generation = this
                 .update(cx, |view, cx| {
                     view.library_query_generation = view.library_query_generation.wrapping_add(1);
@@ -567,7 +1367,7 @@ impl PlayerView {
             let scan = cx.background_spawn(async move {
                 let catalogue = LibraryCatalogue::open_default()?;
                 let summary = catalogue.scan_root(path)?;
-                let tracks = catalogue.search(&query)?;
+                let tracks = catalogue.search("")?;
                 let playlists = catalogue.playlists()?;
                 Ok::<_, crate::library::LibraryError>((catalogue, summary, tracks, playlists))
             });
@@ -578,13 +1378,47 @@ impl PlayerView {
                 }
                 match result {
                     Ok((catalogue, summary, tracks, playlists)) => {
+                        view.schedule_library_artwork(&tracks, cx);
                         view.library_catalogue = Some(catalogue);
                         view.library_scan_summary = Some(summary);
                         view.library_status = LibraryStatus::Ready(tracks);
                         view.playlists = playlists;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.library_status = LibraryStatus::Failed(error.to_string()),
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_library_artwork(&mut self, tracks: &[LibraryTrack], cx: &mut Context<Self>) {
+        const REQUEST_LIMIT: usize = 48;
+
+        let requests = self
+            .library_artwork
+            .request(tracks.iter().map(ArtworkKey::from), REQUEST_LIMIT);
+        if requests.is_empty() {
+            return;
+        }
+        let load = cx.background_executor().spawn(async move {
+            requests
+                .into_iter()
+                .map(|key| {
+                    let artwork = probe_cover_art(&key.path).ok().flatten();
+                    (key, artwork)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let artwork = load.await;
+            let _ = this.update(cx, |view, cx| {
+                for (key, artwork) in artwork {
+                    view.library_artwork
+                        .resolve(key, cover_image_from_art(artwork.as_ref()));
+                }
+                view.refresh_library_table(cx);
                 cx.notify();
             });
         })
@@ -615,6 +1449,7 @@ impl PlayerView {
                         view.selected_playlist_tracks.clear();
                         view.playlists = playlists;
                         view.playlist_error = None;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.playlist_error = Some(error.to_string()),
                 }
@@ -645,6 +1480,7 @@ impl PlayerView {
                     Ok(playlists) => {
                         view.playlists = playlists;
                         view.playlist_error = None;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.playlist_error = Some(error.to_string()),
                 }
@@ -673,6 +1509,7 @@ impl PlayerView {
                         view.selected_playlist = None;
                         view.selected_playlist_tracks.clear();
                         view.playlist_error = None;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.playlist_error = Some(error.to_string()),
                 }
@@ -697,6 +1534,7 @@ impl PlayerView {
                         view.selected_playlist = Some(playlist_id);
                         view.selected_playlist_tracks = tracks;
                         view.playlist_error = None;
+                        view.sync_library_table(cx);
                     }
                     Err(error) => view.playlist_error = Some(error.to_string()),
                 }
@@ -1051,6 +1889,7 @@ impl PerformanceProbe {
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_library_search(window, cx);
+        self.sync_library_table(cx);
         let canvas = self.color(self.skin.canvas());
         let panel = self
             .color(self.skin.panel())
@@ -1305,6 +2144,45 @@ impl Render for PlayerView {
                 format!("{} HZ / {} CH", metadata.sample_rate(), metadata.channels())
             },
         );
+        let remote_source_snapshot = self.remote_source_job.as_ref().map(|job| {
+            let (phase, detail) = match job.state() {
+                RemoteSourceState::Inspecting => (
+                    "INSPECTING",
+                    "Reading source capabilities without starting playback".to_owned(),
+                ),
+                RemoteSourceState::Downloading {
+                    received_bytes,
+                    total_bytes,
+                } => (
+                    "TRANSFERRING",
+                    total_bytes.map_or_else(
+                        || format!("{received_bytes} bytes received"),
+                        |total| format!("{received_bytes} of {total} bytes received"),
+                    ),
+                ),
+                RemoteSourceState::Preparing => (
+                    "PREPARING",
+                    "Preparing media for the local playback boundary".to_owned(),
+                ),
+                RemoteSourceState::Ready => (
+                    "READY",
+                    "Prepared media is ready for playback hand-off".to_owned(),
+                ),
+                RemoteSourceState::Failed { message } => ("FAILED", message.clone()),
+                RemoteSourceState::Cancelled => (
+                    "CANCELLED",
+                    "yt-dlp preview stopped without changing the library".to_owned(),
+                ),
+            };
+            (
+                job.display_source().to_owned(),
+                phase,
+                detail,
+                job.progress_fraction(),
+                job.can_cancel(),
+                job.can_retry(),
+            )
+        });
         let now_playing_card = if let Some(image) = self.cover_image.clone() {
             div()
                 .id("now-playing-summary")
@@ -1380,12 +2258,6 @@ impl Render for PlayerView {
                 .into_any_element()
         };
         let library_visible = self.library_visible;
-        let library_tracks = match &self.library_status {
-            LibraryStatus::Ready(tracks) => tracks.clone(),
-            LibraryStatus::Unloaded | LibraryStatus::Loading | LibraryStatus::Failed(_) => {
-                Vec::new()
-            }
-        };
         let queue_entries = self.queue.entries().to_vec();
         let queue_is_empty = self.queue.is_empty();
         let queue_status = match self.queue.len() {
@@ -1406,14 +2278,23 @@ impl Render for PlayerView {
             || format!("Local playlists: {}. None selected", playlists.len()),
             |name| format!("Local playlists: {}. Selected: {name}", playlists.len()),
         );
-        let library_selected_playlist_name = selected_playlist_name.clone();
+        let visible_library_tracks = self
+            .library_table
+            .as_ref()
+            .map_or(0, |table| table.read(cx).delegate().visible_count());
         let library_status = match &self.library_status {
             LibraryStatus::Unloaded => "Local library has not been loaded".to_owned(),
             LibraryStatus::Loading => "Loading local library".to_owned(),
             LibraryStatus::Ready(tracks) if tracks.is_empty() => {
-                "No matching local tracks. Add a folder or change the search.".to_owned()
+                "No local tracks. Add a music folder to begin.".to_owned()
             }
-            LibraryStatus::Ready(tracks) => format!("{} local tracks", tracks.len()),
+            LibraryStatus::Ready(tracks) if visible_library_tracks == tracks.len() => {
+                format!("{} local tracks", tracks.len())
+            }
+            LibraryStatus::Ready(tracks) => format!(
+                "{visible_library_tracks} of {} local tracks match",
+                tracks.len()
+            ),
             LibraryStatus::Failed(error) => format!("Library error: {error}"),
         };
         let scan_detail = self.library_scan_summary.map(|summary| {
@@ -1428,6 +2309,11 @@ impl Render for PlayerView {
             .library_search
             .as_ref()
             .expect("library search is initialized before rendering")
+            .clone();
+        let library_table = self
+            .library_table
+            .as_ref()
+            .expect("library table is initialized before rendering")
             .clone();
         let playlist_name = self
             .playlist_name
@@ -1706,6 +2592,42 @@ impl Render for PlayerView {
             .child(hardware_input(&library_search, "library-search", self.skin))
             .child(
                 div()
+                    .id("library-search-scope")
+                    .test_support()
+                    .role(Role::Group)
+                    .aria_label("Search field filter")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .children(LibrarySearchScope::ALL.into_iter().enumerate().map(
+                        |(index, scope)| {
+                            let selected = self.library_search_scope == scope;
+                            hardware_button(
+                                ("library-search-scope", index),
+                                if selected {
+                                    HardwareButtonTone::Primary
+                                } else {
+                                    HardwareButtonTone::Neutral
+                                },
+                                self.skin,
+                                cx,
+                            )
+                            .label(scope.label())
+                            .accessibility_label(format!(
+                                "Search {} metadata{}",
+                                scope.label().to_lowercase(),
+                                if selected { ", selected" } else { "" }
+                            ))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.set_library_search_scope(scope, cx);
+                                },
+                            ))
+                        },
+                    )),
+            )
+            .child(
+                div()
                     .id("library-status")
                     .test_support()
                     .role(Role::Status)
@@ -1717,122 +2639,41 @@ impl Render for PlayerView {
             .when_some(scan_detail, |panel, detail| {
                 panel.child(div().text_xs().text_color(text_muted).child(detail))
             })
-            .child(playlist_panel)
-            .child(queue_panel)
             .child(
                 div()
-                    .id("library-track-list")
-                    .test_support()
-                    .role(Role::Group)
-                    .aria_label("Local library tracks")
                     .flex()
-                    .flex_col()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .gap_2()
-                    .children(
-                        library_tracks
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, track)| {
-                                let artist = track.artist().unwrap_or("Unknown artist");
-                                let album = track.album().unwrap_or("Unknown album");
-                                let label =
-                                    format!("{}  —  {}  /  {}", track.title(), artist, album);
-                                let title = track.title().to_owned();
-                                let technical = format!(
-                                    "{} hertz, {} channels, duration {}",
-                                    track.sample_rate(),
-                                    track.channels(),
-                                    track
-                                        .duration_seconds()
-                                        .map_or_else(|| "unknown".to_owned(), format_time)
-                                );
-                                let queued_track = QueuedTrack::from(&track);
-                                let play_now = queued_track.clone();
-                                let play_next = queued_track.clone();
-                                let next_title = title.clone();
-                                let playlist_track = track.clone();
-                                let playlist_name = library_selected_playlist_name
-                                    .clone()
-                                    .unwrap_or_else(|| "selected playlist".to_owned());
-                                let can_add_to_playlist = selected_playlist.is_some();
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        hardware_button(
-                                            ("library-track", index),
-                                            HardwareButtonTone::Primary,
-                                            self.skin,
-                                            cx,
-                                        )
-                                        .key_context("Amp808Control")
-                                        .label(label.clone())
-                                        .accessibility_label(format!("Play {label}. {technical}"))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.play_library_track(play_now.clone(), cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        hardware_button(
-                                            ("library-play-next", index),
-                                            HardwareButtonTone::Neutral,
-                                            self.skin,
-                                            cx,
-                                        )
-                                        .key_context("Amp808Control")
-                                        .label("NEXT")
-                                        .accessibility_label(format!("Play {next_title} next"))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.play_track_next(play_next.clone(), cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        hardware_button(
-                                            ("library-add-queue", index),
-                                            HardwareButtonTone::Neutral,
-                                            self.skin,
-                                            cx,
-                                        )
-                                        .key_context("Amp808Control")
-                                        .label("QUEUE")
-                                        .accessibility_label(format!("Add {title} to queue"))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.add_track_to_queue(queued_track.clone(), cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        hardware_button(
-                                            ("library-add-playlist", index),
-                                            HardwareButtonTone::Neutral,
-                                            self.skin,
-                                            cx,
-                                        )
-                                        .key_context("Amp808Control")
-                                        .label("ADD")
-                                        .accessibility_label(format!(
-                                            "Add {title} to playlist {playlist_name}"
-                                        ))
-                                        .disabled(!can_add_to_playlist)
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.add_track_to_selected_playlist(
-                                                    playlist_track.clone(),
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                            }),
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_shrink_0()
+                            .w(px(320.0))
+                            .min_h_0()
+                            .overflow_hidden()
+                            .gap_3()
+                            .child(playlist_panel)
+                            .child(queue_panel),
+                    )
+                    .child(
+                        div()
+                            .id("library-track-table")
+                            .test_support()
+                            .aria_label("Local library tracks")
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(
+                                DataTable::new(&library_table)
+                                    .accessibility_label("Local library tracks")
+                                    .stripe(true)
+                                    .bordered(true)
+                                    .header_row_height(px(38.0))
+                                    .scrollbar_visible(true, true),
+                            ),
                     ),
             );
         if !reduce_motion && !matches!(self.cosmic.status(), CosmicStatus::Failed(_)) {
@@ -1869,6 +2710,9 @@ impl Render for PlayerView {
             }))
             .on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| {
                 this.toggle_library(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ActivateLibraryTrack, _, cx| {
+                this.activate_selected_library_track(cx);
             }))
             .flex()
             .flex_col()
@@ -1915,6 +2759,20 @@ impl Render for PlayerView {
                             .gap_2()
                             .child(
                                 hardware_button(
+                                    "preview-remote-source",
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
+                                .key_context("Amp808Control")
+                                .label("USE YT-DLP")
+                                .accessibility_label("Use yt-dlp for an audio source")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.start_remote_preview(cx);
+                                })),
+                            )
+                            .child(
+                                hardware_button(
                                     "toggle-library",
                                     HardwareButtonTone::Neutral,
                                     self.skin,
@@ -1945,6 +2803,173 @@ impl Render for PlayerView {
                             ),
                     ),
             )
+            .when_some(remote_source_snapshot, |root, snapshot| {
+                let (source, phase, detail, progress, can_cancel, can_retry) = snapshot;
+                let progress_percent = progress.map(|value| (value * 100.0).round() as u32);
+                let accessible_phase = match phase {
+                    "TRANSFERRING" => "transfer",
+                    "PREPARING" => "preparation",
+                    "INSPECTING" => "inspection",
+                    _ => phase,
+                };
+                let progress_label = progress_percent.map_or_else(
+                    || format!("yt-dlp {accessible_phase}: progress is indeterminate"),
+                    |percent| format!("yt-dlp transfer: {percent} percent complete"),
+                );
+                let status_label = progress_percent.map_or_else(
+                    || {
+                        format!(
+                            "yt-dlp integration preview. {phase}: {source}. {detail}. Simulation only; no network or subprocess work is running"
+                        )
+                    },
+                    |percent| {
+                        format!(
+                            "yt-dlp integration preview. {phase}: {source}. {percent} percent complete. {detail}. Simulation only; no network or subprocess work is running"
+                        )
+                    },
+                );
+
+                root.child(
+                    div()
+                        .id("remote-source-status")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(status_label)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(meter_high.opacity(0.72))
+                        .bg(panel_raised)
+                        .px_4()
+                        .py_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_semibold()
+                                                        .text_color(meter_high)
+                                                        .child("YT-DLP INTEGRATION"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(accent)
+                                                        .child(phase),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .text_color(text)
+                                                .child(source),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(text_muted)
+                                                .child(detail),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .when(can_cancel, |actions| {
+                                            actions.child(
+                                                hardware_button(
+                                                    "cancel-remote-source",
+                                                    HardwareButtonTone::Neutral,
+                                                    self.skin,
+                                                    cx,
+                                                )
+                                                .label("CANCEL")
+                                                .accessibility_label("Cancel yt-dlp transfer")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_remote_preview(cx);
+                                                })),
+                                            )
+                                        })
+                                        .when(can_retry, |actions| {
+                                            actions.child(
+                                                hardware_button(
+                                                    "retry-remote-source",
+                                                    HardwareButtonTone::Primary,
+                                                    self.skin,
+                                                    cx,
+                                                )
+                                                .label("RETRY")
+                                                .accessibility_label("Retry yt-dlp integration")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.retry_remote_preview(cx);
+                                                })),
+                                            )
+                                        })
+                                        .when(!can_cancel && !can_retry, |actions| {
+                                            actions.child(
+                                                hardware_button(
+                                                    "dismiss-remote-source",
+                                                    HardwareButtonTone::Neutral,
+                                                    self.skin,
+                                                    cx,
+                                                )
+                                                .label("DISMISS")
+                                                .accessibility_label("Dismiss yt-dlp integration")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.dismiss_remote_preview(cx);
+                                                })),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("remote-source-progress")
+                                .test_support()
+                                .role(Role::ProgressIndicator)
+                                .aria_label(progress_label)
+                                .aria_min_numeric_value(0.0)
+                                .aria_max_numeric_value(100.0)
+                                .when_some(progress_percent, |rail, percent| {
+                                    rail.aria_numeric_value(f64::from(percent))
+                                })
+                                .h(px(10.0))
+                                .w_full()
+                                .overflow_hidden()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(meter_high.opacity(0.56))
+                                .bg(canvas.opacity(0.76))
+                                .when_some(progress, |rail, value| {
+                                    rail.child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(value.clamp(0.0, 1.0)))
+                                            .rounded_full()
+                                            .bg(meter_high),
+                                    )
+                                }),
+                        ),
+                )
+            })
             .when_some(self.error.clone(), |root, error| {
                 root.child(
                     div()
@@ -2301,12 +3326,219 @@ mod tests {
     use crate::media::CoverArt;
     use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
+    use crate::remote::{RemoteSourceEvent, RemoteSourceJob};
 
     use super::{
-        LibraryCatalogue, LibraryStatus, PerformanceProbe, PlaybackToggle, PlayerView, QueuedTrack,
-        TrackDisplay, VisualizerMode, cover_image_from_art, init_skin_theme, milkdrop_status_label,
-        playback_toggle, should_present_milkdrop, signal_status, skin_hsla,
+        ArtworkCache, ArtworkKey, LibraryCatalogue, LibrarySearchScope, LibrarySortDirection,
+        LibrarySortField, LibraryStatus, LibraryTrack, PerformanceProbe, PlaybackToggle,
+        PlayerView, QueuedTrack, TrackDisplay, VisualizerMode, cover_image_from_art,
+        init_skin_theme, library_fuzzy_score, library_metadata_score, milkdrop_status_label,
+        playback_toggle, should_present_milkdrop, signal_status, skin_hsla, sort_library_tracks,
     };
+
+    #[test]
+    fn library_fuzzy_search_matches_ordered_non_contiguous_characters() {
+        assert!(library_fuzzy_score("csmpltn", "Cosmopolitan").is_some());
+        assert_eq!(library_fuzzy_score("cmz", "Cosmopolitan"), None);
+    }
+
+    #[test]
+    fn library_fuzzy_search_respects_field_scope_and_multiple_terms() {
+        assert!(
+            library_metadata_score(
+                "blue intl",
+                LibrarySearchScope::All,
+                "Before My Head",
+                Some("Bluelight Isms"),
+                Some("International EP"),
+            )
+            .is_some()
+        );
+        assert_eq!(
+            library_metadata_score(
+                "international",
+                LibrarySearchScope::Artist,
+                "Before My Head",
+                Some("Bluelight Isms"),
+                Some("International EP"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn library_table_title_sort_is_case_insensitive_and_reversible() {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Zulu.wav"), 8_000, 8_000);
+        write_stereo_wav(&music.join("alpha.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let mut tracks = catalogue.search("").expect("library tracks load");
+
+        sort_library_tracks(
+            &mut tracks,
+            LibrarySortField::Title,
+            LibrarySortDirection::Ascending,
+        );
+        assert_eq!(
+            tracks.iter().map(LibraryTrack::title).collect::<Vec<_>>(),
+            ["alpha", "Zulu"]
+        );
+
+        sort_library_tracks(
+            &mut tracks,
+            LibrarySortField::Title,
+            LibrarySortDirection::Descending,
+        );
+        assert_eq!(
+            tracks.iter().map(LibraryTrack::title).collect::<Vec<_>>(),
+            ["Zulu", "alpha"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn library_table_fuzzy_query_and_field_filter_update_visible_rows(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Cosmopolitan.wav"), 8_000, 8_000);
+        write_stereo_wav(&music.join("First Light.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks);
+                cx.notify();
+            });
+        });
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("test window remains available");
+
+        cx.update_window(window, |_, window, cx| {
+            let search = view
+                .read(cx)
+                .library_search
+                .as_ref()
+                .expect("library search is initialized")
+                .clone();
+            search.update(cx, |input, cx| input.set_value("csmpltn", window, cx));
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("library-status").label(),
+                Some("1 of 2 local tracks match")
+            );
+            window.click(("library-search-scope", 2_usize), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("library-status").label(),
+                Some("0 of 2 local tracks match")
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn library_table_header_cycles_sort_direction(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Zulu.wav"), 8_000, 8_000);
+        write_stereo_wav(&music.join("alpha.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks);
+                cx.notify();
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let table = view
+                .read(cx)
+                .library_table
+                .as_ref()
+                .expect("library table is initialized")
+                .clone();
+            assert_eq!(table.read(cx).delegate().track(0).unwrap().title(), "alpha");
+            window.click(("icon-sort", 1_usize), cx);
+            window.render_frame(cx);
+            assert_eq!(table.read(cx).delegate().track(0).unwrap().title(), "Zulu");
+        })
+        .expect("test window remains available");
+    }
+
+    #[test]
+    fn library_artwork_cache_requests_each_file_fingerprint_once() {
+        let key = ArtworkKey::for_test("/music/first-light.mp3", 42, 7);
+        let mut cache = ArtworkCache::<u8>::new(4);
+
+        assert_eq!(cache.request([key.clone()], 4), vec![key.clone()]);
+        assert!(cache.request([key.clone()], 4).is_empty());
+
+        cache.resolve(key.clone(), None);
+
+        assert!(cache.request([key.clone()], 4).is_empty());
+        assert_eq!(cache.value(&key), None);
+    }
+
+    #[test]
+    fn library_artwork_cache_reprobes_a_changed_file_fingerprint() {
+        let original = ArtworkKey::for_test("/music/first-light.mp3", 42, 7);
+        let changed = ArtworkKey::for_test("/music/first-light.mp3", 43, 8);
+        let mut cache = ArtworkCache::<u8>::new(4);
+
+        assert_eq!(cache.request([original.clone()], 4), vec![original.clone()]);
+        cache.resolve(original, Some(9));
+
+        assert_eq!(cache.request([changed.clone()], 4), vec![changed]);
+    }
+
+    #[test]
+    fn library_artwork_cache_never_exceeds_its_entry_limit() {
+        let mut cache = ArtworkCache::<u8>::new(2);
+        let first = ArtworkKey::for_test("/music/one.mp3", 1, 1);
+        let second = ArtworkKey::for_test("/music/two.mp3", 2, 2);
+        let third = ArtworkKey::for_test("/music/three.mp3", 3, 3);
+
+        assert_eq!(cache.request([first.clone(), second.clone()], 2).len(), 2);
+        cache.resolve(first.clone(), Some(1));
+        cache.resolve(second.clone(), None);
+        assert_eq!(cache.request([third.clone()], 1), vec![third.clone()]);
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.value(&first), None);
+        assert_eq!(cache.value(&third), None);
+    }
 
     #[gpui_kit::test]
     fn skin_theme_projects_field_text_placeholder_and_focus_colors(cx: &mut TestAppContext) {
@@ -2321,6 +3553,11 @@ mod tests {
             assert_eq!(theme.foreground, skin_hsla(skin.text()));
             assert_eq!(theme.muted_foreground, skin_hsla(skin.text_muted()));
             assert_eq!(theme.ring, skin_hsla(skin.accent()));
+            assert_eq!(theme.table, skin_hsla(skin.panel()));
+            assert_eq!(theme.table_even, skin_hsla(skin.panel_raised()));
+            assert_eq!(theme.table_head, skin_hsla(skin.field()));
+            assert_eq!(theme.table_head_foreground, skin_hsla(skin.text()));
+            assert_eq!(theme.table_row_border, skin_hsla(skin.control_border()));
         });
     }
 
@@ -2476,6 +3713,114 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn cached_artwork_is_exposed_as_an_accessible_library_thumbnail(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_stereo_wav(&music.join("Signal Bloom.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+        let key = ArtworkKey::from(&tracks[0]);
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks);
+                assert_eq!(
+                    view.library_artwork.request([key.clone()], 1),
+                    vec![key.clone()]
+                );
+                let art = CoverArt::for_test(vec![1, 2, 3], "image/png");
+                view.library_artwork
+                    .resolve(key, cover_image_from_art(Some(&art)));
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let table = view
+                .read(cx)
+                .library_table
+                .as_ref()
+                .expect("library table is initialized");
+            assert_eq!(table.read(cx).delegate().visible_count(), 1);
+            assert_eq!(table.read(cx).visible_range().rows(), &(0..1));
+            let artwork = window.find(("library-artwork", 0_usize));
+            assert_eq!(artwork.role(), Some(Role::Image));
+            assert_eq!(artwork.label(), Some("Album artwork for Signal Bloom"));
+            assert_eq!(
+                window.find(("library-track", 0_usize)).label(),
+                Some("Play Signal Bloom  —  Unknown artist  /  Unknown album. 8000 hertz, 2 channels, duration 00:01")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn library_artwork_is_probed_in_background_and_missing_art_is_cached(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary library directory is created");
+        let music = directory.path().join("Music");
+        fs::create_dir(&music).expect("music fixture directory is created");
+        write_tagged_stereo_wav(&music.join("Artwork Signal.wav"), 8_000, 8_000);
+        write_stereo_wav(&music.join("Plain Signal.wav"), 8_000, 8_000);
+        let catalogue = LibraryCatalogue::open(directory.path().join("library.sqlite3"))
+            .expect("catalogue opens");
+        catalogue.scan_root(&music).expect("music fixture scans");
+        let tracks = catalogue.search("").expect("library tracks load");
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.library_visible = true;
+                view.library_status = LibraryStatus::Ready(tracks.clone());
+                view.schedule_library_artwork(&tracks, cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("library-artwork", 0_usize)).label(),
+                Some("Album artwork for Artwork Signal")
+            );
+            assert!(
+                window
+                    .find(("library-artwork-placeholder", 1_usize))
+                    .visible()
+            );
+        })
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                assert!(
+                    view.library_artwork
+                        .request(tracks.iter().map(ArtworkKey::from), 2)
+                        .is_empty(),
+                    "ready and missing artwork entries stay cached"
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::test]
     fn now_playing_metadata_is_exposed_to_assistive_technology(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (window, _view) = cx.update(|cx| {
@@ -2587,6 +3932,114 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn remote_preview_exposes_determinate_progress_and_cancel(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("preview-remote-source").label(),
+                Some("Use yt-dlp for an audio source")
+            );
+            window.click("preview-remote-source", cx);
+            window.render_frame(cx);
+
+            let progress = window.find("remote-source-progress");
+            assert_eq!(progress.role(), Some(Role::ProgressIndicator));
+            assert_eq!(
+                progress.label(),
+                Some("yt-dlp transfer: 42 percent complete")
+            );
+            assert!(
+                window
+                    .find("remote-source-status")
+                    .label()
+                    .is_some_and(|label| !label.to_ascii_lowercase().contains("download"))
+            );
+            assert_eq!(
+                window.find("cancel-remote-source").label(),
+                Some("Cancel yt-dlp transfer")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn cancelled_remote_preview_exposes_status_and_dismiss(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, _view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("preview-remote-source", cx);
+            window.render_frame(cx);
+            window.click("cancel-remote-source", cx);
+            window.render_frame(cx);
+
+            assert!(
+                window
+                    .find("remote-source-status")
+                    .label()
+                    .is_some_and(|label| label.contains("CANCELLED"))
+            );
+            assert_eq!(
+                window.find("dismiss-remote-source").label(),
+                Some("Dismiss yt-dlp integration")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn failed_remote_preview_exposes_retry(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .unwrap()
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                let mut job = RemoteSourceJob::new("Cosmic relay sample");
+                job.apply(RemoteSourceEvent::Failed {
+                    message: "Preview relay unavailable".into(),
+                })
+                .unwrap();
+                view.remote_source_job = Some(job);
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("retry-remote-source").label(),
+                Some("Retry yt-dlp integration")
+            );
+            window.click("retry-remote-source", cx);
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find("remote-source-status")
+                    .label()
+                    .is_some_and(|label| label.contains("INSPECTING"))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     fn open_button_requests_one_local_file(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (window, _view) = cx.update(|cx| {
@@ -2646,7 +4099,7 @@ mod tests {
             );
             assert_eq!(
                 window.find("library-status").label(),
-                Some("No matching local tracks. Add a folder or change the search.")
+                Some("No local tracks. Add a music folder to begin.")
             );
             assert_eq!(
                 window.find("add-library-folder").label(),
@@ -2978,34 +4431,31 @@ mod tests {
             assert_eq!(window.find("player-root").focused(), Some(true));
         })
         .expect("test window remains available");
-        let mut track_reached = false;
+        let mut table_reached = false;
         for _ in 0..32 {
             cx.update_window(window, |_, window, cx| window.press("tab", cx))
                 .expect("test window remains available");
             cx.run_until_parked();
-            track_reached = cx
+            table_reached = cx
                 .update_window(window, |_, window, _| {
-                    window.find(("library-track", 0_usize)).focused() == Some(true)
+                    window.find("table").focused() == Some(true)
                 })
                 .expect("test window remains available");
-            if track_reached {
+            if table_reached {
                 break;
             }
         }
         assert!(
-            track_reached,
-            "library track is reachable with Tab navigation"
+            table_reached,
+            "library table is reachable with Tab navigation"
         );
 
         cx.update_window(window, |_, window, cx| {
-            let track = window.find(("library-track", 0_usize));
-            assert_eq!(track.focused(), Some(true));
-            assert!(
-                track
-                    .label()
-                    .is_some_and(|label| label.starts_with("Play Signal Bloom")),
-                "focused row exposes its playback action"
-            );
+            let table = window.find("table");
+            assert_eq!(table.focused(), Some(true));
+            assert_eq!(table.role(), Some(Role::Grid));
+            assert_eq!(table.label(), Some("Local library tracks"));
+            window.press("down", cx);
             window.press("enter", cx);
         })
         .expect("test window remains available");
@@ -3243,6 +4693,12 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
+            assert_eq!(window.find("preview-remote-source").focused(), Some(true));
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
             assert_eq!(window.find("toggle-library").focused(), Some(true));
             window.press("tab", cx);
         })
@@ -3412,5 +4868,36 @@ mod tests {
         bytes.resize(44 + data_size as usize, 0);
 
         fs::write(path, bytes).expect("WAV fixture is written");
+    }
+
+    fn write_tagged_stereo_wav(path: &std::path::Path, sample_rate: u32, frame_count: u32) {
+        write_stereo_wav(path, sample_rate, frame_count);
+        let wav = fs::read(path).expect("WAV fixture is read for tagging");
+        let mut apic_body = Vec::new();
+        apic_body.push(0);
+        apic_body.extend_from_slice(b"image/png\0");
+        apic_body.push(3);
+        apic_body.push(0);
+        apic_body.extend_from_slice(b"literal-png-fixture");
+        let mut apic_frame = Vec::new();
+        apic_frame.extend_from_slice(b"APIC");
+        apic_frame.extend_from_slice(&(apic_body.len() as u32).to_be_bytes());
+        apic_frame.extend_from_slice(&[0, 0]);
+        apic_frame.extend_from_slice(&apic_body);
+        let mut tagged = Vec::new();
+        tagged.extend_from_slice(b"ID3\x03\x00\x00");
+        tagged.extend_from_slice(&syncsafe(apic_frame.len()));
+        tagged.extend_from_slice(&apic_frame);
+        tagged.extend_from_slice(&wav);
+        fs::write(path, tagged).expect("tagged WAV fixture is written");
+    }
+
+    fn syncsafe(value: usize) -> [u8; 4] {
+        [
+            ((value >> 21) & 0x7f) as u8,
+            ((value >> 14) & 0x7f) as u8,
+            ((value >> 7) & 0x7f) as u8,
+            (value & 0x7f) as u8,
+        ]
     }
 }
