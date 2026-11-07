@@ -11,7 +11,6 @@ use rtrb::{Consumer, Producer, RingBuffer};
 #[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 mod macos;
 
-#[cfg(all(target_os = "macos", feature = "milkdrop-projectm"))]
 const AMP808_FIRST_LIGHT: &str = include_str!("../assets/presets/amp808-first-light.milk");
 
 pub const MAX_MILKDROP_PRESET_BYTES: usize = 2 * 1024 * 1024;
@@ -23,6 +22,13 @@ pub struct MilkdropPreset {
 }
 
 impl MilkdropPreset {
+    pub fn first_light() -> Self {
+        Self {
+            name: "First Light".to_owned(),
+            source: AMP808_FIRST_LIGHT.to_owned(),
+        }
+    }
+
     pub fn read(path: &Path) -> Result<Self, MilkdropPresetError> {
         let is_milk = path
             .extension()

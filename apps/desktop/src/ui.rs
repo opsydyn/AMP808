@@ -7,8 +7,8 @@ use gpui_kit::component::table::{
 use gpui_kit::{
     App, Context, ElementId, Entity, FocusHandle, Focusable, Hsla, Image, ImageFormat, IntoElement,
     KeyBinding, ObjectFit, PathPromptOptions, Render, Role, SharedString, StyledImage,
-    Subscription, TestSupportExt, WeakEntity, Window, canvas as gpui_canvas, deferred, div, img,
-    prelude::*, px, relative, rgb,
+    Subscription, TestSupportExt, UniformListScrollHandle, WeakEntity, Window,
+    canvas as gpui_canvas, deferred, div, img, prelude::*, px, relative, rgb, uniform_list,
 };
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -26,6 +26,7 @@ use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylis
 use crate::media::{CoverArt, TrackMetadata, probe_cover_art};
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
+use crate::preset_catalog::PresetCatalog;
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
 use crate::remote::RemoteSourceState;
 use crate::remote_transfer::RemoteTransferCoordinator;
@@ -1035,6 +1036,53 @@ impl TechnicalMetadataDisplay {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PresetPreviewState {
+    applied: MilkdropPreset,
+    previewed: Option<MilkdropPreset>,
+}
+
+impl PresetPreviewState {
+    fn new(applied: MilkdropPreset) -> Self {
+        Self {
+            applied,
+            previewed: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn applied(&self) -> &MilkdropPreset {
+        &self.applied
+    }
+
+    fn preview_succeeded(&mut self, preset: MilkdropPreset) {
+        self.previewed = Some(preset);
+    }
+
+    fn use_preview(&mut self) {
+        if let Some(previewed) = self.previewed.take() {
+            self.applied = previewed;
+        }
+    }
+
+    fn previewed(&self) -> Option<&MilkdropPreset> {
+        self.previewed.as_ref()
+    }
+
+    fn restore_target(&self) -> Option<&MilkdropPreset> {
+        self.previewed.as_ref().map(|_| &self.applied)
+    }
+
+    fn restore_succeeded(&mut self) {
+        self.previewed = None;
+    }
+
+    fn apply_explicit(&mut self, preset: MilkdropPreset) {
+        self.applied = preset;
+        self.previewed = None;
+    }
+}
+
 pub struct PlayerView {
     app: DesktopApp,
     focus: FocusHandle,
@@ -1045,6 +1093,15 @@ pub struct PlayerView {
     cover_image: Option<Arc<Image>>,
     milkdrop_preset_notice: Option<String>,
     milkdrop_preset_error: Option<String>,
+    preset_catalog: PresetCatalog,
+    preset_visible_indices: Vec<usize>,
+    preset_search: Option<Entity<InputState>>,
+    preset_search_subscription: Option<Subscription>,
+    preset_category: Option<String>,
+    preset_selected_id: Option<String>,
+    preset_scroll: UniformListScrollHandle,
+    preset_preview: PresetPreviewState,
+    preset_folder_loading: bool,
     error: Option<String>,
     seeking: bool,
     visualizer_mode: VisualizerMode,
@@ -1076,6 +1133,12 @@ pub struct PlayerView {
 
 impl PlayerView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let preset_catalog = PresetCatalog::built_in();
+        let preset_visible_indices = preset_catalog.search("", None);
+        let preset_selected_id = preset_catalog
+            .entries()
+            .first()
+            .map(|entry| entry.id().to_owned());
         Self {
             app: DesktopApp::new(),
             focus: cx.focus_handle(),
@@ -1086,6 +1149,15 @@ impl PlayerView {
             cover_image: None,
             milkdrop_preset_notice: None,
             milkdrop_preset_error: None,
+            preset_catalog,
+            preset_visible_indices,
+            preset_search: None,
+            preset_search_subscription: None,
+            preset_category: None,
+            preset_selected_id,
+            preset_scroll: UniformListScrollHandle::new(),
+            preset_preview: PresetPreviewState::new(MilkdropPreset::first_light()),
+            preset_folder_loading: false,
             error: None,
             seeking: false,
             visualizer_mode: VisualizerMode::Spectrum,
@@ -1368,6 +1440,7 @@ impl PlayerView {
                 match result {
                     Ok(preset) => match view.milkdrop.install_preset(&preset) {
                         Ok(()) => {
+                            view.preset_preview.apply_explicit(preset.clone());
                             view.milkdrop_preset_notice =
                                 Some(format!("Loaded MilkDrop preset: {}", preset.name()));
                             view.milkdrop_preset_error = None;
@@ -1386,6 +1459,197 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    fn ensure_preset_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preset_search.is_some() {
+            return;
+        }
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search title or preset type"));
+        let subscription = cx.subscribe(&search, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.refresh_preset_gallery(cx);
+            }
+        });
+        self.preset_search = Some(search);
+        self.preset_search_subscription = Some(subscription);
+    }
+
+    fn refresh_preset_gallery(&mut self, cx: &mut Context<Self>) {
+        let query = self
+            .preset_search
+            .as_ref()
+            .map_or_else(String::new, |search| search.read(cx).value().to_string());
+        self.preset_visible_indices = self
+            .preset_catalog
+            .search(&query, self.preset_category.as_deref());
+        if self.preset_selected_id.as_ref().is_none_or(|selected| {
+            !self
+                .preset_visible_indices
+                .iter()
+                .any(|index| self.preset_catalog.entries()[*index].id() == selected.as_str())
+        }) {
+            self.preset_selected_id = self
+                .preset_visible_indices
+                .first()
+                .map(|index| self.preset_catalog.entries()[*index].id().to_owned());
+        }
+        cx.notify();
+    }
+
+    fn set_preset_category(&mut self, category: Option<String>, cx: &mut Context<Self>) {
+        self.preset_category = category;
+        self.refresh_preset_gallery(cx);
+    }
+
+    fn select_preset(&mut self, id: String, cx: &mut Context<Self>) {
+        self.preset_selected_id = Some(id);
+        cx.notify();
+    }
+
+    fn choose_preset_folder(&mut self, cx: &mut Context<Self>) {
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add a MilkDrop preset folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let path = match selection.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) => None,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.preset_folder_loading = true;
+                view.milkdrop_preset_notice = Some("Scanning local MilkDrop presets…".to_owned());
+                view.milkdrop_preset_error = None;
+                cx.notify();
+            });
+            let scan_path = path.clone();
+            let scan = cx
+                .background_executor()
+                .spawn(async move { PresetCatalog::discover_local(&scan_path) });
+            let result = scan.await;
+            let _ = this.update(cx, |view, cx| {
+                view.preset_folder_loading = false;
+                match result {
+                    Ok(entries) => {
+                        let count = entries.len();
+                        view.preset_catalog.replace_local(entries);
+                        view.preset_category = None;
+                        view.milkdrop_preset_notice = Some(format!(
+                            "Added {count} local MilkDrop presets from {}",
+                            path.display()
+                        ));
+                        view.milkdrop_preset_error = None;
+                        view.refresh_preset_gallery(cx);
+                    }
+                    Err(error) => {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn preview_selected_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.preset_selected_id.as_deref() else {
+            return;
+        };
+        let Some(entry) = self
+            .preset_catalog
+            .entries()
+            .iter()
+            .find(|entry| entry.id() == selected)
+            .cloned()
+        else {
+            return;
+        };
+        let name = entry.title().to_owned();
+        self.milkdrop_preset_notice = Some(format!("Loading preview: {name}"));
+        self.milkdrop_preset_error = None;
+        let load = cx.background_executor().spawn(async move { entry.load() });
+        cx.spawn(async move |this, cx| {
+            let result = load.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(preset) => match view.milkdrop.install_preset(&preset) {
+                        Ok(()) => {
+                            view.preset_preview.preview_succeeded(preset);
+                            view.milkdrop_preset_notice = Some(format!("Previewing: {name}"));
+                            view.milkdrop_preset_error = None;
+                        }
+                        Err(error) => {
+                            view.milkdrop_preset_notice = None;
+                            view.milkdrop_preset_error = Some(error.to_string());
+                        }
+                    },
+                    Err(error) => {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn use_previewed_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .preset_preview
+            .previewed()
+            .map(|preset| preset.name().to_owned())
+        else {
+            return;
+        };
+        self.preset_preview.use_preview();
+        self.milkdrop_preset_notice = Some(format!("Using MilkDrop preset: {name}"));
+        self.milkdrop_preset_error = None;
+        cx.notify();
+    }
+
+    fn restore_applied_preset(&mut self, cx: &mut Context<Self>) {
+        let Some(applied) = self.preset_preview.restore_target().cloned() else {
+            return;
+        };
+        match self.milkdrop.install_preset(&applied) {
+            Ok(()) => {
+                let name = applied.name().to_owned();
+                self.preset_preview.restore_succeeded();
+                self.milkdrop_preset_notice = Some(format!("Restored MilkDrop preset: {name}"));
+                self.milkdrop_preset_error = None;
+            }
+            Err(error) => {
+                self.milkdrop_preset_notice = None;
+                self.milkdrop_preset_error = Some(error.to_string());
+            }
+        }
+        cx.notify();
     }
 
     fn ensure_library_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2127,6 +2391,7 @@ impl PerformanceProbe {
 
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_preset_search(window, cx);
         self.ensure_library_search(window, cx);
         self.sync_library_table(cx);
         let canvas = self.color(self.skin.canvas());
@@ -2343,6 +2608,249 @@ impl Render for PlayerView {
                 }
                 visualizer.into_any_element()
             }
+        };
+        let visualizer = if self.visualizer_mode == VisualizerMode::MilkDrop {
+            let preset_search = self
+                .preset_search
+                .as_ref()
+                .expect("preset search is initialized before gallery rendering")
+                .clone();
+            let categories = self.preset_catalog.categories();
+            let visible_count = self.preset_visible_indices.len();
+            let total_count = self.preset_catalog.entries().len();
+            let selected_title = self.preset_selected_id.as_deref().and_then(|selected| {
+                self.preset_catalog
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.id() == selected)
+                    .map(|entry| entry.title().to_owned())
+            });
+            let preview_label = selected_title.as_ref().map_or_else(
+                || "Preview selected preset".to_owned(),
+                |title| format!("Preview {title}"),
+            );
+            let has_preview = self.preset_preview.previewed().is_some();
+            let gallery_status = if self.preset_folder_loading {
+                "Scanning local MilkDrop presets".to_owned()
+            } else {
+                format!("{visible_count} of {total_count} presets shown")
+            };
+            let preset_scroll = self.preset_scroll.clone();
+            let preset_list = uniform_list(
+                "preset-gallery-results",
+                visible_count,
+                cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .filter_map(|row| {
+                            let entry_index = *this.preset_visible_indices.get(row)?;
+                            let entry = this.preset_catalog.entries().get(entry_index)?;
+                            let id = entry.id().to_owned();
+                            let title = entry.title().to_owned();
+                            let category = entry.category().to_owned();
+                            let selected = this.preset_selected_id.as_deref() == Some(id.as_str());
+                            Some(
+                                hardware_button(
+                                    ("preset-gallery-row", row),
+                                    if selected {
+                                        HardwareButtonTone::Primary
+                                    } else {
+                                        HardwareButtonTone::Neutral
+                                    },
+                                    this.skin,
+                                    cx,
+                                )
+                                .w_full()
+                                .label(format!("{title}  ·  {category}"))
+                                .accessibility_label(format!("Select {title}, {category} preset"))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.select_preset(id.clone(), cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .w_full()
+            .h_full()
+            .track_scroll(&preset_scroll);
+            let gallery = div()
+                .id("preset-gallery")
+                .test_support()
+                .role(Role::Group)
+                .aria_label("MilkDrop preset gallery")
+                .flex()
+                .flex_col()
+                .flex_shrink_0()
+                .w(px(330.0))
+                .min_h_0()
+                .rounded_md()
+                .border_1()
+                .border_color(panel_raised)
+                .bg(canvas.opacity(0.72))
+                .p_3()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_sm().font_semibold().child("PRESET GALLERY"))
+                        .child(
+                            hardware_button(
+                                "add-preset-folder",
+                                HardwareButtonTone::Neutral,
+                                self.skin,
+                                cx,
+                            )
+                            .label("ADD FOLDER")
+                            .accessibility_label("Add a local MilkDrop preset folder")
+                            .disabled(self.preset_folder_loading)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.choose_preset_folder(cx);
+                            })),
+                        ),
+                )
+                .child(
+                    hardware_input(&preset_search, "preset-gallery-search", self.skin)
+                        .aria_label("Search MilkDrop presets by title or type"),
+                )
+                .child(
+                    div()
+                        .id("preset-category-filter")
+                        .test_support()
+                        .role(Role::Group)
+                        .aria_label("MilkDrop preset type filter")
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(
+                            hardware_button(
+                                ("preset-category", 0_usize),
+                                if self.preset_category.is_none() {
+                                    HardwareButtonTone::Primary
+                                } else {
+                                    HardwareButtonTone::Neutral
+                                },
+                                self.skin,
+                                cx,
+                            )
+                            .label("ALL")
+                            .accessibility_label(if self.preset_category.is_none() {
+                                "Show all preset types, selected"
+                            } else {
+                                "Show all preset types"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_preset_category(None, cx);
+                            })),
+                        )
+                        .children(categories.into_iter().enumerate().map(|(index, category)| {
+                            let selected =
+                                self.preset_category.as_deref() == Some(category.as_str());
+                            let label = category.to_uppercase();
+                            hardware_button(
+                                ("preset-category", index + 1),
+                                if selected {
+                                    HardwareButtonTone::Primary
+                                } else {
+                                    HardwareButtonTone::Neutral
+                                },
+                                self.skin,
+                                cx,
+                            )
+                            .label(label)
+                            .accessibility_label(format!(
+                                "Show {category} presets{}",
+                                if selected { ", selected" } else { "" }
+                            ))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.set_preset_category(Some(category.clone()), cx);
+                                },
+                            ))
+                        })),
+                )
+                .child(
+                    div()
+                        .id("preset-gallery-status")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(gallery_status.clone())
+                        .text_xs()
+                        .text_color(text_muted)
+                        .child(gallery_status),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(preset_list),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            hardware_button(
+                                "preview-preset",
+                                HardwareButtonTone::Primary,
+                                self.skin,
+                                cx,
+                            )
+                            .label("PREVIEW")
+                            .accessibility_label(preview_label)
+                            .disabled(
+                                !has_session
+                                    || selected_title.is_none()
+                                    || self.preset_folder_loading,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.preview_selected_preset(cx);
+                            })),
+                        )
+                        .child(
+                            hardware_button(
+                                "use-previewed-preset",
+                                HardwareButtonTone::Neutral,
+                                self.skin,
+                                cx,
+                            )
+                            .label("USE")
+                            .accessibility_label("Use the previewed MilkDrop preset")
+                            .disabled(!has_preview)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.use_previewed_preset(cx);
+                            })),
+                        )
+                        .child(
+                            hardware_button(
+                                "restore-applied-preset",
+                                HardwareButtonTone::Neutral,
+                                self.skin,
+                                cx,
+                            )
+                            .label("RESTORE")
+                            .accessibility_label("Restore the applied MilkDrop preset")
+                            .disabled(!has_preview)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.restore_applied_preset(cx);
+                            })),
+                        ),
+                );
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .gap_3()
+                .child(gallery)
+                .child(visualizer)
+                .into_any_element()
+        } else {
+            visualizer
         };
         let play_label = if is_playing { "PAUSE" } else { "PLAY" };
         let play_accessibility_label = if is_playing { "Pause" } else { "Play" };
@@ -3790,10 +4298,10 @@ mod tests {
     use super::{
         ArtworkCache, ArtworkKey, LibraryCatalogue, LibrarySearchScope, LibrarySortDirection,
         LibrarySortField, LibraryStatus, LibraryTrack, PerformanceProbe, PlaybackToggle,
-        PlayerView, QueuedTrack, TechnicalMetadataDisplay, TrackDisplay, VisualizerMode,
-        cover_image_from_art, init_skin_theme, library_fuzzy_score, library_metadata_score,
-        milkdrop_status_label, playback_toggle, should_present_milkdrop, signal_status, skin_hsla,
-        sort_library_tracks,
+        PlayerView, PresetPreviewState, QueuedTrack, TechnicalMetadataDisplay, TrackDisplay,
+        VisualizerMode, cover_image_from_art, init_skin_theme, library_fuzzy_score,
+        library_metadata_score, milkdrop_status_label, playback_toggle, should_present_milkdrop,
+        signal_status, skin_hsla, sort_library_tracks,
     };
 
     #[test]
@@ -4055,6 +4563,36 @@ mod tests {
             false,
             super::VisualizerMode::Spectrum
         ));
+    }
+
+    #[test]
+    fn preset_preview_is_reversible_until_the_user_promotes_it() {
+        let directory = tempdir().expect("temporary preset directory is created");
+        let candidate_path = directory.path().join("Cosmic Bloom.milk");
+        fs::write(&candidate_path, "[preset00]\nfRating=5.0\n")
+            .expect("candidate preset is written");
+        let candidate =
+            crate::milkdrop::MilkdropPreset::read(&candidate_path).expect("candidate preset loads");
+        let applied = crate::milkdrop::MilkdropPreset::first_light();
+        let mut state = PresetPreviewState::new(applied);
+
+        state.preview_succeeded(candidate.clone());
+        assert_eq!(
+            state
+                .restore_target()
+                .expect("active preview has a restore target")
+                .name(),
+            "First Light"
+        );
+
+        state.use_preview();
+        assert_eq!(state.applied().name(), "Cosmic Bloom.milk");
+        assert_eq!(state.restore_target(), None);
+
+        state.preview_succeeded(crate::milkdrop::MilkdropPreset::first_light());
+        state.restore_succeeded();
+        assert_eq!(state.applied().name(), "Cosmic Bloom.milk");
+        assert_eq!(state.restore_target(), None);
     }
 
     #[test]
@@ -5243,6 +5781,176 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn milkdrop_mode_exposes_an_accessible_virtual_preset_gallery(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(PlayerView::new),
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("preset-gallery").role(), Some(Role::Group));
+            assert_eq!(
+                window.find("preset-gallery").label(),
+                Some("MilkDrop preset gallery")
+            );
+            let first_row = window.find(("preset-gallery-row", 0_usize));
+            assert_eq!(first_row.label(), Some("Select First Light, AMP808 preset"));
+            assert!(first_row.visible(), "the first preset row is visible");
+            assert!(
+                first_row.bounds().size.width > px(100.0),
+                "the first preset row has usable visual width: {:?}",
+                first_row.bounds()
+            );
+            assert_eq!(
+                window.find("add-preset-folder").label(),
+                Some("Add a local MilkDrop preset folder")
+            );
+            assert_eq!(
+                window.find("preview-preset").label(),
+                Some("Preview First Light")
+            );
+            assert_eq!(window.find("preview-preset").disabled(), Some(true));
+            assert_eq!(window.find("use-previewed-preset").disabled(), Some(true));
+            assert_eq!(window.find("restore-applied-preset").disabled(), Some(true));
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn preset_gallery_adds_a_local_folder_then_filters_and_searches_it(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        fs::create_dir(directory.path().join("Fractal")).expect("fractal category is created");
+        fs::create_dir(directory.path().join("Particles")).expect("particle category is created");
+        fs::write(
+            directory.path().join("Fractal/Cosmic Spiral.milk"),
+            "[preset00]\n",
+        )
+        .expect("fractal preset is written");
+        fs::write(
+            directory.path().join("Particles/Cosmic Bloom.milk"),
+            "[preset00]\n",
+        )
+        .expect("particle preset is written");
+        let preset_root = directory.path().to_path_buf();
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(PlayerView::new),
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                cx.notify();
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("add-preset-folder", cx);
+        })
+        .expect("test window remains available");
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(move |options| {
+            assert!(!options.files);
+            assert!(options.directories);
+            assert!(!options.multiple);
+            assert_eq!(
+                options.prompt.as_deref(),
+                Some("Add a MilkDrop preset folder")
+            );
+            Some(vec![preset_root])
+        });
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("preset-gallery-status").label(),
+                Some("3 of 3 presets shown")
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.set_preset_category(Some("Fractal".to_owned()), cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("preset-gallery-status").label(),
+                Some("1 of 3 presets shown")
+            );
+            assert_eq!(
+                window.find(("preset-gallery-row", 0_usize)).label(),
+                Some("Select Cosmic Spiral, Fractal preset")
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.set_preset_category(None, cx);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let search = view
+                .read(cx)
+                .preset_search
+                .as_ref()
+                .expect("preset search is initialized")
+                .clone();
+            search.update(cx, |input, cx| input.set_value("csmc blm", window, cx));
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
+        cx.update(|cx| {
+            view.update(cx, |view, cx| view.refresh_preset_gallery(cx));
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("preset-gallery-status").label(),
+                Some("1 of 3 presets shown")
+            );
+            assert_eq!(
+                window.find(("preset-gallery-row", 0_usize)).label(),
+                Some("Select Cosmic Bloom, Particles preset")
+            );
+        })
+        .expect("test window remains available");
     }
 
     #[gpui_kit::test]

@@ -6,6 +6,7 @@ mod library;
 mod media;
 mod milkdrop;
 mod playback;
+mod preset_catalog;
 mod queue;
 mod remote;
 mod remote_transfer;
