@@ -27,6 +27,9 @@ use crate::media::{CoverArt, TrackMetadata, probe_cover_art};
 use crate::milkdrop::{MilkdropPreset, MilkdropStatus, MilkdropViewHost};
 use crate::playback::{DecodeWorkerState, PlaybackSession, PlaybackSessionError};
 use crate::preset_catalog::PresetCatalog;
+use crate::preset_folder::{
+    PresetFolderAccess, PresetFolderBookmarkStore, create_bookmark, restore_bookmark,
+};
 use crate::queue::{PlaybackQueue, QueueAdvance, QueuedTrack};
 use crate::remote::RemoteSourceState;
 use crate::remote_transfer::RemoteTransferCoordinator;
@@ -1113,6 +1116,8 @@ pub struct PlayerView {
     preset_scroll: UniformListScrollHandle,
     preset_preview: PresetPreviewState,
     preset_folder_loading: bool,
+    preset_folder_access: Option<PresetFolderAccess>,
+    preset_bookmark_store: Option<PresetFolderBookmarkStore>,
     error: Option<String>,
     seeking: bool,
     visualizer_mode: VisualizerMode,
@@ -1150,7 +1155,15 @@ impl PlayerView {
             .entries()
             .first()
             .map(|entry| entry.id().to_owned());
-        Self {
+        #[cfg(not(test))]
+        let (preset_bookmark_store, preset_store_error) =
+            match PresetFolderBookmarkStore::open_default() {
+                Ok(store) => (Some(store), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+        #[cfg(test)]
+        let (preset_bookmark_store, preset_store_error) = (None, None);
+        let mut view = Self {
             app: DesktopApp::new(),
             focus: cx.focus_handle(),
             skin: Amp808Skin::built_in(),
@@ -1159,7 +1172,7 @@ impl PlayerView {
             milkdrop: MilkdropViewHost::new(),
             cover_image: None,
             milkdrop_preset_notice: None,
-            milkdrop_preset_error: None,
+            milkdrop_preset_error: preset_store_error,
             preset_catalog,
             preset_visible_indices,
             preset_search: None,
@@ -1170,6 +1183,8 @@ impl PlayerView {
             preset_scroll: UniformListScrollHandle::new(),
             preset_preview: PresetPreviewState::new(MilkdropPreset::first_light()),
             preset_folder_loading: false,
+            preset_folder_access: None,
+            preset_bookmark_store,
             error: None,
             seeking: false,
             visualizer_mode: VisualizerMode::Spectrum,
@@ -1197,7 +1212,11 @@ impl PlayerView {
             remote_source_error: None,
             remote_source: None,
             remote_transfer: None,
+        };
+        if let Some(store) = view.preset_bookmark_store.clone() {
+            view.restore_preset_folder(store, cx);
         }
+        view
     }
 
     fn open_remote_source_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1548,6 +1567,57 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn restore_preset_folder(&mut self, store: PresetFolderBookmarkStore, cx: &mut Context<Self>) {
+        self.preset_folder_loading = true;
+        self.milkdrop_preset_notice = Some("Restoring local MilkDrop presets…".to_owned());
+        self.milkdrop_preset_error = None;
+        let restore = cx.background_executor().spawn(async move {
+            let Some(bookmark) = store.load().map_err(|error| error.to_string())? else {
+                return Ok::<_, String>(None);
+            };
+            let restored = restore_bookmark(&bookmark).map_err(|error| error.to_string())?;
+            if let Some(refreshed) = restored.refreshed_bookmark() {
+                store.save(refreshed).map_err(|error| error.to_string())?;
+            }
+            let path = restored.access().path().to_path_buf();
+            let entries =
+                PresetCatalog::discover_local(&path).map_err(|error| error.to_string())?;
+            Ok(Some((restored.into_access(), entries, path)))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = restore.await;
+            let _ = this.update(cx, |view, cx| {
+                view.preset_folder_loading = false;
+                match result {
+                    Ok(Some((access, entries, path))) => {
+                        let count = entries.len();
+                        view.preset_folder_access = Some(access);
+                        view.preset_catalog.replace_local(entries);
+                        view.preset_category = None;
+                        view.milkdrop_preset_notice = Some(format!(
+                            "Restored {count} local MilkDrop presets from {}",
+                            path.display()
+                        ));
+                        view.milkdrop_preset_error = None;
+                        view.refresh_preset_gallery(cx);
+                    }
+                    Ok(None) => {
+                        view.milkdrop_preset_notice = None;
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        view.milkdrop_preset_notice = None;
+                        view.milkdrop_preset_error =
+                            Some(format!("Could not restore local MilkDrop presets: {error}"));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn choose_preset_folder(&mut self, cx: &mut Context<Self>) {
         let selection = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -1586,15 +1656,35 @@ impl PlayerView {
                 cx.notify();
             });
             let scan_path = path.clone();
-            let scan = cx
-                .background_executor()
-                .spawn(async move { PresetCatalog::discover_local(&scan_path) });
+            let bookmark_store = this
+                .read_with(cx, |view, _| view.preset_bookmark_store.clone())
+                .ok()
+                .flatten();
+            let scan = cx.background_executor().spawn(async move {
+                if let Some(store) = bookmark_store {
+                    let prepared =
+                        create_bookmark(&scan_path).map_err(|error| error.to_string())?;
+                    let entries = PresetCatalog::discover_local(prepared.access().path())
+                        .map_err(|error| error.to_string())?;
+                    store
+                        .save(prepared.bookmark())
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((Some(prepared.into_access()), entries))
+                } else {
+                    PresetCatalog::discover_local(&scan_path)
+                        .map(|entries| (None, entries))
+                        .map_err(|error| error.to_string())
+                }
+            });
             let result = scan.await;
             let _ = this.update(cx, |view, cx| {
                 view.preset_folder_loading = false;
                 match result {
-                    Ok(entries) => {
+                    Ok((access, entries)) => {
                         let count = entries.len();
+                        if let Some(access) = access {
+                            view.preset_folder_access = Some(access);
+                        }
                         view.preset_catalog.replace_local(entries);
                         view.preset_category = None;
                         view.milkdrop_preset_notice = Some(format!(
@@ -6080,21 +6170,14 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn preset_gallery_adds_a_local_folder_then_filters_and_searches_it(cx: &mut TestAppContext) {
-        let directory = tempdir().expect("temporary preset directory is created");
-        fs::create_dir(directory.path().join("Fractal")).expect("fractal category is created");
-        fs::create_dir(directory.path().join("Particles")).expect("particle category is created");
-        fs::write(
-            directory.path().join("Fractal/Cosmic Spiral.milk"),
-            "[preset00]\n",
-        )
-        .expect("fractal preset is written");
-        fs::write(
-            directory.path().join("Particles/Cosmic Bloom.milk"),
-            "[preset00]\n",
-        )
-        .expect("particle preset is written");
-        let preset_root = directory.path().to_path_buf();
+    fn corrupt_restored_preset_folder_keeps_first_light_and_exposes_alert(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary bookmark directory is created");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        store
+            .save(&[0xff, 0x00, 0xfe])
+            .expect("corrupt bookmark fixture is persisted");
 
         cx.update(gpui_kit::init);
         let (window, view) = cx.update(|cx| {
@@ -6114,6 +6197,125 @@ mod tests {
         cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.restore_preset_folder(store, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let alert = window.find("milkdrop-preset-error");
+            assert_eq!(alert.role(), Some(Role::Alert));
+            assert!(
+                alert
+                    .label()
+                    .is_some_and(|label| label.contains("resolve preset folder bookmark")),
+                "restoration failure is exposed through the existing preset alert"
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            let view = view.read(cx);
+            assert_eq!(view.preset_catalog.entries().len(), 1);
+            assert_eq!(view.preset_catalog.entries()[0].title(), "First Light");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn persisted_preset_folder_restores_and_rescans_after_reopen(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        fs::write(directory.path().join("Return Signal.milk"), "[preset00]\n")
+            .expect("local preset is written");
+        let store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let prepared = crate::preset_folder::create_bookmark(directory.path())
+            .expect("selected folder produces a bookmark");
+        store
+            .save(prepared.bookmark())
+            .expect("bookmark is persisted");
+        drop(prepared);
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(PlayerView::new),
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.restore_preset_folder(store, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("preset-gallery-status").label(),
+                Some("2 of 2 presets shown")
+            );
+            assert_eq!(
+                window.find(("preset-gallery-row", 1_usize)).label(),
+                Some("Select Return Signal, Uncategorised preset")
+            );
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            assert!(view.read(cx).preset_folder_access.is_some());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn preset_gallery_adds_a_local_folder_then_filters_and_searches_it(cx: &mut TestAppContext) {
+        let directory = tempdir().expect("temporary preset directory is created");
+        fs::create_dir(directory.path().join("Fractal")).expect("fractal category is created");
+        fs::create_dir(directory.path().join("Particles")).expect("particle category is created");
+        fs::write(
+            directory.path().join("Fractal/Cosmic Spiral.milk"),
+            "[preset00]\n",
+        )
+        .expect("fractal preset is written");
+        fs::write(
+            directory.path().join("Particles/Cosmic Bloom.milk"),
+            "[preset00]\n",
+        )
+        .expect("particle preset is written");
+        let preset_root = directory.path().to_path_buf();
+        let bookmark_store = crate::preset_folder::PresetFolderBookmarkStore::new(
+            directory.path().join("preset-folder.bookmark"),
+        );
+        let persisted_bookmark = bookmark_store.clone();
+
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(1_120.0), px(720.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(PlayerView::new),
+            )
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.visualizer_mode = VisualizerMode::MilkDrop;
+                view.preset_bookmark_store = Some(bookmark_store);
                 cx.notify();
             });
         });
@@ -6135,6 +6337,20 @@ mod tests {
             Some(vec![preset_root])
         });
         cx.run_until_parked();
+
+        assert!(
+            persisted_bookmark
+                .load()
+                .expect("persisted bookmark reopens")
+                .is_some(),
+            "successful Add Folder persists opaque bookmark data"
+        );
+        cx.update(|cx| {
+            assert!(
+                view.read(cx).preset_folder_access.is_some(),
+                "the security-scope guard remains alive for later previews"
+            );
+        });
 
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);

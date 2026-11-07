@@ -51,3 +51,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0031: Stage remote media acquisition behind a provider-agnostic desktop job](0031-stage-remote-media-acquisition-behind-a-provider-agnostic-desktop-job.md) (accepted, 2026-11-07)
 - [ADR-0032: Run yt-dlp behind a cancellable desktop transfer adapter](0032-run-yt-dlp-behind-a-cancellable-desktop-transfer-adapter.md) (accepted, 2026-11-07)
 - [ADR-0033: Add a local-first MilkDrop preset gallery with reversible live preview](0033-add-a-local-first-milkdrop-preset-gallery.md) (accepted, 2026-11-07)
+- [ADR-0034: Persist the local MilkDrop folder with a macOS security-scoped bookmark](0034-persist-the-local-milkdrop-folder-with-a-macos-security-scoped-bookmark.md) (accepted, 2026-11-07)
