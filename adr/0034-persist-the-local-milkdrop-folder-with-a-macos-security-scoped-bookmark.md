@@ -177,7 +177,7 @@ closed until the application has a production packaging pipeline and identity.
       `preset_folder` boundary.
 - [x] Base and projectM desktop tests pass.
 - [x] Strict desktop test-target Clippy, `cargo fmt --all -- --check`, and `git diff --check` pass.
-- [ ] Native relaunch with one unchanged signed test bundle restores the folder and previews a
+- [x] Native relaunch with one unchanged signed test bundle restores the folder and previews a
       local preset; production stable-signing and App Sandbox proof remain separately open.
 
 ## Pros and Cons of the Options
@@ -245,11 +245,12 @@ closed until the application has a production packaging pipeline and identity.
   guard, working gallery entry, and previous bookmark while exposing an accessible error.
 - Native same-bundle evidence used one ad-hoc signed app with the declared bookmark entitlements.
   After selecting the bundled preset folder and terminating the process, the relaunched app
-  exposed `Restored 1 local MilkDrop presets from .../apps/desktop/assets/presets`. The generated
-  868-byte mode-`0600` acceptance bookmark was then deleted; the pre-existing library database was
-  left untouched.
-- Still open: native preview after restored access and production stable-signing plus App Sandbox
-  enforcement.
+  exposed `Restored 1 local MilkDrop presets from .../apps/desktop/assets/presets`. With a local WAV
+  playing at `PCM / LIVE`, the restored `amp808-first-light` row produced `Previewing:
+  amp808-first-light`, enabled Use and Restore, and visibly changed the active MilkDrop render. The
+  generated 868-byte mode-`0600` acceptance bookmark was then deleted; the pre-existing library
+  database was left untouched.
+- Still open: production stable-signing plus App Sandbox enforcement.
 
 - ADR-0022: [Add the macOS-first desktop player](0022-add-amp808-r3tr0-macos-desktop-player.md)
 - ADR-0033: [Add a local-first MilkDrop preset gallery](0033-add-a-local-first-milkdrop-preset-gallery.md)
