@@ -1619,6 +1619,18 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn play_next_apple_track(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.skip_to_next();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
+    fn play_previous_apple_track(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.skip_to_previous();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
     fn show_apple_playlists(&mut self, cx: &mut Context<Self>) {
         self.selected_apple_playlist = None;
         cx.notify();
@@ -4075,6 +4087,12 @@ impl Render for PlayerView {
             ApplePlaybackState::Resuming { .. } => Some("Resuming Apple Music playback".to_owned()),
             ApplePlaybackState::Stopping { .. } => Some("Stopping Apple Music playback".to_owned()),
             ApplePlaybackState::Stopped { .. } => Some("Apple Music playback stopped".to_owned()),
+            ApplePlaybackState::SkippingNext { .. } => {
+                Some("Skipping to next Apple Music track".to_owned())
+            }
+            ApplePlaybackState::SkippingPrevious { .. } => {
+                Some("Skipping to previous Apple Music track".to_owned())
+            }
             ApplePlaybackState::Failed { .. } => {
                 Some(self.apple_music.playback_error().map_or_else(
                     || "Apple Music playback could not start".to_owned(),
@@ -4089,6 +4107,8 @@ impl Render for PlayerView {
             &apple_playback,
             ApplePlaybackState::Playing { .. } | ApplePlaybackState::Paused { .. }
         );
+        let apple_can_skip_to_previous = self.apple_music.can_skip_to_previous();
+        let apple_can_skip_to_next = self.apple_music.can_skip_to_next();
         let apple_track_count = apple_tracks.len();
         let apple_tracks = Arc::new(apple_tracks);
         let rendered_apple_tracks = Arc::clone(&apple_tracks);
@@ -4110,6 +4130,8 @@ impl Render for PlayerView {
                             | ApplePlaybackState::Resuming { track_id, .. }
                             | ApplePlaybackState::Stopping { track_id, .. }
                             | ApplePlaybackState::Stopped { track_id }
+                            | ApplePlaybackState::SkippingNext { track_id, .. }
+                            | ApplePlaybackState::SkippingPrevious { track_id, .. }
                             | ApplePlaybackState::Failed { track_id } => track_id == track.id(),
                             ApplePlaybackState::Idle => false,
                         };
@@ -4142,6 +4164,16 @@ impl Render for PlayerView {
                             }
                             ApplePlaybackState::Stopped { track_id } if track_id == track.id() => {
                                 ", stopped"
+                            }
+                            ApplePlaybackState::SkippingNext { track_id, .. }
+                                if track_id == track.id() =>
+                            {
+                                ", skipping next"
+                            }
+                            ApplePlaybackState::SkippingPrevious { track_id, .. }
+                                if track_id == track.id() =>
+                            {
+                                ", skipping previous"
                             }
                             ApplePlaybackState::Failed { track_id } if track_id == track.id() => {
                                 ", playback failed"
@@ -4256,6 +4288,36 @@ impl Render for PlayerView {
                         .font_semibold()
                         .text_color(accent)
                         .child(status),
+                )
+            })
+            .when(apple_can_skip_to_previous, |panel| {
+                panel.child(
+                    hardware_button(
+                        "settings-previous-apple-track",
+                        HardwareButtonTone::Neutral,
+                        self.skin,
+                        cx,
+                    )
+                    .label("PREVIOUS APPLE")
+                    .accessibility_label("Play previous Apple Music track")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.play_previous_apple_track(cx);
+                    })),
+                )
+            })
+            .when(apple_can_skip_to_next, |panel| {
+                panel.child(
+                    hardware_button(
+                        "settings-next-apple-track",
+                        HardwareButtonTone::Neutral,
+                        self.skin,
+                        cx,
+                    )
+                    .label("NEXT APPLE")
+                    .accessibility_label("Play next Apple Music track")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.play_next_apple_track(cx);
+                    })),
                 )
             })
             .when(apple_can_pause, |panel| {
@@ -5576,14 +5638,32 @@ mod tests {
                     .use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
                         AppleMusicId::try_from("p.signal")
                             .expect("fixture playlist id should be valid"),
-                        vec![ApplePlaylistTrack::new(
-                            AppleMusicId::try_from("i.second-sun")
-                                .expect("fixture track id should be valid"),
-                            "Second Sun".to_owned(),
-                            "Signal Artist".to_owned(),
-                            None,
-                            Some(245_000),
-                        )],
+                        vec![
+                            ApplePlaylistTrack::new(
+                                AppleMusicId::try_from("i.first-light")
+                                    .expect("fixture track id should be valid"),
+                                "First Light".to_owned(),
+                                "Signal Artist".to_owned(),
+                                None,
+                                Some(183_000),
+                            ),
+                            ApplePlaylistTrack::new(
+                                AppleMusicId::try_from("i.second-sun")
+                                    .expect("fixture track id should be valid"),
+                                "Second Sun".to_owned(),
+                                "Signal Artist".to_owned(),
+                                None,
+                                Some(245_000),
+                            ),
+                            ApplePlaylistTrack::new(
+                                AppleMusicId::try_from("i.third-orbit")
+                                    .expect("fixture track id should be valid"),
+                                "Third Orbit".to_owned(),
+                                "Signal Artist".to_owned(),
+                                None,
+                                Some(203_000),
+                            ),
+                        ],
                         None,
                     ))]);
                 view.apple_music.use_test_playback(TestPlayback::Completed);
@@ -5632,7 +5712,7 @@ mod tests {
                 assert!(!view.poll_apple_music_connection(cx));
                 assert!(matches!(
                     view.apple_music.playlist_tracks(),
-                    ApplePlaylistTracksState::Loaded { tracks, .. } if tracks.len() == 1
+                    ApplePlaylistTracksState::Loaded { tracks, .. } if tracks.len() == 3
                 ));
             });
         });
@@ -5640,19 +5720,19 @@ mod tests {
             window.render_frame(cx);
             assert_eq!(
                 window.find("settings-apple-track-status").label(),
-                Some("1 track")
+                Some("3 tracks")
             );
             assert_eq!(
-                window.find(("apple-playlist-track", 0_usize)).label(),
+                window.find(("apple-playlist-track", 1_usize)).label(),
                 Some(
-                    "Play track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05"
+                    "Play track 2: Second Sun, by Signal Artist, album Unknown album, duration 4:05"
                 )
             );
             assert_eq!(
-                window.find(("apple-playlist-track", 0_usize)).role(),
+                window.find(("apple-playlist-track", 1_usize)).role(),
                 Some(Role::Button)
             );
-            window.click(("apple-playlist-track", 0_usize), cx);
+            window.click(("apple-playlist-track", 1_usize), cx);
         })
         .expect("test window remains available");
         cx.update(|cx| {
@@ -5666,6 +5746,7 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Playing { .. }
                 ));
+                view.apple_music.use_test_transport(TestTransport::Playing);
             });
         });
         cx.update_window(window, |_, window, cx| {
@@ -5675,11 +5756,64 @@ mod tests {
                 Some("Playing through Apple Music")
             );
             assert_eq!(
-                window.find(("apple-playlist-track", 0_usize)).label(),
+                window.find(("apple-playlist-track", 1_usize)).label(),
                 Some(
-                    "Play track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05, playing"
+                    "Play track 2: Second Sun, by Signal Artist, album Unknown album, duration 4:05, playing"
                 )
             );
+            assert_eq!(
+                window.find("settings-previous-apple-track").label(),
+                Some("Play previous Apple Music track")
+            );
+            assert_eq!(
+                window.find("settings-next-apple-track").label(),
+                Some("Play next Apple Music track")
+            );
+            window.click("settings-next-apple-track", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::SkippingNext { .. }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { track_id }
+                        if track_id.as_str() == "i.third-orbit"
+                ));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("apple-playlist-track", 2_usize)).label(),
+                Some(
+                    "Play track 3: Third Orbit, by Signal Artist, album Unknown album, duration 3:23, playing"
+                )
+            );
+            window.click("settings-previous-apple-track", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::SkippingPrevious { .. }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { track_id }
+                        if track_id.as_str() == "i.second-sun"
+                ));
+                view.apple_music.use_test_transport(TestTransport::Paused);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(
                 window.find("settings-pause-apple-playback").label(),
                 Some("Pause Apple Music playback")

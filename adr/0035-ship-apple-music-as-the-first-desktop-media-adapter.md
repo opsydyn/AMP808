@@ -286,8 +286,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
 - [x] Selecting a playable playlist entry sets the app-scoped MusicKit queue and begins playback
       through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
-      the request completes. Pause, resume, and stop use the same typed, identity-checked
-      transport boundary and expose observable transitional and terminal states.
+      the request completes. Pause, resume, stop, previous, and next use the same typed,
+      identity-checked transport boundary and expose observable transitional and terminal states.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -507,6 +507,31 @@ Apple Stop transport evidence recorded on 2026-11-08:
 - This qualifies explicit termination of app-scoped Apple playback. Next/previous, position
   observation, queue navigation, whole-playlist activation, failure recovery, and manual
   keyboard/VoiceOver acceptance remain separate slices.
+
+Apple Previous/Next queue-navigation evidence recorded on 2026-11-08:
+
+- The existing typed transport boundary now includes Previous and Next commands. Swift calls
+  `ApplicationMusicPlayer.skipToPreviousEntry()` and `skipToNextEntry()` on the same app-scoped
+  player; it does not rebuild the queue or create a second playback owner.
+- Rust derives the expected adjacent entry identity from the already loaded, ordered playlist and
+  exposes `SkippingPrevious` or `SkippingNext` until the native response matches both request and
+  target identity. Navigation is available only while Playing and does not wrap at playlist
+  boundaries.
+- GPUI exposes `PREVIOUS APPLE` and `NEXT APPLE` only when an adjacent loaded entry exists. Both
+  are native buttons with explicit accessibility labels; the active result remains visible in the
+  playlist while the transport state changes.
+- Live development-signed acceptance started a non-boundary playlist entry, observed Playing with
+  both navigation controls, moved the active row to the next entry, returned it to the previous
+  entry, and then observed the existing stopped state after terminating playback. The app window
+  was closed after the check.
+- Focused coordinator and GPUI interaction tests pass. Strict desktop Clippy passes with warnings
+  denied apart from the repository's explicit dead-code allowance; the full locked workspace
+  passes 624 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies unique-entry Previous/Next navigation and accessible pointer activation. An
+  existing ambiguity remains when a playlist contains repeated occurrences with the same entry
+  identifier, because both the selection and adjacency paths resolve the first matching identity.
+  Position observation, whole-playlist activation, failure recovery, and manual keyboard/VoiceOver
+  acceptance remain separate slices.
 
 Official Apple references checked through 2026-11-08:
 

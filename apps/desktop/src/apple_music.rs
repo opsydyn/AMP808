@@ -626,6 +626,8 @@ enum AppleTransportCommand {
     Pause,
     Resume,
     Stop,
+    Next,
+    Previous,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -663,6 +665,14 @@ pub(crate) enum ApplePlaybackState {
     },
     Stopped {
         track_id: AppleMusicId,
+    },
+    SkippingNext {
+        track_id: AppleMusicId,
+        request_id: RequestId,
+    },
+    SkippingPrevious {
+        track_id: AppleMusicId,
+        request_id: RequestId,
     },
     Failed {
         track_id: AppleMusicId,
@@ -1443,6 +1453,88 @@ impl AppleMusicCoordinator {
         }
     }
 
+    pub(crate) fn skip_to_next(&mut self) {
+        let ApplePlaybackState::Playing { track_id } = &self.playback else {
+            return;
+        };
+        let Some(target_track_id) = self.next_track_id(track_id).cloned() else {
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.transport_request_id = Some(request_id);
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::SkippingNext {
+            track_id: target_track_id.clone(),
+            request_id,
+        };
+        match self.create_transport_task(request_id, &target_track_id, AppleTransportCommand::Next)
+        {
+            Ok(task) => self.transport_task = Some(task),
+            Err(error) => self.fail_playback(target_track_id, error.to_string()),
+        }
+    }
+
+    pub(crate) fn can_skip_to_next(&self) -> bool {
+        let ApplePlaybackState::Playing { track_id } = &self.playback else {
+            return false;
+        };
+        self.next_track_id(track_id).is_some()
+    }
+
+    pub(crate) fn skip_to_previous(&mut self) {
+        let ApplePlaybackState::Playing { track_id } = &self.playback else {
+            return;
+        };
+        let Some(target_track_id) = self.previous_track_id(track_id).cloned() else {
+            return;
+        };
+        let request_id = self.next_request_id();
+        self.transport_request_id = Some(request_id);
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::SkippingPrevious {
+            track_id: target_track_id.clone(),
+            request_id,
+        };
+        match self.create_transport_task(
+            request_id,
+            &target_track_id,
+            AppleTransportCommand::Previous,
+        ) {
+            Ok(task) => self.transport_task = Some(task),
+            Err(error) => self.fail_playback(target_track_id, error.to_string()),
+        }
+    }
+
+    pub(crate) fn can_skip_to_previous(&self) -> bool {
+        let ApplePlaybackState::Playing { track_id } = &self.playback else {
+            return false;
+        };
+        self.previous_track_id(track_id).is_some()
+    }
+
+    fn next_track_id(&self, active_track_id: &AppleMusicId) -> Option<&AppleMusicId> {
+        let ApplePlaylistTracksState::Loaded { tracks, .. } = &self.playlist_tracks else {
+            return None;
+        };
+        tracks
+            .iter()
+            .position(|track| track.id() == active_track_id)
+            .and_then(|index| tracks.get(index.saturating_add(1)))
+            .map(ApplePlaylistTrack::id)
+    }
+
+    fn previous_track_id(&self, active_track_id: &AppleMusicId) -> Option<&AppleMusicId> {
+        let ApplePlaylistTracksState::Loaded { tracks, .. } = &self.playlist_tracks else {
+            return None;
+        };
+        tracks
+            .iter()
+            .position(|track| track.id() == active_track_id)
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| tracks.get(index))
+            .map(ApplePlaylistTrack::id)
+    }
+
     pub(crate) fn load_playlist_tracks(&mut self, playlist_id: AppleMusicId) {
         self.track_task.take();
         self.track_page_request_id = None;
@@ -1809,6 +1901,16 @@ impl AppleMusicCoordinator {
                     track_id: response_track_id,
                 }
             }
+            (ApplePlaybackState::SkippingNext { .. }, AppleTransportStatus::Playing) => {
+                ApplePlaybackState::Playing {
+                    track_id: response_track_id,
+                }
+            }
+            (ApplePlaybackState::SkippingPrevious { .. }, AppleTransportStatus::Playing) => {
+                ApplePlaybackState::Playing {
+                    track_id: response_track_id,
+                }
+            }
             _ => {
                 self.fail_active_playback(
                     "Apple Music returned an inconsistent transport result".to_owned(),
@@ -1829,6 +1931,8 @@ impl AppleMusicCoordinator {
             | ApplePlaybackState::Resuming { track_id, .. }
             | ApplePlaybackState::Stopping { track_id, .. }
             | ApplePlaybackState::Stopped { track_id }
+            | ApplePlaybackState::SkippingNext { track_id, .. }
+            | ApplePlaybackState::SkippingPrevious { track_id, .. }
             | ApplePlaybackState::Failed { track_id } => Some(track_id),
             ApplePlaybackState::Idle => None,
         }
@@ -2790,6 +2894,94 @@ mod tests {
         assert_eq!(
             coordinator.playback_error(),
             Some("Apple Music returned an inconsistent transport result")
+        );
+    }
+
+    #[test]
+    fn next_exposes_target_identity_until_music_kit_confirms_navigation() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track = |id: &str, title: &str| {
+            ApplePlaylistTrack::new(
+                AppleMusicId::try_from(id).expect("fixture track id should be valid"),
+                title.to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                None,
+            )
+        };
+        let second = AppleMusicId::try_from("i.second").expect("fixture id should be valid");
+        let third = AppleMusicId::try_from("i.third").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                track("i.first", "First Light"),
+                track("i.second", "Second Sun"),
+                track("i.third", "Third Orbit"),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, second);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        coordinator.skip_to_next();
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::SkippingNext { track_id, .. } if track_id == &third
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id: third }
+        );
+    }
+
+    #[test]
+    fn previous_exposes_target_identity_until_music_kit_confirms_navigation() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track = |id: &str, title: &str| {
+            ApplePlaylistTrack::new(
+                AppleMusicId::try_from(id).expect("fixture track id should be valid"),
+                title.to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                None,
+            )
+        };
+        let first = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
+        let second = AppleMusicId::try_from("i.second").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                track("i.first", "First Light"),
+                track("i.second", "Second Sun"),
+                track("i.third", "Third Orbit"),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, second);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        coordinator.skip_to_previous();
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::SkippingPrevious { track_id, .. } if track_id == &first
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id: first }
         );
     }
 }

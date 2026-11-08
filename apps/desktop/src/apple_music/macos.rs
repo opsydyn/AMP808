@@ -1261,6 +1261,8 @@ impl TransportTask {
                     AppleTransportCommand::Pause => 0,
                     AppleTransportCommand::Resume => 1,
                     AppleTransportCommand::Stop => 2,
+                    AppleTransportCommand::Next => 3,
+                    AppleTransportCommand::Previous => 4,
                 },
                 track_id.as_ptr(),
                 track_id.len(),

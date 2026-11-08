@@ -688,7 +688,7 @@ public func controlPlayback(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard command <= 2 else {
+    guard command <= 4 else {
         return 4
     }
     guard trackIDLength <= UInt(Int.max),
@@ -776,6 +776,60 @@ public func controlPlayback(
                 ),
                 completion: completion
             )
+        case 3:
+            do {
+                try await player.skipToNextEntry()
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "playing",
+                        error: nil
+                    ),
+                    completion: completion
+                )
+            } catch {
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "transport_failed"
+                    ),
+                    completion: completion
+                )
+            }
+        case 4:
+            do {
+                try await player.skipToPreviousEntry()
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "playing",
+                        error: nil
+                    ),
+                    completion: completion
+                )
+            } catch {
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "transport_failed"
+                    ),
+                    completion: completion
+                )
+            }
         default:
             preconditionFailure("validated MusicKit transport command became invalid")
         }
