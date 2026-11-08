@@ -224,6 +224,7 @@ struct WirePosition {
     playlist_id: String,
     playlist_index: u64,
     elapsed_ms: u64,
+    duration_ms: Option<u64>,
     error: Option<String>,
 }
 
@@ -730,6 +731,7 @@ pub(crate) struct PositionResponse {
     playlist_id: AppleMusicId,
     playlist_index: usize,
     elapsed_ms: u64,
+    duration_ms: Option<u64>,
 }
 
 impl PositionResponse {
@@ -761,6 +763,7 @@ impl PositionResponse {
             playlist_id,
             playlist_index,
             elapsed_ms: wire.elapsed_ms,
+            duration_ms: wire.duration_ms,
         })
     }
 
@@ -780,18 +783,24 @@ impl PositionResponse {
         self.elapsed_ms
     }
 
+    pub(crate) const fn duration_ms(&self) -> Option<u64> {
+        self.duration_ms
+    }
+
     #[cfg(test)]
     fn completed_for_test(
         request_id: RequestId,
         playlist_id: AppleMusicId,
         playlist_index: usize,
         elapsed_ms: u64,
+        duration_ms: Option<u64>,
     ) -> Self {
         Self {
             request_id,
             playlist_id,
             playlist_index,
             elapsed_ms,
+            duration_ms,
         }
     }
 }
@@ -1501,6 +1510,31 @@ impl PositionTask {
                 playlist_id,
                 playlist_index,
                 elapsed_ms,
+                None,
+            )))
+            .expect("the test position receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_with_duration_for_test(
+        request_id: RequestId,
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
+        elapsed_ms: u64,
+        duration_ms: u64,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(PositionResponse::completed_for_test(
+                request_id,
+                playlist_id,
+                playlist_index,
+                elapsed_ms,
+                Some(duration_ms),
             )))
             .expect("the test position receiver remains live during construction");
         Self {
@@ -2052,7 +2086,7 @@ mod tests {
     #[test]
     fn position_envelope_preserves_identity_and_native_elapsed_time() {
         let response = PositionResponse::parse(
-            br#"{"version":1,"kind":"position","request_id":63,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"error":null}"#,
+            br#"{"version":1,"kind":"position","request_id":63,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"duration_ms":320000,"error":null}"#,
         )
         .expect("a finite native position should cross the bridge");
 
@@ -2060,6 +2094,7 @@ mod tests {
         assert_eq!(response.playlist_id().as_str(), "p.cosmic");
         assert_eq!(response.playlist_index(), 7);
         assert_eq!(response.elapsed_ms(), 12_345);
+        assert_eq!(response.duration_ms(), Some(320_000));
     }
 
     #[test]

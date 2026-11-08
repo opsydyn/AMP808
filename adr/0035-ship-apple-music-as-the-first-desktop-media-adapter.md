@@ -541,10 +541,12 @@ Apple playback-position evidence recorded on 2026-11-08:
   versioned `position` envelope containing request identity, selected-entry identity, and bounded
   non-negative elapsed milliseconds. Invalid, failed, stale-request, and wrong-track responses do
   not replace the active snapshot; provider detail remains redacted.
-- Rust pairs the native elapsed value with the optional duration already owned by the loaded
-  playlist entry. It does not extrapolate from a local clock or claim access to Apple PCM. A
-  missing duration remains explicit and yields an indeterminate value rather than a fabricated
-  percentage.
+- Swift returns the current playable queue item's optional MusicKit duration alongside native
+  elapsed time. Rust treats that native duration as authoritative and falls back to the optional
+  duration owned by the loaded playlist entry when MusicKit omits it. It does not extrapolate from
+  a local clock, infer a queue transition when elapsed time reaches a duration, or claim access to
+  Apple PCM. When both durations are missing, the value remains explicit and indeterminate rather
+  than becoming a fabricated percentage.
 - GPUI runs one guarded Apple polling loop and samples the native boundary at approximately 5 Hz
   while Playing. The Settings surface exposes elapsed time, duration, and a determinate progress
   rail with `ProgressIndicator` semantics when duration is known. Pause retains the final observed
@@ -593,6 +595,17 @@ Apple current-entry reconciliation evidence recorded on 2026-11-08:
   04:59, plus keyboard activation of Stop. MusicKit did not change `currentEntry` during that run,
   even though the selected entry's listed duration was 03:21, so an actual native natural-boundary
   reconciliation was not observed and is not claimed as accepted.
+- A follow-up bridge diagnostic reads duration from the same native queue item used for
+  `currentEntry` identity and carries it in the versioned position envelope. Coordinator tests
+  prove native duration precedence plus loaded-playlist fallback, while the parser test proves the
+  optional wire field. This diagnoses stale playlist-entry metadata without turning elapsed time
+  into a second playback clock or transition authority.
+- A fresh development-signed run reported the same 03:21 duration from the native playable queue
+  item and the loaded playlist entry. MusicKit kept that same occurrence Playing through 03:44,
+  did not change `currentEntry`, and stopped only after keyboard activation of AMP808's Stop
+  control. The earlier overrun is therefore reproduced as MusicKit provider/runtime behaviour,
+  not explained by stale AMP808 duration metadata, and must not be repaired by fabricating a
+  transition from elapsed time.
 - This qualifies deterministic occurrence identity and automated reconciliation behavior. Seeking,
   repeat/shuffle, whole-playlist activation, a live observed natural transition, and manual
   VoiceOver acceptance remain separate work.

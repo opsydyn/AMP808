@@ -378,6 +378,7 @@ mod unavailable {
         playlist_id: AppleMusicId,
         playlist_index: usize,
         elapsed_ms: u64,
+        duration_ms: Option<u64>,
     }
 
     impl PositionResponse {
@@ -395,6 +396,10 @@ mod unavailable {
 
         pub(crate) const fn elapsed_ms(&self) -> u64 {
             self.elapsed_ms
+        }
+
+        pub(crate) const fn duration_ms(&self) -> Option<u64> {
+            self.duration_ms
         }
     }
 
@@ -454,6 +459,31 @@ mod unavailable {
                     playlist_id,
                     playlist_index,
                     elapsed_ms,
+                    duration_ms: None,
+                }))
+                .expect("the test position receiver remains live during construction");
+            Self {
+                receiver: Some(receiver),
+                _test_sender: None,
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn completed_with_duration_for_test(
+            request_id: RequestId,
+            playlist_id: AppleMusicId,
+            playlist_index: usize,
+            elapsed_ms: u64,
+            duration_ms: u64,
+        ) -> Self {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Ok(PositionResponse {
+                    request_id,
+                    playlist_id,
+                    playlist_index,
+                    elapsed_ms,
+                    duration_ms: Some(duration_ms),
                 }))
                 .expect("the test position receiver remains live during construction");
             Self {
@@ -1453,6 +1483,10 @@ pub(crate) enum TestPosition {
     Completed {
         elapsed_ms: u64,
     },
+    CompletedWithDuration {
+        elapsed_ms: u64,
+        duration_ms: u64,
+    },
     CompletedForTrack {
         track_id: AppleMusicId,
         elapsed_ms: u64,
@@ -1869,7 +1903,7 @@ impl AppleMusicCoordinator {
         }
         self.position = Some(ApplePlaybackPosition {
             elapsed_ms: response.elapsed_ms(),
-            duration_ms: track.duration_ms(),
+            duration_ms: response.duration_ms().or_else(|| track.duration_ms()),
         });
         self.position_error = None;
     }
@@ -2420,6 +2454,21 @@ impl AppleMusicCoordinator {
                         playlist_id,
                         playlist_index,
                         elapsed_ms,
+                    ))
+                },
+            ),
+            Some(TestPosition::CompletedWithDuration {
+                elapsed_ms,
+                duration_ms,
+            }) => fallback.map_or_else(
+                || Ok(PositionTask::pending_for_test()),
+                |(playlist_id, playlist_index)| {
+                    Ok(PositionTask::completed_with_duration_for_test(
+                        request_id,
+                        playlist_id,
+                        playlist_index,
+                        elapsed_ms,
+                        duration_ms,
                     ))
                 },
             ),
@@ -3423,6 +3472,42 @@ mod tests {
             .expect("native position should be exposed after the matching response");
         assert_eq!(position.elapsed_ms(), 12_345);
         assert_eq!(position.duration_ms(), Some(245_000));
+    }
+
+    #[test]
+    fn native_position_prefers_the_playable_queue_item_duration() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(201_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedWithDuration {
+            elapsed_ms: 12_345,
+            duration_ms: 320_000,
+        }]);
+
+        coordinator.play_track(playlist_id, track_id, 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+
+        let position = coordinator
+            .playback_position()
+            .expect("native position should be exposed after the matching response");
+        assert_eq!(position.elapsed_ms(), 12_345);
+        assert_eq!(position.duration_ms(), Some(320_000));
     }
 
     #[test]
