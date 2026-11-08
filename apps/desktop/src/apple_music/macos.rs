@@ -12,10 +12,12 @@ use std::{
 
 use serde::Deserialize;
 
+#[cfg(not(test))]
+use super::AppleTransportCommand;
 use super::{
-    AppleArtworkUrl, AppleMusicId, ApplePlaylist, ApplePlaylistTrack, AuthorisationStatus,
-    CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
-    PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
+    AppleArtworkUrl, AppleMusicId, ApplePlaylist, ApplePlaylistTrack, AppleTransportStatus,
+    AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription,
+    PageCursor, PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -40,6 +42,11 @@ struct TrackCallbackContext {
 #[cfg(not(test))]
 struct PlaybackCallbackContext {
     sender: mpsc::Sender<Result<PlaybackResponse, BridgeCallError>>,
+}
+
+#[cfg(not(test))]
+struct TransportCallbackContext {
+    sender: mpsc::Sender<Result<TransportResponse, BridgeCallError>>,
 }
 
 /// Owns one allocation created by the Swift bridge.
@@ -184,6 +191,17 @@ struct WireTrackPage {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WirePlayback {
+    version: u16,
+    kind: String,
+    request_id: u64,
+    track_id: String,
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTransport {
     version: u16,
     kind: String,
     request_id: u64,
@@ -621,6 +639,73 @@ impl PlaybackResponse {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TransportResponse {
+    request_id: RequestId,
+    track_id: AppleMusicId,
+    status: AppleTransportStatus,
+}
+
+impl TransportResponse {
+    fn parse(bytes: &[u8]) -> Result<Self, BridgeProtocolError> {
+        if bytes.len() > MAX_BRIDGE_ENVELOPE_BYTES {
+            return Err(BridgeProtocolError::EnvelopeTooLarge {
+                actual: bytes.len(),
+                maximum: MAX_BRIDGE_ENVELOPE_BYTES,
+            });
+        }
+        let text = str::from_utf8(bytes).map_err(BridgeProtocolError::InvalidUtf8)?;
+        let wire: WireTransport =
+            serde_json::from_str(text).map_err(BridgeProtocolError::MalformedEnvelope)?;
+        if wire.version != CAPABILITY_ENVELOPE_VERSION {
+            return Err(BridgeProtocolError::UnsupportedVersion);
+        }
+        if wire.kind != "transport" {
+            return Err(BridgeProtocolError::UnexpectedKind);
+        }
+        if wire.error.is_some() {
+            return Err(BridgeProtocolError::TransportFailed);
+        }
+        let status = match wire.status.as_str() {
+            "paused" => AppleTransportStatus::Paused,
+            "playing" => AppleTransportStatus::Playing,
+            _ => return Err(BridgeProtocolError::TransportFailed),
+        };
+        let track_id = AppleMusicId::try_from(wire.track_id.as_str())
+            .map_err(|_error| BridgeProtocolError::InvalidTrackIdentifier)?;
+        Ok(Self {
+            request_id: RequestId::new(wire.request_id),
+            track_id,
+            status,
+        })
+    }
+
+    pub(crate) const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub(crate) fn into_track_id(self) -> AppleMusicId {
+        self.track_id
+    }
+
+    pub(crate) const fn status(&self) -> AppleTransportStatus {
+        self.status
+    }
+
+    #[cfg(test)]
+    fn completed_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+    ) -> Self {
+        Self {
+            request_id,
+            track_id,
+            status,
+        }
+    }
+}
+
 fn require_no_subscription(
     wire: &WireConnection<'_>,
     has_capabilities: bool,
@@ -670,6 +755,7 @@ pub(crate) enum BridgeProtocolError {
     PlaylistRequestFailed,
     TrackRequestFailed,
     PlaybackFailed,
+    TransportFailed,
 }
 
 impl fmt::Display for BridgeProtocolError {
@@ -717,6 +803,7 @@ impl fmt::Display for BridgeProtocolError {
             Self::PlaybackFailed => {
                 formatter.write_str("Apple Music could not start MusicKit playback")
             }
+            Self::TransportFailed => formatter.write_str("Apple Music transport command failed"),
         }
     }
 }
@@ -736,7 +823,8 @@ impl Error for BridgeProtocolError {
             | Self::InvalidTrackIdentifier
             | Self::PlaylistRequestFailed
             | Self::TrackRequestFailed
-            | Self::PlaybackFailed => None,
+            | Self::PlaybackFailed
+            | Self::TransportFailed => None,
         }
     }
 }
@@ -1145,6 +1233,89 @@ impl PlaybackTask {
     }
 }
 
+/// Receives one terminal result from a user-triggered MusicKit transport command.
+pub(crate) struct TransportTask {
+    receiver: mpsc::Receiver<Result<TransportResponse, BridgeCallError>>,
+    #[cfg(test)]
+    _test_sender: Option<mpsc::Sender<Result<TransportResponse, BridgeCallError>>>,
+}
+
+impl TransportTask {
+    #[cfg(all(amp808_music_kit_bridge, not(test)))]
+    pub(crate) fn start(
+        request_id: RequestId,
+        track_id: &AppleMusicId,
+        command: AppleTransportCommand,
+    ) -> Result<Self, BridgeCallError> {
+        let track_id = track_id.as_str().as_bytes();
+        let (sender, receiver) = mpsc::channel();
+        let context = Box::new(TransportCallbackContext { sender });
+        let context = Box::into_raw(context).cast::<c_void>();
+        // SAFETY: the identifier bytes remain live for the synchronous bridge call. Swift copies
+        // them before returning, and the unique callback context is consumed exactly once.
+        let accepted = unsafe {
+            amp808_music_kit_transport(
+                request_id.value(),
+                match command {
+                    AppleTransportCommand::Pause => 0,
+                    AppleTransportCommand::Resume => 1,
+                },
+                track_id.as_ptr(),
+                track_id.len(),
+                context,
+                transport_callback,
+            )
+        };
+        if accepted != 1 {
+            // SAFETY: a rejected request did not retain the unique context allocation.
+            drop(unsafe { Box::from_raw(context.cast::<TransportCallbackContext>()) });
+            return Err(match accepted {
+                2 => BridgeCallError::MissingUsageDescription,
+                3 => BridgeCallError::UnexpectedBundleIdentifier,
+                _ => BridgeCallError::StartRejected,
+            });
+        }
+        Ok(Self {
+            receiver,
+            #[cfg(test)]
+            _test_sender: None,
+        })
+    }
+
+    #[cfg(all(not(amp808_music_kit_bridge), not(test)))]
+    pub(crate) const fn start(
+        _request_id: RequestId,
+        _track_id: &AppleMusicId,
+        _command: AppleTransportCommand,
+    ) -> Result<Self, BridgeCallError> {
+        Err(BridgeCallError::Unavailable)
+    }
+
+    pub(crate) fn try_recv(
+        &self,
+    ) -> Result<Result<TransportResponse, BridgeCallError>, mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(TransportResponse::completed_for_test(
+                request_id, track_id, status,
+            )))
+            .expect("the test transport receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+}
+
 /// Consumes one native callback context and sends one validated terminal result.
 ///
 /// # Safety
@@ -1280,6 +1451,35 @@ unsafe fn deliver_playback(
     let _ = context.sender.send(result);
 }
 
+#[cfg(not(test))]
+unsafe fn deliver_transport(
+    context: *mut c_void,
+    pointer: *mut u8,
+    length: usize,
+    release: BridgeRelease,
+) {
+    let Some(context) = NonNull::new(context.cast::<TransportCallbackContext>()) else {
+        if !pointer.is_null() {
+            // SAFETY: the callback transfers its unique response allocation.
+            unsafe { release(pointer) };
+        }
+        return;
+    };
+    // SAFETY: the FFI contract transfers the unique context back exactly once.
+    let context = unsafe { Box::from_raw(context.as_ptr()) };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: the callback transfers one matching bridge allocation to this owner.
+        let buffer = unsafe { OwnedBridgeBuffer::from_raw_parts(pointer, length, release) }
+            .map_err(|_error| BridgeCallError::MissingResponse)?;
+        let bytes = buffer
+            .as_bounded_bytes()
+            .map_err(BridgeCallError::Protocol)?;
+        TransportResponse::parse(bytes).map_err(BridgeCallError::Protocol)
+    }))
+    .unwrap_or(Err(BridgeCallError::CallbackPanicked));
+    let _ = context.sender.send(result);
+}
+
 #[cfg(amp808_music_kit_bridge)]
 unsafe extern "C" {
     fn amp808_music_kit_capability_probe(request_id: u64, output_length: *mut usize) -> *mut u8;
@@ -1314,6 +1514,15 @@ unsafe extern "C" {
         context: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
     ) -> u8;
+    #[cfg(not(test))]
+    fn amp808_music_kit_transport(
+        request_id: u64,
+        command: u8,
+        track_id: *const u8,
+        track_id_length: usize,
+        context: *mut c_void,
+        callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
+    ) -> u8;
     fn amp808_music_kit_release_buffer(pointer: *mut u8);
 }
 
@@ -1343,6 +1552,13 @@ unsafe extern "C" fn playback_callback(context: *mut c_void, pointer: *mut u8, l
     // SAFETY: Swift invokes this exactly once with the unique context supplied by
     // `PlaybackTask::start` and transfers its matching response allocation to Rust.
     unsafe { deliver_playback(context, pointer, length, amp808_music_kit_release_buffer) };
+}
+
+#[cfg(all(amp808_music_kit_bridge, not(test)))]
+unsafe extern "C" fn transport_callback(context: *mut c_void, pointer: *mut u8, length: usize) {
+    // SAFETY: Swift invokes this exactly once with the unique context supplied by
+    // `TransportTask::start` and transfers its matching response allocation to Rust.
+    unsafe { deliver_transport(context, pointer, length, amp808_music_kit_release_buffer) };
 }
 
 #[cfg(amp808_music_kit_bridge)]
@@ -1384,10 +1600,10 @@ mod tests {
         BridgeCallError, BridgeProtocolError, CapabilityResponse, ConnectionCallbackContext,
         ConnectionResponse, ConnectionTask, MAX_BRIDGE_ENVELOPE_BYTES, OwnedBridgeBuffer,
         PlaybackResponse, PlaylistPageResponse, SubscriptionResponse, TrackPageResponse,
-        deliver_connection, probe_capability,
+        TransportResponse, deliver_connection, probe_capability,
     };
     use crate::apple_music::{
-        AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+        AppleTransportStatus, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
         ConnectionSubscription, PageCursor, RequestId, SubscriptionCapabilities, SubscriptionOffer,
     };
 
@@ -1554,6 +1770,37 @@ mod tests {
             error.to_string(),
             "Apple Music could not start MusicKit playback"
         );
+        assert!(!error.to_string().contains("private provider detail"));
+    }
+
+    #[test]
+    fn transport_envelopes_map_pause_and_resume_without_losing_identity() {
+        let paused = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":59,"track_id":"i.first","status":"paused","error":null}"#,
+        )
+        .expect("a paused response should cross the bridge");
+        assert_eq!(paused.request_id(), RequestId::new(59));
+        assert_eq!(paused.status(), AppleTransportStatus::Paused);
+        assert_eq!(paused.into_track_id().as_str(), "i.first");
+
+        let playing = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":60,"track_id":"i.first","status":"playing","error":null}"#,
+        )
+        .expect("a resumed response should cross the bridge");
+        assert_eq!(playing.request_id(), RequestId::new(60));
+        assert_eq!(playing.status(), AppleTransportStatus::Playing);
+        assert_eq!(playing.into_track_id().as_str(), "i.first");
+    }
+
+    #[test]
+    fn transport_failure_is_redacted_at_the_bridge_boundary() {
+        let error = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":61,"track_id":"i.private","status":"failed","error":"private provider detail"}"#,
+        )
+        .expect_err("a failed transport command must not report success");
+
+        assert!(matches!(error, BridgeProtocolError::TransportFailed));
+        assert_eq!(error.to_string(), "Apple Music transport command failed");
         assert!(!error.to_string().contains("private provider detail"));
     }
 

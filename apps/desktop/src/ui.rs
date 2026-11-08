@@ -1601,6 +1601,18 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn pause_apple_playback(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.pause();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
+    fn resume_apple_playback(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.resume();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
     fn show_apple_playlists(&mut self, cx: &mut Context<Self>) {
         self.selected_apple_playlist = None;
         cx.notify();
@@ -4052,6 +4064,9 @@ impl Render for PlayerView {
                 Some("Preparing Apple Music playback".to_owned())
             }
             ApplePlaybackState::Playing { .. } => Some("Playing through Apple Music".to_owned()),
+            ApplePlaybackState::Pausing { .. } => Some("Pausing Apple Music playback".to_owned()),
+            ApplePlaybackState::Paused { .. } => Some("Apple Music playback paused".to_owned()),
+            ApplePlaybackState::Resuming { .. } => Some("Resuming Apple Music playback".to_owned()),
             ApplePlaybackState::Failed { .. } => {
                 Some(self.apple_music.playback_error().map_or_else(
                     || "Apple Music playback could not start".to_owned(),
@@ -4060,6 +4075,8 @@ impl Render for PlayerView {
             }
         };
         let apple_playback = self.apple_music.playback().clone();
+        let apple_can_pause = matches!(&apple_playback, ApplePlaybackState::Playing { .. });
+        let apple_can_resume = matches!(&apple_playback, ApplePlaybackState::Paused { .. });
         let apple_track_count = apple_tracks.len();
         let apple_tracks = Arc::new(apple_tracks);
         let rendered_apple_tracks = Arc::clone(&apple_tracks);
@@ -4076,6 +4093,9 @@ impl Render for PlayerView {
                         let active = match &apple_playback {
                             ApplePlaybackState::Preparing { track_id, .. }
                             | ApplePlaybackState::Playing { track_id }
+                            | ApplePlaybackState::Pausing { track_id, .. }
+                            | ApplePlaybackState::Paused { track_id }
+                            | ApplePlaybackState::Resuming { track_id, .. }
                             | ApplePlaybackState::Failed { track_id } => track_id == track.id(),
                             ApplePlaybackState::Idle => false,
                         };
@@ -4087,6 +4107,19 @@ impl Render for PlayerView {
                             }
                             ApplePlaybackState::Playing { track_id } if track_id == track.id() => {
                                 ", playing"
+                            }
+                            ApplePlaybackState::Pausing { track_id, .. }
+                                if track_id == track.id() =>
+                            {
+                                ", pausing"
+                            }
+                            ApplePlaybackState::Paused { track_id } if track_id == track.id() => {
+                                ", paused"
+                            }
+                            ApplePlaybackState::Resuming { track_id, .. }
+                                if track_id == track.id() =>
+                            {
+                                ", resuming"
                             }
                             ApplePlaybackState::Failed { track_id } if track_id == track.id() => {
                                 ", playback failed"
@@ -4201,6 +4234,36 @@ impl Render for PlayerView {
                         .font_semibold()
                         .text_color(accent)
                         .child(status),
+                )
+            })
+            .when(apple_can_pause, |panel| {
+                panel.child(
+                    hardware_button(
+                        "settings-pause-apple-playback",
+                        HardwareButtonTone::Primary,
+                        self.skin,
+                        cx,
+                    )
+                    .label("PAUSE APPLE")
+                    .accessibility_label("Pause Apple Music playback")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pause_apple_playback(cx);
+                    })),
+                )
+            })
+            .when(apple_can_resume, |panel| {
+                panel.child(
+                    hardware_button(
+                        "settings-resume-apple-playback",
+                        HardwareButtonTone::Primary,
+                        self.skin,
+                        cx,
+                    )
+                    .label("RESUME APPLE")
+                    .accessibility_label("Resume Apple Music playback")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.resume_apple_playback(cx);
+                    })),
                 )
             })
             .when(apple_track_count > 0, |panel| panel.child(apple_track_list));
@@ -5271,7 +5334,7 @@ mod tests {
         ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, CloudLibrary,
         ConnectionResult, ConnectionSubscription, PlaylistPage, SubscriptionCapabilities,
         SubscriptionOffer, TestConnection, TestPlayback, TestPlaylistPage, TestTrackPage,
-        TrackPage,
+        TestTransport, TrackPage,
     };
     use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
@@ -5487,6 +5550,8 @@ mod tests {
                         None,
                     ))]);
                 view.apple_music.use_test_playback(TestPlayback::Completed);
+                view.apple_music
+                    .use_test_transport(TestTransport::CompletedPaused);
             });
         });
 
@@ -5578,6 +5643,60 @@ mod tests {
                 Some(
                     "Play track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05, playing"
                 )
+            );
+            assert_eq!(
+                window.find("settings-pause-apple-playback").label(),
+                Some("Pause Apple Music playback")
+            );
+            window.click("settings-pause-apple-playback", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Pausing { .. }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Paused { .. }
+                ));
+                view.apple_music
+                    .use_test_transport(TestTransport::CompletedPlaying);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-apple-playback-status").label(),
+                Some("Apple Music playback paused")
+            );
+            assert_eq!(
+                window.find("settings-resume-apple-playback").label(),
+                Some("Resume Apple Music playback")
+            );
+            window.click("settings-resume-apple-playback", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Resuming { .. }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { .. }
+                ));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-apple-playback-status").label(),
+                Some("Playing through Apple Music")
             );
             window.click("settings-change-apple-playlist", cx);
             window.render_frame(cx);

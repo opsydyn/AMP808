@@ -110,6 +110,24 @@ private struct PlaybackEnvelope: Encodable {
     }
 }
 
+private struct TransportEnvelope: Encodable {
+    let version: Int
+    let kind: String
+    let requestID: UInt64
+    let trackID: String
+    let status: String
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case kind
+        case requestID = "request_id"
+        case trackID = "track_id"
+        case status
+        case error
+    }
+}
+
 private func sendPlaylistEnvelope(
     _ envelope: PlaylistPageEnvelope,
     completion: ConnectionCompletion
@@ -152,6 +170,21 @@ private func sendPlaybackEnvelope(
 
     completion.send(
         "{\"version\":\(envelopeVersion),\"kind\":\"playback\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"status\":\"failed\",\"error\":\"encoding_failed\"}"
+    )
+}
+
+private func sendTransportEnvelope(
+    _ envelope: TransportEnvelope,
+    completion: ConnectionCompletion
+) {
+    if let data = try? JSONEncoder().encode(envelope),
+       let text = String(data: data, encoding: .utf8) {
+        completion.send(text)
+        return
+    }
+
+    completion.send(
+        "{\"version\":\(envelopeVersion),\"kind\":\"transport\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"status\":\"failed\",\"error\":\"encoding_failed\"}"
     )
 }
 
@@ -630,6 +663,108 @@ public func playTrack(
                 ),
                 completion: completion
             )
+        }
+    }
+    return 1
+}
+
+@c(amp808_music_kit_transport)
+public func controlPlayback(
+    _ requestID: UInt64,
+    _ command: UInt8,
+    _ trackIDBytes: UnsafePointer<UInt8>?,
+    _ trackIDLength: UInt,
+    _ context: UnsafeMutableRawPointer?,
+    _ callback: Amp808MusicKitConnectionCallback?
+) -> UInt8 {
+    guard let callback else {
+        return 0
+    }
+    guard let usageDescription = Bundle.main.object(
+        forInfoDictionaryKey: "NSAppleMusicUsageDescription"
+    ) as? String, !usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 2
+    }
+    guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
+        return 3
+    }
+    guard command <= 1 else {
+        return 4
+    }
+    guard trackIDLength <= UInt(Int.max),
+          let trackIDBytes,
+          let trackID = String(
+              bytes: UnsafeBufferPointer(
+                  start: trackIDBytes,
+                  count: Int(trackIDLength)
+              ),
+              encoding: .utf8
+          ),
+          !trackID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 4
+    }
+    let completion = ConnectionCompletion(context: context, callback: callback)
+
+    Task {
+        guard #available(macOS 14.0, *), MusicAuthorization.currentStatus == .authorized else {
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "failed",
+                    error: "access_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+
+        let player = ApplicationMusicPlayer.shared
+        switch command {
+        case 0:
+            player.pause()
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "paused",
+                    error: nil
+                ),
+                completion: completion
+            )
+        case 1:
+            do {
+                try await player.play()
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "playing",
+                        error: nil
+                    ),
+                    completion: completion
+                )
+            } catch {
+                sendTransportEnvelope(
+                    TransportEnvelope(
+                        version: envelopeVersion,
+                        kind: "transport",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "transport_failed"
+                    ),
+                    completion: completion
+                )
+            }
+        default:
+            preconditionFailure("validated MusicKit transport command became invalid")
         }
     }
     return 1

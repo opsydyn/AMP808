@@ -286,7 +286,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
 - [x] Selecting a playable playlist entry sets the app-scoped MusicKit queue and begins playback
       through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
-      the request completes. Whole-playlist activation and transport controls remain follow-ups.
+      the request completes. Pause and resume use the same typed, identity-checked transport
+      boundary and expose observable transitional and terminal states.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -462,7 +463,29 @@ Selected-entry MusicKit playback evidence recorded on 2026-11-08:
 - Bridge responses remain versioned and bounded, request and track identities are checked before
   state changes, newer requests supersede unfinished ones, and provider failures are redacted at
   the Rust boundary. Local PCM, BPM, EQ, and audio-reactive MilkDrop remain explicitly unavailable.
-- This qualifies one-entry selection and playback start. Pause/resume, stop, next/previous,
+- This qualifies one-entry selection and playback start. Stop, next/previous, position
+  observation, queue navigation, whole-playlist activation, failure recovery, and manual
+  keyboard/VoiceOver acceptance remain separate slices.
+
+Apple pause/resume transport evidence recorded on 2026-11-08:
+
+- The coordinator now owns typed pause and resume commands and exposes `Pausing`, `Paused`,
+  `Resuming`, and `Playing` states. Request and track identity must match the active operation, and
+  an inconsistent terminal status fails closed instead of silently mutating playback state.
+- One versioned `transport` bridge envelope carries only request identity, track identity, and the
+  validated `paused` or `playing` result. Native failure detail is redacted at the Rust boundary;
+  Swift uses the existing app-scoped `ApplicationMusicPlayer` for both operations.
+- GPUI exposes `PAUSE APPLE` only while playing and `RESUME APPLE` only while paused. Both are
+  native buttons with explicit accessibility labels, while transitional state remains visible and
+  non-interactive.
+- Live development-signed acceptance observed `Playing through Apple Music` change to
+  `Apple Music playback paused`, with the action changing from Pause to Resume. Resuming returned
+  the status to Playing and restored the Pause action. The app was terminated after the check to
+  stop app-scoped playback.
+- Focused coordinator, bridge-parser, redaction, and GPUI tests pass. Strict desktop Clippy passes
+  with warnings denied apart from the repository's explicit dead-code allowance; the full locked
+  workspace passes 619 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies observable pause/resume and accessible pointer activation. Stop, next/previous,
   position observation, queue navigation, whole-playlist activation, failure recovery, and manual
   keyboard/VoiceOver acceptance remain separate slices.
 
