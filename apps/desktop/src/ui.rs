@@ -23,8 +23,8 @@ use amp808_core::bpm::BpmEstimate;
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::apple_music::{
-    AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, ApplePlaylistTrack,
-    ApplePlaylistTracksState, CatalogPlayback, SubscriptionState,
+    AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, ApplePlaybackState,
+    ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, SubscriptionState,
 };
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
@@ -1592,6 +1592,15 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn play_apple_track(&mut self, id: AppleMusicId, cx: &mut Context<Self>) {
+        let Some(playlist_id) = self.selected_apple_playlist.clone() else {
+            return;
+        };
+        self.apple_music.play_track(playlist_id, id);
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
     fn show_apple_playlists(&mut self, cx: &mut Context<Self>) {
         self.selected_apple_playlist = None;
         cx.notify();
@@ -1634,6 +1643,8 @@ impl PlayerView {
         let previous_error = self.apple_music.error().map(str::to_owned);
         let previous_tracks = self.apple_music.playlist_tracks().clone();
         let previous_track_error = self.apple_music.track_error().map(str::to_owned);
+        let previous_playback = self.apple_music.playback().clone();
+        let previous_playback_error = self.apple_music.playback_error().map(str::to_owned);
         let active = self.apple_music.poll();
         if apple_music_poll_requires_render(
             &previous_state,
@@ -1642,6 +1653,8 @@ impl PlayerView {
             self.apple_music.error(),
         ) || &previous_tracks != self.apple_music.playlist_tracks()
             || previous_track_error.as_deref() != self.apple_music.track_error()
+            || &previous_playback != self.apple_music.playback()
+            || previous_playback_error.as_deref() != self.apple_music.playback_error()
         {
             cx.notify();
         }
@@ -4033,6 +4046,20 @@ impl Render for PlayerView {
                 |error| format!("Playlist error / {error}"),
             ),
         };
+        let apple_playback_status = match self.apple_music.playback() {
+            ApplePlaybackState::Idle => None,
+            ApplePlaybackState::Preparing { .. } => {
+                Some("Preparing Apple Music playback".to_owned())
+            }
+            ApplePlaybackState::Playing { .. } => Some("Playing through Apple Music".to_owned()),
+            ApplePlaybackState::Failed { .. } => {
+                Some(self.apple_music.playback_error().map_or_else(
+                    || "Apple Music playback could not start".to_owned(),
+                    |error| format!("Playback error / {error}"),
+                ))
+            }
+        };
+        let apple_playback = self.apple_music.playback().clone();
         let apple_track_count = apple_tracks.len();
         let apple_tracks = Arc::new(apple_tracks);
         let rendered_apple_tracks = Arc::clone(&apple_tracks);
@@ -4040,61 +4067,69 @@ impl Render for PlayerView {
         let apple_track_list = uniform_list(
             "apple-playlist-track-results",
             apple_track_count,
-            cx.processor(move |_this, range: std::ops::Range<usize>, _, _cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .filter_map(|index| {
                         let track = rendered_apple_tracks.get(index)?;
                         let album = track.album().unwrap_or("Unknown album");
                         let duration = apple_track_duration(track.duration_ms());
-                        let label = format!(
-                            "Track {}: {}, by {}, album {}, duration {}",
+                        let active = match &apple_playback {
+                            ApplePlaybackState::Preparing { track_id, .. }
+                            | ApplePlaybackState::Playing { track_id }
+                            | ApplePlaybackState::Failed { track_id } => track_id == track.id(),
+                            ApplePlaybackState::Idle => false,
+                        };
+                        let state = match &apple_playback {
+                            ApplePlaybackState::Preparing { track_id, .. }
+                                if track_id == track.id() =>
+                            {
+                                ", preparing"
+                            }
+                            ApplePlaybackState::Playing { track_id } if track_id == track.id() => {
+                                ", playing"
+                            }
+                            ApplePlaybackState::Failed { track_id } if track_id == track.id() => {
+                                ", playback failed"
+                            }
+                            _ => "",
+                        };
+                        let accessibility_label = format!(
+                            "Play track {}: {}, by {}, album {}, duration {}{}",
+                            index + 1,
+                            track.title(),
+                            track.artist(),
+                            album,
+                            duration,
+                            state
+                        );
+                        let display_label = format!(
+                            "{:02}  {}  /  {}  /  {}  ·  {}",
                             index + 1,
                             track.title(),
                             track.artist(),
                             album,
                             duration
                         );
+                        let track_id = track.id().clone();
                         Some(
-                            div()
-                                .id(("apple-playlist-track", index))
-                                .test_support()
-                                .role(Role::ListItem)
-                                .aria_label(label)
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(panel_raised)
-                                .child(
-                                    div()
-                                        .w(px(36.0))
-                                        .text_xs()
-                                        .text_color(text_muted)
-                                        .child(format!("{:02}", index + 1)),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_semibold()
-                                                .text_color(text)
-                                                .child(track.title().to_owned()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(text_muted)
-                                                .child(format!("{} / {album}", track.artist())),
-                                        ),
-                                )
-                                .child(div().text_xs().text_color(text_muted).child(duration)),
+                            hardware_button(
+                                ("apple-playlist-track", index),
+                                if active {
+                                    HardwareButtonTone::Primary
+                                } else {
+                                    HardwareButtonTone::Neutral
+                                },
+                                this.skin,
+                                cx,
+                            )
+                            .w_full()
+                            .label(display_label)
+                            .accessibility_label(accessibility_label)
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.play_apple_track(track_id.clone(), cx);
+                                },
+                            )),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -4155,6 +4190,19 @@ impl Render for PlayerView {
                     .text_color(text_muted)
                     .child(apple_track_status),
             )
+            .when_some(apple_playback_status, |panel, status| {
+                panel.child(
+                    div()
+                        .id("settings-apple-playback-status")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(status.clone())
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(accent)
+                        .child(status),
+                )
+            })
             .when(apple_track_count > 0, |panel| panel.child(apple_track_list));
         let selected_apple_playlist = self.selected_apple_playlist.clone();
         let apple_playlist_selected = selected_apple_playlist.is_some();
@@ -4425,7 +4473,7 @@ impl Render for PlayerView {
                                     .text_xs()
                                     .text_color(text_muted)
                                     .child(
-                                        "READ-ONLY LIBRARY + CATALOG METADATA / SYSTEM PLAYBACK LATER / NO PCM, BPM, EQ OR AUDIO-REACTIVE MILKDROP",
+                                        "READ-ONLY LIBRARY + CATALOG METADATA / APPLE MUSIC PLAYBACK / NO PCM, BPM, EQ OR AUDIO-REACTIVE MILKDROP",
                                     ),
                             )
                     }),
@@ -5219,10 +5267,11 @@ mod tests {
 
     use crate::app::transport::TransportState;
     use crate::apple_music::{
-        AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaylist, ApplePlaylistTrack,
-        ApplePlaylistTracksState, CatalogPlayback, CloudLibrary, ConnectionResult,
-        ConnectionSubscription, PlaylistPage, SubscriptionCapabilities, SubscriptionOffer,
-        TestConnection, TestPlaylistPage, TestTrackPage, TrackPage,
+        AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaybackState, ApplePlaylist,
+        ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, CloudLibrary,
+        ConnectionResult, ConnectionSubscription, PlaylistPage, SubscriptionCapabilities,
+        SubscriptionOffer, TestConnection, TestPlayback, TestPlaylistPage, TestTrackPage,
+        TrackPage,
     };
     use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
@@ -5437,6 +5486,7 @@ mod tests {
                         )],
                         None,
                     ))]);
+                view.apple_music.use_test_playback(TestPlayback::Completed);
             });
         });
 
@@ -5493,7 +5543,41 @@ mod tests {
             );
             assert_eq!(
                 window.find(("apple-playlist-track", 0_usize)).label(),
-                Some("Track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05")
+                Some(
+                    "Play track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05"
+                )
+            );
+            assert_eq!(
+                window.find(("apple-playlist-track", 0_usize)).role(),
+                Some(Role::Button)
+            );
+            window.click(("apple-playlist-track", 0_usize), cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Preparing { .. }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { .. }
+                ));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-apple-playback-status").label(),
+                Some("Playing through Apple Music")
+            );
+            assert_eq!(
+                window.find(("apple-playlist-track", 0_usize)).label(),
+                Some(
+                    "Play track 1: Second Sun, by Signal Artist, album Unknown album, duration 4:05, playing"
+                )
             );
             window.click("settings-change-apple-playlist", cx);
             window.render_frame(cx);

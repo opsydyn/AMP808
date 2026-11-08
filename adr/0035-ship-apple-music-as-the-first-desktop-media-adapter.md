@@ -15,7 +15,14 @@ catalogue, playlists, MilkDrop visualisation, and a cancellable `yt-dlp` integra
 is required for the first provider phase and is a product differentiator rather than another PCM
 source. Apple owns playback and does not expose decoded samples to AMP808, while authorised
 MusicKit clients can browse a subscriber's library, playlists, catalogue, recommendations, and
-history and can ask the system music player to play selected items.
+history and can ask a MusicKit player to play selected items.
+
+During the first playback-handoff compile spike on 2026-11-08, Xcode 26.5's macOS MusicKit module
+proved that `SystemMusicPlayer` is explicitly unavailable on macOS. The same module exposes
+`ApplicationMusicPlayer` on macOS 14 and later, including queue, prepare, play, pause, stop, seek,
+and skip operations. The accepted decision is therefore amended to use
+`ApplicationMusicPlayer` for the desktop product. Music.app automation remains separate TUI prior
+art rather than a dependency of this GUI.
 
 The Ratatui application already contains useful Apple prior art: ADR-0012 controls `Music.app`,
 ADR-0013 introduced a metadata client, and ADR-0020 reopened read-only Apple Music work. That code
@@ -47,7 +54,7 @@ application's domain boundaries?
 ## Considered Options
 
 - Add a desktop-private Apple adapter backed by a thin native MusicKit bridge and
-  `SystemMusicPlayer`.
+  `ApplicationMusicPlayer`.
 - Copy the TUI Apple Music REST client and require manually supplied developer and user tokens.
 - Import the TUI `PlaybackBackend`, Apple API client, and UI-facing provider model into the desktop.
 - Create a shared Apple Music crate before the desktop contract is proven.
@@ -56,9 +63,9 @@ application's domain boundaries?
 ## Decision Outcome
 
 Chosen option: **add a desktop-private Apple adapter backed by a thin native MusicKit bridge and
-`SystemMusicPlayer`**, because it gives the desktop product native consent, automatically managed
-tokens, typed metadata, and a deterministic playlist-to-playback handoff while keeping Apple and
-Swift details outside GPUI and the local audio engine.
+`ApplicationMusicPlayer`**, because it gives the desktop product native consent, automatically
+managed tokens, typed metadata, and a deterministic playlist-to-playback handoff while keeping
+Apple and Swift details outside GPUI and the local audio engine.
 
 1. Add a desktop-owned Apple Music bounded context under `apps/desktop`.
    - Domain values describe authorisation, subscription availability, Apple media references,
@@ -70,7 +77,7 @@ Swift details outside GPUI and the local audio engine.
      sentinels represent missing data.
 2. Define a narrow, consumer-owned Apple port in Rust. It exposes only the use cases the desktop
    needs: inspect capability, request authorisation, load library playlists, load playlist tracks,
-   set a system-player queue, and issue supported transport commands.
+   set an app-scoped MusicKit queue, and issue supported transport commands.
 3. Implement the port with a small in-process Swift/MusicKit bridge.
    - Swift and MusicKit types do not cross the boundary.
    - The bridge returns versioned, bounded UTF-8 response envelopes through a C-compatible ABI;
@@ -84,9 +91,11 @@ Swift details outside GPUI and the local audio engine.
 4. Use `MusicAuthorization` for consent and MusicKit automatic developer and user-token handling.
    AMP808 does not embed a Media Services private key, generate JWTs, persist a music-user token,
    or ask a user to paste credentials.
-5. Use MusicKit's `SystemMusicPlayer`, which controls the system Music app, for selected Apple
-   songs and playlists. This preserves the accepted system-playback boundary from ADR-0012 while
-   replacing brittle desktop AppleScript selection with an official queue and transport API.
+5. Use MusicKit's macOS-supported `ApplicationMusicPlayer` for selected Apple songs and playlists.
+   This preserves ADR-0012's core boundary—Apple owns the protected playback path rather than
+   AMP808's local decoder—while replacing brittle desktop AppleScript selection with an official
+   MusicKit queue and transport API. Unlike `SystemMusicPlayer` on Apple mobile platforms, this
+   player is app-scoped and does not control Music.app.
 6. Keep Apple playback outside `audio.rs`, `playback.rs`, `analysis.rs`, and `milkdrop.rs`.
    - Apple mode exposes no PCM samples.
    - BPM is unavailable.
@@ -108,7 +117,7 @@ Swift details outside GPUI and the local audio engine.
 - **Application coordinator** owns request lifecycle, stale-response rejection, retry, selection,
   and conversion from adapter results into desktop state.
 - **MusicKit bridge** owns Swift concurrency, MusicKit requests, automatic token use, Apple DTO
-  decoding, `SystemMusicPlayer`, and platform error translation.
+  decoding, `ApplicationMusicPlayer`, and platform error translation.
 - **Desktop UI** owns presentation, focus, accessible labels, and user commands. It never imports
   Swift, raw FFI, tokens, or Apple response DTOs.
 - **Local playback** continues to own CPAL, Symphonia, PCM analysis, BPM, EQ, and projectM. It never
@@ -131,7 +140,7 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
 ### Consequences
 
 - Good, because users authorise Apple access through the native system consent flow.
-- Good, because Apple playlists can become playable through the official system music player.
+- Good, because Apple playlists can become playable through the official macOS MusicKit player.
 - Good, because automatic token management keeps private keys and pasted tokens out of the app.
 - Good, because a typed anti-corruption layer prevents Apple DTOs and Swift types from becoming the
   future Spotify, SoundCloud, or YouTube domain model.
@@ -165,7 +174,7 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
 - `apps/desktop/src/apple_music/macos.rs`: safe Rust wrapper around the native bridge and error
   mapping. This is the only Rust module allowed to contain bridge FFI declarations.
 - `apps/desktop/macos/music-kit-bridge/`: Swift source and C-compatible bridge contract for
-  authorisation, library playlists, playlist tracks, `SystemMusicPlayer`, and transport state.
+  authorisation, library playlists, playlist tracks, `ApplicationMusicPlayer`, and transport state.
 - `apps/desktop/build.rs`: macOS-only deterministic bridge compilation/linking into Cargo's
   `OUT_DIR`; non-macOS builds expose an unavailable adapter without invoking Swift tools.
 - `apps/desktop/Cargo.toml`: register `build.rs`; add `serde = "1"`, `serde_json = "1"`, and
@@ -215,8 +224,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
    - Map identifiers, names, artists, albums, durations, genres, artwork descriptors, catalog
      equivalence, editability, and missing fields into Rust domain values.
    - Reject repeated/off-contract pagination and never report a partial page sequence as complete.
-5. **System playback handoff**
-   - Set `SystemMusicPlayer` queues from a selected song or playlist and expose prepare, play,
+5. **MusicKit playback handoff**
+   - Set `ApplicationMusicPlayer` queues from a selected song or playlist and expose prepare, play,
      pause, next, previous, stop, repeat, shuffle, current entry, duration, position, and failure.
    - Keep local playback and Apple playback mutually explicit; switching modes tears down only the
      outgoing coordinator and never fabricates PCM state.
@@ -275,8 +284,9 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       presenting partial data as complete.
 - [x] Selecting a playlist loads all ordered playlist entries through validated pages and presents
       a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
-- [ ] Selecting a playable song or playlist sets the system music queue and begins playback through
-      `SystemMusicPlayer`; transport state remains observable after the request completes.
+- [x] Selecting a playable playlist entry sets the app-scoped MusicKit queue and begins playback
+      through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
+      the request completes. Whole-playlist activation and transport controls remain follow-ups.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -292,7 +302,7 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
 
 ## Pros and Cons of the Options
 
-### Desktop-private MusicKit adapter with `SystemMusicPlayer`
+### Desktop-private MusicKit adapter with `ApplicationMusicPlayer`
 
 - Good, because it uses Apple's native consent and automatic token management.
 - Good, because a selected playlist or song maps to an official playback queue.
@@ -325,7 +335,7 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
 
 - Good, because the TUI has working AppleScript prior art.
 - Bad, because mapping an arbitrary catalog or playlist selection to a Music.app script is less
-  deterministic than setting a MusicKit system-player queue.
+  deterministic than setting an app-scoped MusicKit queue.
 - Bad, because it would retain two Apple integration mechanisms after introducing MusicKit for
   authorization and metadata.
 
@@ -408,7 +418,7 @@ Read-only playlist-gallery evidence recorded on 2026-11-08:
 - The final development-signed build displayed the 170-entry gallery with accessible image and
   selection labels. Selecting one entry changed its accessibility label to the explicit selected
   state. This qualifies read-only paging, gallery presentation, and selection only; playlist-track
-  loading, system playback, manual keyboard/VoiceOver acceptance, denial/revocation, and relaunch
+  loading, MusicKit playback, manual keyboard/VoiceOver acceptance, denial/revocation, and relaunch
   persistence remain open.
 
 Selected-playlist track-browser evidence recorded on 2026-11-08:
@@ -431,11 +441,32 @@ Selected-playlist track-browser evidence recorded on 2026-11-08:
   full workspace passes 611 tests with 3 live-only tests ignored. The signed bundle validator also
   passes.
 - This qualifies read-only selected-playlist loading, pagination, search, virtualization,
-  master/detail recovery, and live metadata display. `SystemMusicPlayer` handoff, manual
+  master/detail recovery, and live metadata display. `ApplicationMusicPlayer` handoff, manual
   keyboard/VoiceOver acceptance, denial/revocation, offline/failure, and relaunch persistence
   remain separate gates.
 
-Official Apple references checked on 2026-11-07:
+Selected-entry MusicKit playback evidence recorded on 2026-11-08:
+
+- Xcode 26.5's macOS MusicKit interface and the bridge compile proved `SystemMusicPlayer` is
+  unavailable on macOS while `ApplicationMusicPlayer` is supported from macOS 14. ADR-0035 now
+  records the supported app-scoped player rather than carrying the mobile-only assumption.
+- The first signed spike could load an individual `Playlist.Entry` but failed during MusicKit
+  playback preparation. The playback request was refined test-first to preserve both the source
+  playlist identity and selected entry identity. Swift reloads that playlist relationship and uses
+  `ApplicationMusicPlayer.Queue(playlist:startingAt:)`, Apple's playlist-specific initializer.
+- The signed app exposed each selected-playlist result as a keyboard- and accessibility-visible
+  play button. Native acceptance observed the selected entry move from `Preparing Apple Music
+  playback` to `Playing through Apple Music`; the Swift bridge emits playing only after both
+  `prepareToPlay()` and `play()` succeed. The app was then closed to stop the app-scoped test
+  playback.
+- Bridge responses remain versioned and bounded, request and track identities are checked before
+  state changes, newer requests supersede unfinished ones, and provider failures are redacted at
+  the Rust boundary. Local PCM, BPM, EQ, and audio-reactive MilkDrop remain explicitly unavailable.
+- This qualifies one-entry selection and playback start. Pause/resume, stop, next/previous,
+  position observation, queue navigation, whole-playlist activation, failure recovery, and manual
+  keyboard/VoiceOver acceptance remain separate slices.
+
+Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
 - <https://developer.apple.com/documentation/musickit/musicauthorization>
@@ -443,6 +474,7 @@ Official Apple references checked on 2026-11-07:
 - <https://developer.apple.com/documentation/applemusicapi/get-all-library-playlists>
 - <https://developer.apple.com/documentation/musickit/playlist/entries>
 - <https://developer.apple.com/documentation/musickit/musicitemcollection>
+- <https://developer.apple.com/documentation/musickit/applicationmusicplayer>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/bundleresources/information-property-list/nsapplemusicusagedescription>
@@ -475,6 +507,6 @@ Implementation evidence recorded on 2026-11-07:
 
 Revisit this decision if MusicKit automatic token generation cannot be made reliable from the
 Rust-hosted application bundle, if the C-compatible bridge cannot meet the memory and error
-contract without private API, if `SystemMusicPlayer` cannot play the required library/catalog
+contract without private API, if `ApplicationMusicPlayer` cannot play the required library/catalog
 items, or after accepted GUI delivery when TUI parity provides evidence for or against a shared
 crate.

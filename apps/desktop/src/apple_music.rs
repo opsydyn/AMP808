@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 mod macos;
 
 #[cfg(target_os = "macos")]
-use macos::{BridgeCallError, ConnectionTask, PlaylistTask, TrackTask};
+use macos::{BridgeCallError, ConnectionTask, PlaybackTask, PlaylistTask, TrackTask};
 
 #[cfg(not(target_os = "macos"))]
 mod unavailable {
@@ -237,10 +237,75 @@ mod unavailable {
             }
         }
     }
+
+    pub(crate) struct PlaybackResponse {
+        request_id: RequestId,
+        track_id: AppleMusicId,
+    }
+
+    impl PlaybackResponse {
+        pub(crate) const fn request_id(&self) -> RequestId {
+            self.request_id
+        }
+
+        pub(crate) fn into_track_id(self) -> AppleMusicId {
+            self.track_id
+        }
+    }
+
+    pub(crate) struct PlaybackTask {
+        receiver: Option<mpsc::Receiver<Result<PlaybackResponse, BridgeCallError>>>,
+        #[cfg(test)]
+        _test_sender: Option<mpsc::Sender<Result<PlaybackResponse, BridgeCallError>>>,
+    }
+
+    impl PlaybackTask {
+        pub(crate) const fn start(
+            _request_id: RequestId,
+            _playlist_id: &AppleMusicId,
+            _track_id: &AppleMusicId,
+        ) -> Result<Self, BridgeCallError> {
+            Err(BridgeCallError)
+        }
+
+        pub(crate) fn try_recv(
+            &self,
+        ) -> Result<Result<PlaybackResponse, BridgeCallError>, mpsc::TryRecvError> {
+            self.receiver
+                .as_ref()
+                .map_or(Err(mpsc::TryRecvError::Disconnected), |receiver| {
+                    receiver.try_recv()
+                })
+        }
+
+        #[cfg(test)]
+        pub(crate) fn pending_for_test() -> Self {
+            let (sender, receiver) = mpsc::channel();
+            Self {
+                receiver: Some(receiver),
+                _test_sender: Some(sender),
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn completed_for_test(request_id: RequestId, track_id: AppleMusicId) -> Self {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Ok(PlaybackResponse {
+                    request_id,
+                    track_id,
+                }))
+                .expect("the test playback receiver remains live during construction");
+            Self {
+                receiver: Some(receiver),
+                _test_sender: None,
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-use unavailable::{BridgeCallError, ConnectionTask, PlaylistTask, TrackTask};
+use unavailable::{BridgeCallError, ConnectionTask, PlaybackTask, PlaylistTask, TrackTask};
 
 /// Stores an opaque, non-empty identifier returned by Apple Music.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -449,6 +514,10 @@ impl ApplePlaylistTrack {
         &self.title
     }
 
+    pub(crate) const fn id(&self) -> &AppleMusicId {
+        &self.id
+    }
+
     pub(crate) fn artist(&self) -> &str {
         &self.artist
     }
@@ -479,6 +548,22 @@ pub(crate) enum ApplePlaylistTracksState {
     },
     Failed {
         playlist_id: AppleMusicId,
+    },
+}
+
+/// Describes the selected-track handoff to Apple's app-scoped MusicKit player.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ApplePlaybackState {
+    Idle,
+    Preparing {
+        track_id: AppleMusicId,
+        request_id: RequestId,
+    },
+    Playing {
+        track_id: AppleMusicId,
+    },
+    Failed {
+        track_id: AppleMusicId,
     },
 }
 
@@ -1047,6 +1132,10 @@ pub(crate) struct AppleMusicCoordinator {
     track_load_id: Option<RequestId>,
     track_pager: Option<TrackPager>,
     track_error: Option<String>,
+    playback: ApplePlaybackState,
+    playback_task: Option<PlaybackTask>,
+    playback_request_id: Option<RequestId>,
+    playback_error: Option<String>,
     request_sequence: u64,
     error: Option<String>,
     #[cfg(test)]
@@ -1061,6 +1150,12 @@ pub(crate) struct AppleMusicCoordinator {
     test_track_pages: VecDeque<TestTrackPage>,
     #[cfg(test)]
     test_track_launches: usize,
+    #[cfg(test)]
+    test_playback: Option<TestPlayback>,
+    #[cfg(test)]
+    test_playback_launches: usize,
+    #[cfg(test)]
+    test_playback_request: Option<(AppleMusicId, AppleMusicId)>,
 }
 
 #[cfg(test)]
@@ -1084,6 +1179,13 @@ pub(crate) enum TestTrackPage {
     Completed(TrackPage),
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TestPlayback {
+    Pending,
+    Completed,
+}
+
 impl AppleMusicCoordinator {
     pub(crate) const fn new() -> Self {
         Self {
@@ -1099,6 +1201,10 @@ impl AppleMusicCoordinator {
             track_load_id: None,
             track_pager: None,
             track_error: None,
+            playback: ApplePlaybackState::Idle,
+            playback_task: None,
+            playback_request_id: None,
+            playback_error: None,
             request_sequence: 0,
             error: None,
             #[cfg(test)]
@@ -1113,6 +1219,12 @@ impl AppleMusicCoordinator {
             test_track_pages: VecDeque::new(),
             #[cfg(test)]
             test_track_launches: 0,
+            #[cfg(test)]
+            test_playback: None,
+            #[cfg(test)]
+            test_playback_launches: 0,
+            #[cfg(test)]
+            test_playback_request: None,
         }
     }
 
@@ -1130,6 +1242,29 @@ impl AppleMusicCoordinator {
 
     pub(crate) fn track_error(&self) -> Option<&str> {
         self.track_error.as_deref()
+    }
+
+    pub(crate) const fn playback(&self) -> &ApplePlaybackState {
+        &self.playback
+    }
+
+    pub(crate) fn playback_error(&self) -> Option<&str> {
+        self.playback_error.as_deref()
+    }
+
+    pub(crate) fn play_track(&mut self, playlist_id: AppleMusicId, track_id: AppleMusicId) {
+        self.playback_task.take();
+        let request_id = self.next_request_id();
+        self.playback_request_id = Some(request_id);
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::Preparing {
+            track_id: track_id.clone(),
+            request_id,
+        };
+        match self.create_playback_task(request_id, &playlist_id, &track_id) {
+            Ok(task) => self.playback_task = Some(task),
+            Err(error) => self.fail_playback(track_id, error.to_string()),
+        }
     }
 
     pub(crate) fn load_playlist_tracks(&mut self, playlist_id: AppleMusicId) {
@@ -1176,7 +1311,8 @@ impl AppleMusicCoordinator {
             self.poll_connection();
             return self.connection.is_some()
                 || self.playlist_task.is_some()
-                || self.track_task.is_some();
+                || self.track_task.is_some()
+                || self.playback_task.is_some();
         }
         if self.playlist_task.is_some() {
             self.poll_playlist_page();
@@ -1184,7 +1320,10 @@ impl AppleMusicCoordinator {
         if self.track_task.is_some() {
             self.poll_track_page();
         }
-        self.playlist_task.is_some() || self.track_task.is_some()
+        if self.playback_task.is_some() {
+            self.poll_playback();
+        }
+        self.playlist_task.is_some() || self.track_task.is_some() || self.playback_task.is_some()
     }
 
     fn poll_connection(&mut self) {
@@ -1402,6 +1541,69 @@ impl AppleMusicCoordinator {
         self.track_error = Some(error);
     }
 
+    fn poll_playback(&mut self) {
+        let event = match self.playback_task.as_ref().map(PlaybackTask::try_recv) {
+            Some(Ok(event)) => Some(event),
+            Some(Err(TryRecvError::Empty)) | None => return,
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.fail_active_playback("Apple Music playback channel disconnected".to_owned());
+                return;
+            }
+        };
+        let Some(event) = event else { return };
+        self.playback_task.take();
+        let response = match event {
+            Ok(response) => response,
+            Err(error) => {
+                self.fail_active_playback(error.to_string());
+                return;
+            }
+        };
+        if Some(response.request_id()) != self.playback_request_id {
+            self.fail_active_playback(
+                "Apple Music returned an obsolete playback result".to_owned(),
+            );
+            return;
+        }
+        let response_track_id = response.into_track_id();
+        if self.active_playback_track() != Some(&response_track_id) {
+            self.fail_active_playback(
+                "Apple Music returned a mismatched playback result".to_owned(),
+            );
+            return;
+        }
+        let track_id = response_track_id;
+        self.playback = ApplePlaybackState::Playing { track_id };
+        self.playback_request_id = None;
+        self.playback_error = None;
+    }
+
+    fn active_playback_track(&self) -> Option<&AppleMusicId> {
+        match &self.playback {
+            ApplePlaybackState::Preparing { track_id, .. }
+            | ApplePlaybackState::Playing { track_id }
+            | ApplePlaybackState::Failed { track_id } => Some(track_id),
+            ApplePlaybackState::Idle => None,
+        }
+    }
+
+    fn fail_active_playback(&mut self, error: String) {
+        let Some(track_id) = self.active_playback_track().cloned() else {
+            self.playback_task.take();
+            self.playback_request_id = None;
+            self.playback_error = Some(error);
+            return;
+        };
+        self.fail_playback(track_id, error);
+    }
+
+    fn fail_playback(&mut self, track_id: AppleMusicId, error: String) {
+        self.playback = ApplePlaybackState::Failed { track_id };
+        self.playback_task.take();
+        self.playback_request_id = None;
+        self.playback_error = Some(error);
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         self.request_sequence = self.request_sequence.saturating_add(1);
         RequestId::new(self.request_sequence)
@@ -1457,6 +1659,33 @@ impl AppleMusicCoordinator {
         requested_cursor: Option<&PageCursor>,
     ) -> Result<TrackTask, BridgeCallError> {
         TrackTask::start(request_id, playlist_id, requested_cursor)
+    }
+
+    #[cfg(not(test))]
+    fn create_playback_task(
+        &mut self,
+        request_id: RequestId,
+        playlist_id: &AppleMusicId,
+        track_id: &AppleMusicId,
+    ) -> Result<PlaybackTask, BridgeCallError> {
+        PlaybackTask::start(request_id, playlist_id, track_id)
+    }
+
+    #[cfg(test)]
+    fn create_playback_task(
+        &mut self,
+        request_id: RequestId,
+        playlist_id: &AppleMusicId,
+        track_id: &AppleMusicId,
+    ) -> Result<PlaybackTask, BridgeCallError> {
+        self.test_playback_launches = self.test_playback_launches.saturating_add(1);
+        self.test_playback_request = Some((playlist_id.clone(), track_id.clone()));
+        Ok(match self.test_playback.unwrap_or(TestPlayback::Pending) {
+            TestPlayback::Pending => PlaybackTask::pending_for_test(),
+            TestPlayback::Completed => {
+                PlaybackTask::completed_for_test(request_id, track_id.clone())
+            }
+        })
     }
 
     #[cfg(test)]
@@ -1518,6 +1747,11 @@ impl AppleMusicCoordinator {
     }
 
     #[cfg(test)]
+    pub(crate) fn use_test_playback(&mut self, playback: TestPlayback) {
+        self.test_playback = Some(playback);
+    }
+
+    #[cfg(test)]
     pub(crate) const fn test_connection_launches(&self) -> usize {
         self.test_connection_launches
     }
@@ -1531,17 +1765,28 @@ impl AppleMusicCoordinator {
     pub(crate) const fn test_track_launches(&self) -> usize {
         self.test_track_launches
     }
+
+    #[cfg(test)]
+    pub(crate) const fn test_playback_launches(&self) -> usize {
+        self.test_playback_launches
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_playback_request(&self) -> Option<&(AppleMusicId, AppleMusicId)> {
+        self.test_playback_request.as_ref()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, ApplePlaylist,
-        ApplePlaylistTrack, ApplePlaylistTracksState, AuthorisationOutcome, AuthorisationStatus,
-        CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
-        PageProgress, PaginationError, PlaylistPage, PlaylistPager, RequestId,
-        SubscriptionCapabilities, SubscriptionOffer, SubscriptionState, TestConnection,
-        TestPlaylistPage, TestTrackPage, TrackPage, TransitionOutcome,
+        AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState,
+        ApplePlaybackState, ApplePlaylist, ApplePlaylistTrack, ApplePlaylistTracksState,
+        AuthorisationOutcome, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+        ConnectionSubscription, PageCursor, PageProgress, PaginationError, PlaylistPage,
+        PlaylistPager, RequestId, SubscriptionCapabilities, SubscriptionOffer, SubscriptionState,
+        TestConnection, TestPlayback, TestPlaylistPage, TestTrackPage, TrackPage,
+        TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -2088,5 +2333,50 @@ mod tests {
             ApplePlaylistTracksState::Loading { playlist_id, .. } if playlist_id == &second_id
         ));
         assert_eq!(coordinator.test_track_launches(), 2);
+    }
+
+    #[test]
+    fn selected_track_handoff_exposes_preparing_then_playing() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+
+        coordinator.play_track(playlist_id.clone(), track_id.clone());
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Preparing { track_id: active, .. } if active == &track_id
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing {
+                track_id: track_id.clone(),
+            }
+        );
+        assert_eq!(coordinator.test_playback_launches(), 1);
+        assert_eq!(
+            coordinator.test_playback_request(),
+            Some(&(playlist_id, track_id))
+        );
+    }
+
+    #[test]
+    fn newer_track_handoff_supersedes_an_unfinished_request() {
+        let first = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
+        let second = AppleMusicId::try_from("i.second").expect("fixture id should be valid");
+        let playlist_id = AppleMusicId::try_from("p.cosmic").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Pending);
+
+        coordinator.play_track(playlist_id.clone(), first);
+        coordinator.play_track(playlist_id, second.clone());
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Preparing { track_id, .. } if track_id == &second
+        ));
+        assert_eq!(coordinator.test_playback_launches(), 2);
     }
 }

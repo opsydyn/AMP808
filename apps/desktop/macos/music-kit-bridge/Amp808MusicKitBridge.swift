@@ -92,6 +92,24 @@ private struct TrackPageEnvelope: Encodable {
     }
 }
 
+private struct PlaybackEnvelope: Encodable {
+    let version: Int
+    let kind: String
+    let requestID: UInt64
+    let trackID: String
+    let status: String
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case kind
+        case requestID = "request_id"
+        case trackID = "track_id"
+        case status
+        case error
+    }
+}
+
 private func sendPlaylistEnvelope(
     _ envelope: PlaylistPageEnvelope,
     completion: ConnectionCompletion
@@ -119,6 +137,21 @@ private func sendTrackEnvelope(
 
     completion.send(
         "{\"version\":\(envelopeVersion),\"kind\":\"playlist_track_page\",\"request_id\":\(envelope.requestID),\"playlist_id\":\"\",\"requested_cursor\":null,\"next_cursor\":null,\"tracks\":[],\"error\":\"encoding_failed\"}"
+    )
+}
+
+private func sendPlaybackEnvelope(
+    _ envelope: PlaybackEnvelope,
+    completion: ConnectionCompletion
+) {
+    if let data = try? JSONEncoder().encode(envelope),
+       let text = String(data: data, encoding: .utf8) {
+        completion.send(text)
+        return
+    }
+
+    completion.send(
+        "{\"version\":\(envelopeVersion),\"kind\":\"playback\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"status\":\"failed\",\"error\":\"encoding_failed\"}"
     )
 }
 
@@ -453,6 +486,147 @@ public func requestTrackPage(
                     nextCursor: nil,
                     tracks: [],
                     error: "request_failed"
+                ),
+                completion: completion
+            )
+        }
+    }
+    return 1
+}
+
+@c(amp808_music_kit_play_track)
+public func playTrack(
+    _ requestID: UInt64,
+    _ playlistIDBytes: UnsafePointer<UInt8>?,
+    _ playlistIDLength: UInt,
+    _ trackIDBytes: UnsafePointer<UInt8>?,
+    _ trackIDLength: UInt,
+    _ context: UnsafeMutableRawPointer?,
+    _ callback: Amp808MusicKitConnectionCallback?
+) -> UInt8 {
+    guard let callback else {
+        return 0
+    }
+    guard let usageDescription = Bundle.main.object(
+        forInfoDictionaryKey: "NSAppleMusicUsageDescription"
+    ) as? String, !usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 2
+    }
+    guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
+        return 3
+    }
+    guard playlistIDLength <= UInt(Int.max),
+          let playlistIDBytes,
+          let playlistID = String(
+              bytes: UnsafeBufferPointer(
+                  start: playlistIDBytes,
+                  count: Int(playlistIDLength)
+              ),
+              encoding: .utf8
+          ),
+          !playlistID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          trackIDLength <= UInt(Int.max),
+          let trackIDBytes,
+          let trackID = String(
+              bytes: UnsafeBufferPointer(
+                  start: trackIDBytes,
+                  count: Int(trackIDLength)
+              ),
+              encoding: .utf8
+          ),
+          !trackID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 4
+    }
+    let completion = ConnectionCompletion(context: context, callback: callback)
+
+    Task {
+        guard #available(macOS 14.0, *), MusicAuthorization.currentStatus == .authorized else {
+            sendPlaybackEnvelope(
+                PlaybackEnvelope(
+                    version: envelopeVersion,
+                    kind: "playback",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "failed",
+                    error: "access_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+
+        do {
+            var request = MusicLibraryRequest<Playlist>()
+            request.limit = 1
+            request.filter(matching: \.id, equalTo: MusicItemID(playlistID))
+            let response = try await request.response()
+            guard let playlist = response.items.first else {
+                sendPlaybackEnvelope(
+                    PlaybackEnvelope(
+                        version: envelopeVersion,
+                        kind: "playback",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "track_not_found"
+                    ),
+                    completion: completion
+                )
+                return
+            }
+
+            let detailedPlaylist = try await playlist.with([.entries])
+            var entries = detailedPlaylist.entries ?? []
+            var entry = entries.first { $0.id.rawValue == trackID }
+            while entry == nil, entries.hasNextBatch {
+                guard let next = try await entries.nextBatch(limit: playlistTrackPageSize) else {
+                    break
+                }
+                entries += next
+                entry = next.first { $0.id.rawValue == trackID }
+            }
+            guard let entry else {
+                sendPlaybackEnvelope(
+                    PlaybackEnvelope(
+                        version: envelopeVersion,
+                        kind: "playback",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "track_not_found"
+                    ),
+                    completion: completion
+                )
+                return
+            }
+
+            let player = ApplicationMusicPlayer.shared
+            player.queue = ApplicationMusicPlayer.Queue(
+                playlist: detailedPlaylist,
+                startingAt: entry
+            )
+            try await player.prepareToPlay()
+            try await player.play()
+            sendPlaybackEnvelope(
+                PlaybackEnvelope(
+                    version: envelopeVersion,
+                    kind: "playback",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "playing",
+                    error: nil
+                ),
+                completion: completion
+            )
+        } catch {
+            sendPlaybackEnvelope(
+                PlaybackEnvelope(
+                    version: envelopeVersion,
+                    kind: "playback",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "failed",
+                    error: "playback_failed"
                 ),
                 completion: completion
             )
