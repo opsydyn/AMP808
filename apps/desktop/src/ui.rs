@@ -1610,6 +1610,15 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn play_selected_apple_playlist(&mut self, cx: &mut Context<Self>) {
+        if !self.apple_music.can_play_loaded_playlist() {
+            return;
+        }
+        self.apple_music.play_loaded_playlist();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
     fn pause_apple_playback(&mut self, cx: &mut Context<Self>) {
         self.apple_music.pause();
         self.schedule_apple_music_poll(cx);
@@ -4103,6 +4112,7 @@ impl Render for PlayerView {
                 |error| format!("Playlist error / {error}"),
             ),
         };
+        let apple_can_play_playlist = self.apple_music.can_play_loaded_playlist();
         let apple_playback_status = match self.apple_music.playback() {
             ApplePlaybackState::Idle => None,
             ApplePlaybackState::Preparing { .. } => {
@@ -4259,17 +4269,41 @@ impl Render for PlayerView {
                             .child("SELECTED PLAYLIST"),
                     )
                     .child(
-                        hardware_button(
-                            "settings-change-apple-playlist",
-                            HardwareButtonTone::Neutral,
-                            self.skin,
-                            cx,
-                        )
-                        .label("CHANGE PLAYLIST")
-                        .accessibility_label("Return to Apple Music playlists")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_apple_playlists(cx);
-                        })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                hardware_button(
+                                    "settings-play-apple-playlist",
+                                    HardwareButtonTone::Primary,
+                                    self.skin,
+                                    cx,
+                                )
+                                .label("PLAY PLAYLIST")
+                                .accessibility_label("Play selected Apple Music playlist")
+                                .disabled(!apple_can_play_playlist)
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.play_selected_apple_playlist(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                hardware_button(
+                                    "settings-change-apple-playlist",
+                                    HardwareButtonTone::Neutral,
+                                    self.skin,
+                                    cx,
+                                )
+                                .label("CHANGE PLAYLIST")
+                                .accessibility_label("Return to Apple Music playlists")
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_apple_playlists(cx);
+                                    },
+                                )),
+                            ),
                     ),
             )
             .child(
@@ -5798,6 +5832,10 @@ mod tests {
                 Some("3 tracks")
             );
             assert_eq!(
+                window.find("settings-play-apple-playlist").label(),
+                Some("Play selected Apple Music playlist")
+            );
+            assert_eq!(
                 window.find(("apple-playlist-track", 1_usize)).label(),
                 Some(
                     "Play track 2: Second Sun, by Signal Artist, album Unknown album, duration 4:05"
@@ -5972,14 +6010,50 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Stopped { .. }
                 ));
+                view.apple_music.use_test_playback(TestPlayback::Pending);
             });
         });
+        cx.update_window(window, |_, window, cx| {
+            let search = view
+                .read(cx)
+                .apple_track_search
+                .as_ref()
+                .expect("Apple track search is initialized")
+                .clone();
+            search.update(cx, |input, cx| input.set_value("third", window, cx));
+        })
+        .expect("test window remains available");
+        cx.run_until_parked();
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
                 window.find("settings-apple-playback-status").label(),
                 Some("Apple Music playback stopped")
             );
+            assert_eq!(
+                window.find("settings-apple-track-status").label(),
+                Some("1 of 3 tracks shown")
+            );
+            window.click("settings-play-apple-playlist", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Preparing { track_id, .. }
+                        if track_id.as_str() == "i.first-light"
+                ));
+                assert!(matches!(
+                    view.apple_music.test_playback_request(),
+                    Some((playlist_id, track_id, 0))
+                        if playlist_id.as_str() == "p.signal"
+                            && track_id.as_str() == "i.first-light"
+                ));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
             window.click("settings-change-apple-playlist", cx);
             window.render_frame(cx);
             assert_eq!(

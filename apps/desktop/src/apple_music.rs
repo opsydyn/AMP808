@@ -1665,6 +1665,28 @@ impl AppleMusicCoordinator {
         }
     }
 
+    pub(crate) fn play_loaded_playlist(&mut self) {
+        let start = match &self.playlist_tracks {
+            ApplePlaylistTracksState::Loaded {
+                playlist_id,
+                tracks,
+            } => tracks
+                .first()
+                .map(|track| (playlist_id.clone(), track.id().clone())),
+            _ => None,
+        };
+        if let Some((playlist_id, track_id)) = start {
+            self.play_track(playlist_id, track_id, 0);
+        }
+    }
+
+    pub(crate) fn can_play_loaded_playlist(&self) -> bool {
+        matches!(
+            &self.playlist_tracks,
+            ApplePlaylistTracksState::Loaded { tracks, .. } if !tracks.is_empty()
+        )
+    }
+
     pub(crate) fn pause(&mut self) {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return;
@@ -3286,6 +3308,71 @@ mod tests {
             coordinator.test_playback_request(),
             Some(&(playlist_id, track_id, 0))
         );
+    }
+
+    #[test]
+    fn loaded_playlist_activation_starts_its_first_occurrence() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let first = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
+        let second = AppleMusicId::try_from("i.second").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                ApplePlaylistTrack::new(
+                    first.clone(),
+                    "First Light".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(183_000),
+                ),
+                ApplePlaylistTrack::new(
+                    second,
+                    "Second Sun".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(245_000),
+                ),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Pending);
+
+        coordinator.play_loaded_playlist();
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Preparing { track_id, .. } if track_id == &first
+        ));
+        assert_eq!(
+            coordinator.test_playback_request(),
+            Some(&(playlist_id, first, 0))
+        );
+    }
+
+    #[test]
+    fn empty_playlist_activation_does_not_start_playback() {
+        let playlist_id =
+            AppleMusicId::try_from("p.empty").expect("fixture playlist id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            Vec::new(),
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id);
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Pending);
+
+        coordinator.play_loaded_playlist();
+
+        assert_eq!(coordinator.playback(), &ApplePlaybackState::Idle);
+        assert_eq!(coordinator.test_playback_launches(), 0);
+        assert_eq!(coordinator.test_playback_request(), None);
+        assert!(!coordinator.can_play_loaded_playlist());
     }
 
     #[test]

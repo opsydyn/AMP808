@@ -8,11 +8,49 @@ private let playlistTrackPageSize = 100
 
 private struct PlaybackQueueContext: Sendable {
     let playlistID: String
-    let playlistIndicesByQueueEntryID: [String: Int]
+    let playlistCount: Int
+    let selectedPlaylistIndex: Int
+    var selectedQueueEntryID: String?
 }
 
-private enum PlaybackContextError: Error {
-    case currentEntryUnavailable
+func orderedQueueOccurrenceMap(
+    playlistCount: Int,
+    queueCount: Int,
+    selectedPlaylistIndex: Int,
+    selectedQueueIndex: Int
+) -> [Int: Int]? {
+    guard playlistCount > 0,
+          queueCount > 0,
+          (0..<playlistCount).contains(selectedPlaylistIndex),
+          (0..<queueCount).contains(selectedQueueIndex) else {
+        return nil
+    }
+
+    var mapping: [Int: Int] = [:]
+    for queueIndex in 0..<queueCount {
+        let relativeIndex = queueIndex - selectedQueueIndex
+        let (playlistIndex, overflowed) = selectedPlaylistIndex.addingReportingOverflow(
+            relativeIndex
+        )
+        guard !overflowed, (0..<playlistCount).contains(playlistIndex) else {
+            return nil
+        }
+        mapping[queueIndex] = playlistIndex
+    }
+    return mapping
+}
+
+func selectedQueueAnchorIndex(
+    knownSelectedQueueIndex: Int?,
+    queueCount: Int,
+    currentQueueIndex: Int
+) -> Int? {
+    if let knownSelectedQueueIndex {
+        return (0..<queueCount).contains(knownSelectedQueueIndex)
+            ? knownSelectedQueueIndex
+            : nil
+    }
+    return (0..<queueCount).contains(currentQueueIndex) ? currentQueueIndex : nil
 }
 
 @MainActor private var playbackQueueContext: PlaybackQueueContext?
@@ -751,43 +789,24 @@ public func playTrack(
                 startingAt: entry
             )
             try await player.prepareToPlay()
-            guard let selectedQueueEntry = player.queue.currentEntry else {
-                throw PlaybackContextError.currentEntryUnavailable
-            }
-            let queueEntries = player.queue.entries
-            guard let selectedQueueIndex = queueEntries.firstIndex(where: {
-                $0.id == selectedQueueEntry.id
-            }) else {
-                throw PlaybackContextError.currentEntryUnavailable
-            }
-            var playlistIndicesByQueueEntryID: [String: Int] = [:]
-            for queueIndex in queueEntries.indices {
-                let queueDistance = queueEntries.distance(
-                    from: selectedQueueIndex,
-                    to: queueIndex
-                )
-                let (mappedPlaylistIndex, overflowed) = playlistIndex
-                    .addingReportingOverflow(queueDistance)
-                guard !overflowed,
-                      entries.indices.contains(mappedPlaylistIndex),
-                      let queueItemID = queueEntries[queueIndex].item?.id,
-                      let playlistItemID = entries[mappedPlaylistIndex].item?.id,
-                      queueItemID == playlistItemID else {
-                    throw PlaybackContextError.currentEntryUnavailable
-                }
-                playlistIndicesByQueueEntryID[queueEntries[queueIndex].id] = mappedPlaylistIndex
-            }
-            guard playlistIndicesByQueueEntryID[selectedQueueEntry.id] == playlistIndex else {
-                throw PlaybackContextError.currentEntryUnavailable
+            try await player.play()
+
+            let selectedQueueEntryID: String?
+            if let selectedQueueEntry = player.queue.currentEntry {
+                selectedQueueEntryID = selectedQueueEntry.id
+            } else {
+                selectedQueueEntryID = nil
             }
             let queueContext = PlaybackQueueContext(
                 playlistID: playlistID,
-                playlistIndicesByQueueEntryID: playlistIndicesByQueueEntryID
+                playlistCount: entries.count,
+                selectedPlaylistIndex: playlistIndex,
+                selectedQueueEntryID: selectedQueueEntryID
             )
             await MainActor.run {
                 playbackQueueContext = queueContext
             }
-            try await player.play()
+
             sendPlaybackEnvelope(
                 PlaybackEnvelope(
                     version: envelopeVersion,
@@ -1026,10 +1045,12 @@ public func observePlaybackPosition(
         let playbackTime = ApplicationMusicPlayer.shared.playbackTime
         let milliseconds = playbackTime * 1_000
         let player = ApplicationMusicPlayer.shared
-        guard let playbackQueueContext,
+        let queueEntries = player.queue.entries
+        guard var queueContext = playbackQueueContext,
               let currentEntry = player.queue.currentEntry,
-              let playlistIndex = playbackQueueContext
-                  .playlistIndicesByQueueEntryID[currentEntry.id] else {
+              let currentQueueIndex = queueEntries.firstIndex(where: {
+                  $0.id == currentEntry.id
+              }) else {
             sendPositionEnvelope(
                 PositionEnvelope(
                     version: envelopeVersion,
@@ -1046,6 +1067,42 @@ public func observePlaybackPosition(
             )
             return
         }
+        let knownSelectedQueueIndex = queueContext.selectedQueueEntryID.flatMap { entryID in
+            queueEntries.firstIndex(where: { $0.id == entryID })
+        }
+        guard
+              let selectedQueueIndex = selectedQueueAnchorIndex(
+                  knownSelectedQueueIndex: knownSelectedQueueIndex,
+                  queueCount: queueEntries.count,
+                  currentQueueIndex: currentQueueIndex
+              ),
+              let playlistIndicesByQueueIndex = orderedQueueOccurrenceMap(
+                  playlistCount: queueContext.playlistCount,
+                  queueCount: queueEntries.count,
+                  selectedPlaylistIndex: queueContext.selectedPlaylistIndex,
+                  selectedQueueIndex: selectedQueueIndex
+              ),
+              let playlistIndex = playlistIndicesByQueueIndex[currentQueueIndex] else {
+            sendPositionEnvelope(
+                PositionEnvelope(
+                    version: envelopeVersion,
+                    kind: "position",
+                    requestID: requestID,
+                    playlistID: "",
+                    playlistIndex: 0,
+                    elapsedMS: 0,
+                    durationMS: nil,
+                    playbackStatus: nil,
+                    error: "position_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+        if queueContext.selectedQueueEntryID == nil {
+            queueContext.selectedQueueEntryID = queueEntries[selectedQueueIndex].id
+            playbackQueueContext = queueContext
+        }
         guard let encodedPlaylistIndex = UInt64(exactly: playlistIndex),
               milliseconds.isFinite,
               milliseconds >= 0,
@@ -1055,7 +1112,7 @@ public func observePlaybackPosition(
                     version: envelopeVersion,
                     kind: "position",
                     requestID: requestID,
-                    playlistID: playbackQueueContext.playlistID,
+                    playlistID: queueContext.playlistID,
                     playlistIndex: 0,
                     elapsedMS: 0,
                     durationMS: nil,
@@ -1071,7 +1128,7 @@ public func observePlaybackPosition(
                 version: envelopeVersion,
                 kind: "position",
                 requestID: requestID,
-                playlistID: playbackQueueContext.playlistID,
+                playlistID: queueContext.playlistID,
                 playlistIndex: encodedPlaylistIndex,
                 elapsedMS: UInt64(milliseconds.rounded(.down)),
                 durationMS: queueEntryDurationMilliseconds(currentEntry.item),

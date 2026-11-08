@@ -572,10 +572,11 @@ Apple current-entry reconciliation evidence recorded on 2026-11-08:
   GPUI passes the original ordered playlist index even when search filters the visible rows; Swift
   validates both that index and the expected opaque entry identifier before constructing the
   MusicKit queue. This removes the previously recorded ambiguity for duplicate playlist entries.
-- After `prepareToPlay`, Swift builds an immutable mapping from MusicKit's queue-entry identifiers
-  to ordered playlist indices. Position observations return the authoritative playlist identifier
-  and occurrence index. The mapping is owned on `MainActor`, while MusicKit's non-Sendable player
-  remains in its established task rather than crossing actor isolation.
+- MusicKit's playlist queue initializer defines the selected playlist occurrence and preserves the
+  queue's relative order. Swift records the selected queue-entry identifier when MusicKit exposes
+  it, then position observations derive a bounded relative-position mapping from queue indices to
+  ordered playlist indices. The observation context is owned on `MainActor`, while MusicKit's
+  non-Sendable player remains in its established task rather than crossing actor isolation.
 - Rust snapshots the exact ordered playlist handed to MusicKit. A matching native occurrence
   updates the Playing identity and selects that occurrence's duration; a response for another
   playlist or outside the playback snapshot cannot replace active state. Browsing a different
@@ -587,10 +588,13 @@ Apple current-entry reconciliation evidence recorded on 2026-11-08:
 - The strict locked desktop Clippy gate passes with warnings denied apart from the repository's
   explicit dead-code allowance. The development-signed Swift bridge compiles, links, signs, and
   passes the bundle validator.
-- The final signed build also validates every available native queue item's MusicKit item identity
-  against the corresponding fully loaded playlist entry before accepting playback. A live request
-  for the second playlist occurrence passed this guard, began at 00:00 with that row active, and
-  was stopped through keyboard navigation.
+- An earlier bridge revision attempted to validate every native queue item's optional MusicKit
+  item identifier against the corresponding library playlist entry before accepting playback.
+  Live unified logs later proved `prepareToPlay` completed while that validation prevented
+  `play()` from being called. Queue-item identity is not used as a cross-surface invariant: Apple
+  documents the queue entry's item as optional, and library relationship identifiers need not be
+  the queue entry's playable-item identifier. Playback now starts after successful preparation;
+  the bounded positional mapping is observation-only and cannot veto playback.
 - Live signed observation confirmed stable playback and accessible progress from 00:04 through
   04:59, plus keyboard activation of Stop. MusicKit did not change `currentEntry` during that run,
   even though the selected entry's listed duration was 03:21, so an actual native natural-boundary
@@ -626,6 +630,37 @@ Apple current-entry reconciliation evidence recorded on 2026-11-08:
   repeat/shuffle, whole-playlist activation, a live observed natural transition, and manual
   VoiceOver acceptance remain separate work.
 
+Whole-playlist activation evidence recorded on 2026-11-08:
+
+- The application coordinator starts a fully loaded playlist from occurrence zero by reusing the
+  existing occurrence-aware MusicKit handoff. It snapshots the complete ordered playlist already
+  owned by the coordinator; search remains presentation-only and does not rebuild or reorder the
+  playback request. Loading and empty states cannot launch playback.
+- GPUI exposes a primary `PLAY PLAYLIST` control with the accessibility label
+  `Play selected Apple Music playlist`. It is disabled until a non-empty playlist is fully loaded
+  and remains beside the existing master/detail recovery action.
+- Coordinator tests prove occurrence-zero activation and an empty-playlist no-op. The GPUI
+  interaction test filters the visible rows so that only occurrence two remains, then proves the
+  playlist action still requests the hidden first occurrence. The locked desktop suite passes
+  234 tests, strict desktop Clippy passes with warnings denied apart from the repository's explicit
+  dead-code allowance, the full locked workspace passes, formatting and `git diff --check` pass,
+  and the development-signed bundle builds and passes its validator.
+- Unified logging diagnosed the initial live failure: `prepareToPlay` completed with the target
+  queue descriptor, but AMP808's invalid post-prepare cross-surface identity check prevented the
+  bridge from calling `play()`. The bridge now starts playback immediately after successful
+  preparation and establishes optional queue-observation context afterward. Focused Swift 6 tests
+  with warnings denied cover suffix queues, full queues with duplicate occurrence positions,
+  selected-occurrence offsets, overflow rejection, and lazy queue-anchor resolution.
+- A fresh development-signed run loaded 48 tracks, filtered the presentation to show only track
+  two (`Love Story`, 03:21), and activated `Play selected Apple Music playlist`. MusicKit started
+  the hidden first occurrence and AMP808 exposed `Playing through Apple Music` plus accessible
+  progress at 00:04 of 05:20, matching track one (`One More Time`) rather than the visible search
+  result. Activating Stop removed progress and exposed `Apple Music playback stopped`.
+- This qualifies the desktop command, accessibility surface, loading guard, occurrence-zero
+  request, live whole-playlist start, positional progress reconciliation, and Stop recovery.
+  Seeking, repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance
+  remain separate work.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
@@ -637,6 +672,8 @@ Official Apple references checked through 2026-11-08:
 - <https://developer.apple.com/documentation/musickit/applicationmusicplayer>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/init%28playlist%3Astartingat%3A%29>
 - <https://developer.apple.com/documentation/bundleresources/information-property-list/nsapplemusicusagedescription>
 
 Implementation evidence recorded on 2026-11-07:
