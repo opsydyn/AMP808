@@ -21,7 +21,10 @@ use macos::{
 mod unavailable {
     use std::{error::Error, fmt, sync::mpsc};
 
-    use super::{AppleMusicId, ConnectionResult, PageCursor, PlaylistPage, RequestId, TrackPage};
+    use super::{
+        AppleMusicId, AppleObservedPlaybackStatus, ConnectionResult, PageCursor, PlaylistPage,
+        RequestId, TrackPage,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) struct BridgeCallError;
@@ -379,6 +382,7 @@ mod unavailable {
         playlist_index: usize,
         elapsed_ms: u64,
         duration_ms: Option<u64>,
+        playback_status: Option<AppleObservedPlaybackStatus>,
     }
 
     impl PositionResponse {
@@ -400,6 +404,10 @@ mod unavailable {
 
         pub(crate) const fn duration_ms(&self) -> Option<u64> {
             self.duration_ms
+        }
+
+        pub(crate) const fn playback_status(&self) -> Option<AppleObservedPlaybackStatus> {
+            self.playback_status
         }
     }
 
@@ -460,6 +468,7 @@ mod unavailable {
                     playlist_index,
                     elapsed_ms,
                     duration_ms: None,
+                    playback_status: None,
                 }))
                 .expect("the test position receiver remains live during construction");
             Self {
@@ -484,6 +493,32 @@ mod unavailable {
                     playlist_index,
                     elapsed_ms,
                     duration_ms: Some(duration_ms),
+                    playback_status: None,
+                }))
+                .expect("the test position receiver remains live during construction");
+            Self {
+                receiver: Some(receiver),
+                _test_sender: None,
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn completed_with_status_for_test(
+            request_id: RequestId,
+            playlist_id: AppleMusicId,
+            playlist_index: usize,
+            elapsed_ms: u64,
+            playback_status: AppleObservedPlaybackStatus,
+        ) -> Self {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Ok(PositionResponse {
+                    request_id,
+                    playlist_id,
+                    playlist_index,
+                    elapsed_ms,
+                    duration_ms: None,
+                    playback_status: Some(playback_status),
                 }))
                 .expect("the test position receiver remains live during construction");
             Self {
@@ -758,6 +793,17 @@ enum AppleTransportStatus {
     Paused,
     Playing,
     Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppleObservedPlaybackStatus {
+    Stopped,
+    Playing,
+    Paused,
+    Interrupted,
+    SeekingForward,
+    SeekingBackward,
+    Unknown,
 }
 
 /// Describes the selected-track handoff to Apple's app-scoped MusicKit player.
@@ -1487,6 +1533,10 @@ pub(crate) enum TestPosition {
         elapsed_ms: u64,
         duration_ms: u64,
     },
+    CompletedWithStatus {
+        elapsed_ms: u64,
+        playback_status: AppleObservedPlaybackStatus,
+    },
     CompletedForTrack {
         track_id: AppleMusicId,
         elapsed_ms: u64,
@@ -1896,6 +1946,14 @@ impl AppleMusicCoordinator {
             return;
         };
         queue.current_index = response.playlist_index();
+        if response.playback_status() == Some(AppleObservedPlaybackStatus::Stopped) {
+            self.playback = ApplePlaybackState::Stopped {
+                track_id: track.id().clone(),
+            };
+            self.position = None;
+            self.position_error = None;
+            return;
+        }
         if matches!(self.playback, ApplePlaybackState::Playing { .. }) {
             self.playback = ApplePlaybackState::Playing {
                 track_id: track.id().clone(),
@@ -2472,6 +2530,21 @@ impl AppleMusicCoordinator {
                     ))
                 },
             ),
+            Some(TestPosition::CompletedWithStatus {
+                elapsed_ms,
+                playback_status,
+            }) => fallback.map_or_else(
+                || Ok(PositionTask::pending_for_test()),
+                |(playlist_id, playlist_index)| {
+                    Ok(PositionTask::completed_with_status_for_test(
+                        request_id,
+                        playlist_id,
+                        playlist_index,
+                        elapsed_ms,
+                        playback_status,
+                    ))
+                },
+            ),
             Some(TestPosition::CompletedForTrack {
                 track_id,
                 elapsed_ms,
@@ -2633,12 +2706,13 @@ impl AppleMusicCoordinator {
 mod tests {
     use super::{
         AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState,
-        ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist, ApplePlaylistTrack,
-        ApplePlaylistTracksState, AuthorisationOutcome, AuthorisationStatus, CatalogPlayback,
-        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PageProgress,
-        PaginationError, PlaylistPage, PlaylistPager, RequestId, SubscriptionCapabilities,
-        SubscriptionOffer, SubscriptionState, TestConnection, TestPlayback, TestPlaylistPage,
-        TestPosition, TestTrackPage, TestTransport, TrackPage, TransitionOutcome,
+        AppleObservedPlaybackStatus, ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist,
+        ApplePlaylistTrack, ApplePlaylistTracksState, AuthorisationOutcome, AuthorisationStatus,
+        CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
+        PageProgress, PaginationError, PlaylistPage, PlaylistPager, RequestId,
+        SubscriptionCapabilities, SubscriptionOffer, SubscriptionState, TestConnection,
+        TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport, TrackPage,
+        TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -3508,6 +3582,83 @@ mod tests {
             .expect("native position should be exposed after the matching response");
         assert_eq!(position.elapsed_ms(), 12_345);
         assert_eq!(position.duration_ms(), Some(320_000));
+    }
+
+    #[test]
+    fn native_stopped_status_ends_playback_without_inferring_from_elapsed_time() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(201_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedWithStatus {
+            elapsed_ms: 212_000,
+            playback_status: AppleObservedPlaybackStatus::Stopped,
+        }]);
+
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Stopped { track_id }
+        );
+        assert_eq!(coordinator.playback_position(), None);
+    }
+
+    #[test]
+    fn native_playing_status_remains_authoritative_beyond_nominal_duration() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(201_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedWithStatus {
+            elapsed_ms: 212_000,
+            playback_status: AppleObservedPlaybackStatus::Playing,
+        }]);
+
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id }
+        );
+        assert_eq!(
+            coordinator
+                .playback_position()
+                .map(ApplePlaybackPosition::elapsed_ms),
+            Some(212_000)
+        );
     }
 
     #[test]

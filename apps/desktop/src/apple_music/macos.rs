@@ -15,9 +15,10 @@ use serde::Deserialize;
 #[cfg(not(test))]
 use super::AppleTransportCommand;
 use super::{
-    AppleArtworkUrl, AppleMusicId, ApplePlaylist, ApplePlaylistTrack, AppleTransportStatus,
-    AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription,
-    PageCursor, PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
+    AppleArtworkUrl, AppleMusicId, AppleObservedPlaybackStatus, ApplePlaylist, ApplePlaylistTrack,
+    AppleTransportStatus, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+    ConnectionSubscription, PageCursor, PlaylistPage, RequestId, SubscriptionCapabilities,
+    SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -225,6 +226,7 @@ struct WirePosition {
     playlist_index: u64,
     elapsed_ms: u64,
     duration_ms: Option<u64>,
+    playback_status: Option<String>,
     error: Option<String>,
 }
 
@@ -732,6 +734,7 @@ pub(crate) struct PositionResponse {
     playlist_index: usize,
     elapsed_ms: u64,
     duration_ms: Option<u64>,
+    playback_status: Option<AppleObservedPlaybackStatus>,
 }
 
 impl PositionResponse {
@@ -758,12 +761,27 @@ impl PositionResponse {
             .map_err(|_error| BridgeProtocolError::InvalidPlaylistIdentifier)?;
         let playlist_index = usize::try_from(wire.playlist_index)
             .map_err(|_error| BridgeProtocolError::InvalidPlaylistIndex)?;
+        let playback_status = wire
+            .playback_status
+            .as_deref()
+            .map(|status| match status {
+                "stopped" => Ok(AppleObservedPlaybackStatus::Stopped),
+                "playing" => Ok(AppleObservedPlaybackStatus::Playing),
+                "paused" => Ok(AppleObservedPlaybackStatus::Paused),
+                "interrupted" => Ok(AppleObservedPlaybackStatus::Interrupted),
+                "seeking_forward" => Ok(AppleObservedPlaybackStatus::SeekingForward),
+                "seeking_backward" => Ok(AppleObservedPlaybackStatus::SeekingBackward),
+                "unknown" => Ok(AppleObservedPlaybackStatus::Unknown),
+                _ => Err(BridgeProtocolError::UnknownPlaybackStatus),
+            })
+            .transpose()?;
         Ok(Self {
             request_id: RequestId::new(wire.request_id),
             playlist_id,
             playlist_index,
             elapsed_ms: wire.elapsed_ms,
             duration_ms: wire.duration_ms,
+            playback_status,
         })
     }
 
@@ -787,6 +805,10 @@ impl PositionResponse {
         self.duration_ms
     }
 
+    pub(crate) const fn playback_status(&self) -> Option<AppleObservedPlaybackStatus> {
+        self.playback_status
+    }
+
     #[cfg(test)]
     fn completed_for_test(
         request_id: RequestId,
@@ -794,6 +816,7 @@ impl PositionResponse {
         playlist_index: usize,
         elapsed_ms: u64,
         duration_ms: Option<u64>,
+        playback_status: Option<AppleObservedPlaybackStatus>,
     ) -> Self {
         Self {
             request_id,
@@ -801,6 +824,7 @@ impl PositionResponse {
             playlist_index,
             elapsed_ms,
             duration_ms,
+            playback_status,
         }
     }
 }
@@ -852,6 +876,7 @@ pub(crate) enum BridgeProtocolError {
     InvalidPlaylistIdentifier,
     InvalidPlaylistIndex,
     InvalidTrackIdentifier,
+    UnknownPlaybackStatus,
     PlaylistRequestFailed,
     TrackRequestFailed,
     PlaybackFailed,
@@ -898,6 +923,9 @@ impl fmt::Display for BridgeProtocolError {
             Self::InvalidTrackIdentifier => {
                 formatter.write_str("Apple Music returned an invalid playlist entry identifier")
             }
+            Self::UnknownPlaybackStatus => {
+                formatter.write_str("Apple Music returned an unknown playback status")
+            }
             Self::PlaylistRequestFailed => {
                 formatter.write_str("Apple Music could not load the playlist library")
             }
@@ -929,6 +957,7 @@ impl Error for BridgeProtocolError {
             | Self::InvalidPlaylistIdentifier
             | Self::InvalidPlaylistIndex
             | Self::InvalidTrackIdentifier
+            | Self::UnknownPlaybackStatus
             | Self::PlaylistRequestFailed
             | Self::TrackRequestFailed
             | Self::PlaybackFailed
@@ -1511,6 +1540,7 @@ impl PositionTask {
                 playlist_index,
                 elapsed_ms,
                 None,
+                None,
             )))
             .expect("the test position receiver remains live during construction");
         Self {
@@ -1535,6 +1565,32 @@ impl PositionTask {
                 playlist_index,
                 elapsed_ms,
                 Some(duration_ms),
+                None,
+            )))
+            .expect("the test position receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_with_status_for_test(
+        request_id: RequestId,
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
+        elapsed_ms: u64,
+        playback_status: AppleObservedPlaybackStatus,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(PositionResponse::completed_for_test(
+                request_id,
+                playlist_id,
+                playlist_index,
+                elapsed_ms,
+                None,
+                Some(playback_status),
             )))
             .expect("the test position receiver remains live during construction");
         Self {
@@ -1874,8 +1930,9 @@ mod tests {
         TrackPageResponse, TransportResponse, deliver_connection, probe_capability,
     };
     use crate::apple_music::{
-        AppleTransportStatus, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
-        ConnectionSubscription, PageCursor, RequestId, SubscriptionCapabilities, SubscriptionOffer,
+        AppleObservedPlaybackStatus, AppleTransportStatus, AuthorisationStatus, CatalogPlayback,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, RequestId,
+        SubscriptionCapabilities, SubscriptionOffer,
     };
 
     static RELEASE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -2086,7 +2143,7 @@ mod tests {
     #[test]
     fn position_envelope_preserves_identity_and_native_elapsed_time() {
         let response = PositionResponse::parse(
-            br#"{"version":1,"kind":"position","request_id":63,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"duration_ms":320000,"error":null}"#,
+            br#"{"version":1,"kind":"position","request_id":63,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"duration_ms":320000,"playback_status":"playing","error":null}"#,
         )
         .expect("a finite native position should cross the bridge");
 
@@ -2095,6 +2152,27 @@ mod tests {
         assert_eq!(response.playlist_index(), 7);
         assert_eq!(response.elapsed_ms(), 12_345);
         assert_eq!(response.duration_ms(), Some(320_000));
+        assert_eq!(
+            response.playback_status(),
+            Some(AppleObservedPlaybackStatus::Playing)
+        );
+
+        let legacy_response = PositionResponse::parse(
+            br#"{"version":1,"kind":"position","request_id":64,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"duration_ms":320000,"error":null}"#,
+        )
+        .expect("an older position envelope may omit native playback status");
+        assert_eq!(legacy_response.playback_status(), None);
+    }
+
+    #[test]
+    fn position_envelope_rejects_an_unexpected_playback_status() {
+        let error = PositionResponse::parse(
+            br#"{"version":1,"kind":"position","request_id":64,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"duration_ms":320000,"playback_status":"buffering","error":null}"#,
+        )
+        .expect_err("the bridge must not invent unsupported playback semantics");
+
+        assert!(matches!(error, BridgeProtocolError::UnknownPlaybackStatus));
+        assert!(!error.to_string().contains("buffering"));
     }
 
     #[test]

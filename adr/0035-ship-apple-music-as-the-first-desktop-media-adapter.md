@@ -606,6 +606,22 @@ Apple current-entry reconciliation evidence recorded on 2026-11-08:
   control. The earlier overrun is therefore reproduced as MusicKit provider/runtime behaviour,
   not explained by stale AMP808 duration metadata, and must not be repaired by fabricating a
   transition from elapsed time.
+- Apple documents `playbackTime` as time within the current entry, `currentEntry` as the active
+  queue identity, and `playbackStatus` as the player state. The installed macOS 26.5 SDK exposes
+  stopped, playing, paused, interrupted, seeking-forward, and seeking-backward states but no
+  separate ended state. The versioned position envelope therefore carries optional native status:
+  `currentEntry` remains occurrence authority, `playbackStatus == stopped` ends AMP808's Playing
+  state, and elapsed time remains display-only even when it exceeds nominal duration.
+- Parser tests cover typed status, legacy envelopes without status, and redacted rejection of
+  unsupported values. Coordinator tests prove native stopped-state reconciliation and prove that
+  native playing state remains authoritative beyond nominal duration. No local timer, inferred
+  end event, or second playback owner was added.
+- A fresh development-signed acceptance run exercised the status-aware production bridge from
+  00:04 through 03:35 against a native 03:21 duration. MusicKit continued to report Playing and
+  the same `currentEntry`; AMP808 therefore kept the occurrence Playing while clamping only the
+  visual percentage to 100%. Keyboard activation of Stop then removed progress and exposed the
+  stopped state. This verifies the authority rule but still does not constitute a naturally
+  advanced or naturally stopped provider event.
 - This qualifies deterministic occurrence identity and automated reconciliation behavior. Seeking,
   repeat/shuffle, whole-playlist activation, a live observed natural transition, and manual
   VoiceOver acceptance remain separate work.

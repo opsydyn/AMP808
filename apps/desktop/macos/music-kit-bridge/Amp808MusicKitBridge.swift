@@ -147,6 +147,7 @@ private struct PositionEnvelope: Encodable {
     let playlistIndex: UInt64
     let elapsedMS: UInt64
     let durationMS: UInt64?
+    let playbackStatus: String?
     let error: String?
 
     enum CodingKeys: String, CodingKey {
@@ -157,6 +158,7 @@ private struct PositionEnvelope: Encodable {
         case playlistIndex = "playlist_index"
         case elapsedMS = "elapsed_ms"
         case durationMS = "duration_ms"
+        case playbackStatus = "playback_status"
         case error
     }
 }
@@ -232,7 +234,7 @@ private func sendPositionEnvelope(
     }
 
     completion.send(
-        "{\"version\":\(envelopeVersion),\"kind\":\"position\",\"request_id\":\(envelope.requestID),\"playlist_id\":\"\",\"playlist_index\":0,\"elapsed_ms\":0,\"duration_ms\":null,\"error\":\"encoding_failed\"}"
+        "{\"version\":\(envelopeVersion),\"kind\":\"position\",\"request_id\":\(envelope.requestID),\"playlist_id\":\"\",\"playlist_index\":0,\"elapsed_ms\":0,\"duration_ms\":null,\"playback_status\":null,\"error\":\"encoding_failed\"}"
     )
 }
 
@@ -256,6 +258,26 @@ private func queueEntryDurationMilliseconds(
         nil
     @unknown default:
         nil
+    }
+}
+
+@available(macOS 14.0, *)
+private func playbackStatusLabel(_ status: MusicPlayer.PlaybackStatus) -> String {
+    switch status {
+    case .stopped:
+        "stopped"
+    case .playing:
+        "playing"
+    case .paused:
+        "paused"
+    case .interrupted:
+        "interrupted"
+    case .seekingForward:
+        "seeking_forward"
+    case .seekingBackward:
+        "seeking_backward"
+    @unknown default:
+        "unknown"
     }
 }
 
@@ -993,6 +1015,7 @@ public func observePlaybackPosition(
                     playlistIndex: 0,
                     elapsedMS: 0,
                     durationMS: nil,
+                    playbackStatus: nil,
                     error: "access_unavailable"
                 ),
                 completion: completion
@@ -1016,6 +1039,7 @@ public func observePlaybackPosition(
                     playlistIndex: 0,
                     elapsedMS: 0,
                     durationMS: nil,
+                    playbackStatus: nil,
                     error: "position_unavailable"
                 ),
                 completion: completion
@@ -1035,6 +1059,7 @@ public func observePlaybackPosition(
                     playlistIndex: 0,
                     elapsedMS: 0,
                     durationMS: nil,
+                    playbackStatus: nil,
                     error: "position_unavailable"
                 ),
                 completion: completion
@@ -1050,6 +1075,7 @@ public func observePlaybackPosition(
                 playlistIndex: encodedPlaylistIndex,
                 elapsedMS: UInt64(milliseconds.rounded(.down)),
                 durationMS: queueEntryDurationMilliseconds(currentEntry.item),
+                playbackStatus: playbackStatusLabel(player.state.playbackStatus),
                 error: nil
             ),
             completion: completion
