@@ -1,4 +1,5 @@
 import Foundation
+import MusicKit
 
 @main
 private enum QueueOccurrenceMapTests {
@@ -70,6 +71,26 @@ private enum QueueOccurrenceMapTests {
             1,
             "a previously resolved queue anchor must remain authoritative"
         )
+        requireEqual(
+            repeatModeForCommandValue(0),
+            MusicPlayer.RepeatMode.none,
+            "repeat value zero must disable repeat"
+        )
+        requireEqual(
+            repeatModeForCommandValue(1),
+            MusicPlayer.RepeatMode.all,
+            "repeat value one must repeat the queue"
+        )
+        requireEqual(
+            repeatModeForCommandValue(2),
+            MusicPlayer.RepeatMode.one,
+            "repeat value two must repeat the current entry"
+        )
+        requireEqual(
+            repeatModeForCommandValue(3),
+            nil,
+            "unknown repeat values must fail closed"
+        )
     }
 
     private static func requireEqual(
@@ -83,6 +104,16 @@ private enum QueueOccurrenceMapTests {
     }
 
     private static func requireEqual(_ actual: Int?, _ expected: Int?, _ message: String) {
+        guard actual == expected else {
+            fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
+        }
+    }
+
+    private static func requireEqual(
+        _ actual: MusicPlayer.RepeatMode?,
+        _ expected: MusicPlayer.RepeatMode?,
+        _ message: String
+    ) {
         guard actual == expected else {
             fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
         }

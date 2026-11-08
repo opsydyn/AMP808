@@ -53,6 +53,20 @@ func selectedQueueAnchorIndex(
     return (0..<queueCount).contains(currentQueueIndex) ? currentQueueIndex : nil
 }
 
+@available(macOS 14.0, *)
+func repeatModeForCommandValue(_ value: UInt64) -> MusicPlayer.RepeatMode? {
+    switch value {
+    case 0:
+        MusicPlayer.RepeatMode.none
+    case 1:
+        .all
+    case 2:
+        .one
+    default:
+        nil
+    }
+}
+
 @MainActor private var playbackQueueContext: PlaybackQueueContext?
 
 public typealias Amp808MusicKitConnectionCallback = @convention(c) (
@@ -165,7 +179,26 @@ private struct TransportEnvelope: Encodable {
     let requestID: UInt64
     let trackID: String
     let status: String
+    let repeatMode: String?
     let error: String?
+
+    init(
+        version: Int,
+        kind: String,
+        requestID: UInt64,
+        trackID: String,
+        status: String,
+        repeatMode: String? = nil,
+        error: String?
+    ) {
+        self.version = version
+        self.kind = kind
+        self.requestID = requestID
+        self.trackID = trackID
+        self.status = status
+        self.repeatMode = repeatMode
+        self.error = error
+    }
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -173,6 +206,7 @@ private struct TransportEnvelope: Encodable {
         case requestID = "request_id"
         case trackID = "track_id"
         case status
+        case repeatMode = "repeat_mode"
         case error
     }
 }
@@ -314,6 +348,20 @@ private func playbackStatusLabel(_ status: MusicPlayer.PlaybackStatus) -> String
         "seeking_forward"
     case .seekingBackward:
         "seeking_backward"
+    @unknown default:
+        "unknown"
+    }
+}
+
+@available(macOS 14.0, *)
+private func repeatModeLabel(_ mode: MusicPlayer.RepeatMode?) -> String {
+    switch mode {
+    case nil, .some(.none):
+        "off"
+    case .some(.all):
+        "all"
+    case .some(.one):
+        "one"
     @unknown default:
         "unknown"
     }
@@ -839,7 +887,7 @@ public func playTrack(
 public func controlPlayback(
     _ requestID: UInt64,
     _ command: UInt8,
-    _ positionMilliseconds: UInt64,
+    _ commandValue: UInt64,
     _ trackIDBytes: UnsafePointer<UInt8>?,
     _ trackIDLength: UInt,
     _ context: UnsafeMutableRawPointer?,
@@ -856,7 +904,8 @@ public func controlPlayback(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard command <= 5 else {
+    guard command <= 6,
+          command != 6 || commandValue <= 2 else {
         return 4
     }
     guard trackIDLength <= UInt(Int.max),
@@ -999,7 +1048,7 @@ public func controlPlayback(
                 )
             }
         case 5:
-            player.playbackTime = TimeInterval(positionMilliseconds) / 1_000
+            player.playbackTime = TimeInterval(commandValue) / 1_000
             sendTransportEnvelope(
                 TransportEnvelope(
                     version: envelopeVersion,
@@ -1007,6 +1056,23 @@ public func controlPlayback(
                     requestID: requestID,
                     trackID: trackID,
                     status: "playing",
+                    error: nil
+                ),
+                completion: completion
+            )
+        case 6:
+            guard let repeatMode = repeatModeForCommandValue(commandValue) else {
+                preconditionFailure("validated MusicKit repeat mode became invalid")
+            }
+            player.state.repeatMode = repeatMode
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: playbackStatusLabel(player.state.playbackStatus),
+                    repeatMode: repeatModeLabel(player.state.repeatMode),
                     error: nil
                 ),
                 completion: completion

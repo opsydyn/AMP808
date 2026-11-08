@@ -289,8 +289,9 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       the request completes. Pause, resume, stop, previous, and next use the same typed,
       identity-checked transport boundary and expose observable transitional and terminal states.
       Bounded relative seeking uses that boundary only when native elapsed time and duration are
-      known. Native elapsed time is exposed through an accessible progress indicator and remains
-      stable while paused.
+      known. Repeat cycles Off, All, and One only after MusicKit confirms the applied native mode
+      and preserves whether playback was playing or paused. Native elapsed time is exposed through
+      an accessible progress indicator and remains stable while paused.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -694,6 +695,35 @@ Apple playback seeking evidence recorded on 2026-11-08:
   repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance remain
   separate work.
 
+Apple playback repeat evidence recorded on 2026-11-08:
+
+- The desktop-private Apple domain models Off, All, and One independently of the TUI playlist
+  type. A user action cycles the next mode only while playback is Playing or Paused, exposes an
+  observable `SettingRepeat` state, blocks overlapping transport intent, and preserves the prior
+  playback disposition after native confirmation.
+- The existing typed transport boundary carries `SetRepeat` as command 6 with a bounded value of
+  0, 1, or 2. Swift maps those values to MusicKit's `.none`, `.all`, and `.one`, assigns
+  `ApplicationMusicPlayer.state.repeatMode`, and returns both the actual native repeat mode and
+  playback status. Rust rejects unknown modes, mismatched modes, stale identity, and a changed
+  playback disposition instead of displaying the requested value as proof.
+- GPUI exposes one wrapping transport-row control with the accessible labels
+  `Cycle Apple Music repeat mode, currently off`, `currently all`, and `currently one`. The button
+  uses the active hardware tone for All and One and remains available while paused.
+- Coordinator tests cover the complete cycle, native-confirmed application, paused-state
+  preservation, and mismatched confirmation. Bridge tests cover every command value, successful
+  parsing, and fail-closed unknown values. The GPUI interaction test exercises the accessible
+  control and its Off-to-All transition. The desktop suite passes 245 tests, strict focused Clippy
+  passes with warnings denied apart from the repository's explicit dead-code allowance, Swift 6
+  bridge tests pass with warnings denied, and the development-signed bundle passes validation.
+- In the fresh signed build, One More Time advanced from 00:00 to 00:11 while the visible control
+  cycled Off to All to One to Off. Pausing at 00:14 kept playback paused while Repeat changed from
+  Off to All; Resume retained All and Stop removed the transport controls and exposed
+  `Apple Music playback stopped`.
+- Shuffle remains separate. The current ordered queue-index map assumes playlist order, while
+  MusicKit shuffle may reorder queue entries; shipping shuffle safely requires a stable
+  queue-entry-to-playlist-occurrence identity map rather than reusing repeat's scalar mode path.
+  A live observed natural transition and manual VoiceOver acceptance also remain open.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
@@ -704,6 +734,8 @@ Official Apple references checked through 2026-11-08:
 - <https://developer.apple.com/documentation/musickit/musicitemcollection>
 - <https://developer.apple.com/documentation/musickit/applicationmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/playbacktime>
+- <https://developer.apple.com/documentation/musickit/musicplayer/repeatmode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/state-swift.class/repeatmode>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>

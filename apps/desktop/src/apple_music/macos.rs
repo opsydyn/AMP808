@@ -14,9 +14,9 @@ use serde::Deserialize;
 
 use super::{
     AppleArtworkUrl, AppleMusicId, AppleObservedPlaybackStatus, ApplePlaylist, ApplePlaylistTrack,
-    AppleTransportCommand, AppleTransportStatus, AuthorisationStatus, CatalogPlayback,
-    CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PlaylistPage, RequestId,
-    SubscriptionCapabilities, SubscriptionOffer, TrackPage,
+    AppleRepeatMode, AppleTransportCommand, AppleTransportStatus, AuthorisationStatus,
+    CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
+    PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -211,6 +211,7 @@ struct WireTransport {
     request_id: u64,
     track_id: String,
     status: String,
+    repeat_mode: Option<String>,
     error: Option<String>,
 }
 
@@ -662,6 +663,7 @@ pub(crate) struct TransportResponse {
     request_id: RequestId,
     track_id: AppleMusicId,
     status: AppleTransportStatus,
+    repeat_mode: Option<AppleRepeatMode>,
 }
 
 impl TransportResponse {
@@ -692,10 +694,21 @@ impl TransportResponse {
         };
         let track_id = AppleMusicId::try_from(wire.track_id.as_str())
             .map_err(|_error| BridgeProtocolError::InvalidTrackIdentifier)?;
+        let repeat_mode = wire
+            .repeat_mode
+            .as_deref()
+            .map(|mode| match mode {
+                "off" => Ok(AppleRepeatMode::Off),
+                "all" => Ok(AppleRepeatMode::All),
+                "one" => Ok(AppleRepeatMode::One),
+                _ => Err(BridgeProtocolError::UnknownRepeatMode),
+            })
+            .transpose()?;
         Ok(Self {
             request_id: RequestId::new(wire.request_id),
             track_id,
             status,
+            repeat_mode,
         })
     }
 
@@ -711,6 +724,10 @@ impl TransportResponse {
         self.status
     }
 
+    pub(crate) const fn repeat_mode(&self) -> Option<AppleRepeatMode> {
+        self.repeat_mode
+    }
+
     #[cfg(test)]
     fn completed_for_test(
         request_id: RequestId,
@@ -721,6 +738,22 @@ impl TransportResponse {
             request_id,
             track_id,
             status,
+            repeat_mode: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn completed_with_repeat_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+        repeat_mode: AppleRepeatMode,
+    ) -> Self {
+        Self {
+            request_id,
+            track_id,
+            status,
+            repeat_mode: Some(repeat_mode),
         }
     }
 }
@@ -875,6 +908,7 @@ pub(crate) enum BridgeProtocolError {
     InvalidPlaylistIndex,
     InvalidTrackIdentifier,
     UnknownPlaybackStatus,
+    UnknownRepeatMode,
     PlaylistRequestFailed,
     TrackRequestFailed,
     PlaybackFailed,
@@ -924,6 +958,9 @@ impl fmt::Display for BridgeProtocolError {
             Self::UnknownPlaybackStatus => {
                 formatter.write_str("Apple Music returned an unknown playback status")
             }
+            Self::UnknownRepeatMode => {
+                formatter.write_str("Apple Music returned an unknown repeat mode")
+            }
             Self::PlaylistRequestFailed => {
                 formatter.write_str("Apple Music could not load the playlist library")
             }
@@ -956,6 +993,7 @@ impl Error for BridgeProtocolError {
             | Self::InvalidPlaylistIndex
             | Self::InvalidTrackIdentifier
             | Self::UnknownPlaybackStatus
+            | Self::UnknownRepeatMode
             | Self::PlaylistRequestFailed
             | Self::TrackRequestFailed
             | Self::PlaybackFailed
@@ -1387,6 +1425,14 @@ const fn transport_bridge_arguments(command: AppleTransportCommand) -> (u8, u64)
         AppleTransportCommand::Next => (3, 0),
         AppleTransportCommand::Previous => (4, 0),
         AppleTransportCommand::Seek { position_ms } => (5, position_ms),
+        AppleTransportCommand::SetRepeat { mode } => (
+            6,
+            match mode {
+                AppleRepeatMode::Off => 0,
+                AppleRepeatMode::All => 1,
+                AppleRepeatMode::One => 2,
+            },
+        ),
     }
 }
 
@@ -1401,14 +1447,14 @@ impl TransportTask {
         let (sender, receiver) = mpsc::channel();
         let context = Box::new(TransportCallbackContext { sender });
         let context = Box::into_raw(context).cast::<c_void>();
-        let (command, position_ms) = transport_bridge_arguments(command);
+        let (command, command_value) = transport_bridge_arguments(command);
         // SAFETY: the identifier bytes remain live for the synchronous bridge call. Swift copies
         // them before returning, and the unique callback context is consumed exactly once.
         let accepted = unsafe {
             amp808_music_kit_transport(
                 request_id.value(),
                 command,
-                position_ms,
+                command_value,
                 track_id.as_ptr(),
                 track_id.len(),
                 context,
@@ -1456,6 +1502,28 @@ impl TransportTask {
         sender
             .send(Ok(TransportResponse::completed_for_test(
                 request_id, track_id, status,
+            )))
+            .expect("the test transport receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_with_repeat_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+        repeat_mode: AppleRepeatMode,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(TransportResponse::completed_with_repeat_for_test(
+                request_id,
+                track_id,
+                status,
+                repeat_mode,
             )))
             .expect("the test transport receiver remains live during construction");
         Self {
@@ -1837,7 +1905,7 @@ unsafe extern "C" {
     fn amp808_music_kit_transport(
         request_id: u64,
         command: u8,
-        position_ms: u64,
+        command_value: u64,
         track_id: *const u8,
         track_id_length: usize,
         context: *mut c_void,
@@ -1937,7 +2005,7 @@ mod tests {
         transport_bridge_arguments,
     };
     use crate::apple_music::{
-        AppleObservedPlaybackStatus, AppleTransportCommand, AppleTransportStatus,
+        AppleObservedPlaybackStatus, AppleRepeatMode, AppleTransportCommand, AppleTransportStatus,
         AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
         ConnectionSubscription, PageCursor, RequestId, SubscriptionCapabilities, SubscriptionOffer,
     };
@@ -1955,6 +2023,28 @@ mod tests {
                 position_ms: 22_000,
             }),
             (5, 22_000)
+        );
+    }
+
+    #[test]
+    fn repeat_transport_encoding_carries_the_typed_mode_value() {
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::SetRepeat {
+                mode: AppleRepeatMode::Off,
+            }),
+            (6, 0)
+        );
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::SetRepeat {
+                mode: AppleRepeatMode::All,
+            }),
+            (6, 1)
+        );
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::SetRepeat {
+                mode: AppleRepeatMode::One,
+            }),
+            (6, 2)
         );
     }
 
@@ -2143,6 +2233,26 @@ mod tests {
         assert_eq!(stopped.request_id(), RequestId::new(62));
         assert_eq!(stopped.status(), AppleTransportStatus::Stopped);
         assert_eq!(stopped.into_track_id().as_str(), "i.first");
+    }
+
+    #[test]
+    fn transport_envelope_confirms_the_applied_repeat_mode() {
+        let response = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":63,"track_id":"i.first","status":"playing","repeat_mode":"all","error":null}"#,
+        )
+        .expect("an applied repeat mode should cross the bridge");
+
+        assert_eq!(response.repeat_mode(), Some(AppleRepeatMode::All));
+    }
+
+    #[test]
+    fn transport_envelope_rejects_an_unknown_repeat_mode() {
+        let error = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":64,"track_id":"i.first","status":"playing","repeat_mode":"forever","error":null}"#,
+        )
+        .expect_err("an unknown repeat mode must fail closed");
+
+        assert!(matches!(error, BridgeProtocolError::UnknownRepeatMode));
     }
 
     #[test]

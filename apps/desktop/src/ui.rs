@@ -24,7 +24,8 @@ use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::apple_music::{
     AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, ApplePlaybackState,
-    ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, SubscriptionState,
+    ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, CatalogPlayback,
+    SubscriptionState,
 };
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
@@ -1633,6 +1634,12 @@ impl PlayerView {
 
     fn seek_apple_playback_by(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
         self.apple_music.seek_by(delta_ms);
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
+    fn cycle_apple_repeat(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.cycle_repeat();
         self.schedule_apple_music_poll(cx);
         cx.notify();
     }
@@ -4137,6 +4144,10 @@ impl Render for PlayerView {
                 Some("Skipping to previous Apple Music track".to_owned())
             }
             ApplePlaybackState::Seeking { .. } => Some("Seeking Apple Music playback".to_owned()),
+            ApplePlaybackState::SettingRepeat { target_mode, .. } => Some(format!(
+                "Setting Apple Music repeat to {}",
+                target_mode.name()
+            )),
             ApplePlaybackState::Failed { .. } => {
                 Some(self.apple_music.playback_error().map_or_else(
                     || "Apple Music playback could not start".to_owned(),
@@ -4163,6 +4174,17 @@ impl Render for PlayerView {
                 .playback_position()
                 .and_then(|position| position.duration_ms())
                 .is_some_and(|duration_ms| duration_ms > 0);
+        let apple_can_repeat = matches!(
+            &apple_playback,
+            ApplePlaybackState::Playing { .. } | ApplePlaybackState::Paused { .. }
+        );
+        let apple_repeat_mode = self.apple_music.repeat_mode();
+        let apple_repeat_label =
+            format!("REPEAT {}", apple_repeat_mode.name().to_ascii_uppercase());
+        let apple_repeat_accessibility_label = format!(
+            "Cycle Apple Music repeat mode, currently {}",
+            apple_repeat_mode.name()
+        );
         let apple_playback_progress = self.apple_music.playback_position().map(|position| {
             let elapsed = format_time(position.elapsed_ms() as f64 / 1_000.0);
             let duration = position.duration_ms().map_or_else(
@@ -4214,6 +4236,9 @@ impl Render for PlayerView {
                                 ", skipping previous"
                             }
                             ApplePlaybackState::Seeking { .. } if active => ", seeking",
+                            ApplePlaybackState::SettingRepeat { .. } if active => {
+                                ", setting repeat"
+                            }
                             ApplePlaybackState::Failed { .. } if active => ", playback failed",
                             _ => "",
                         };
@@ -4263,6 +4288,7 @@ impl Render for PlayerView {
         .h(px(220.0))
         .track_scroll(&apple_track_scroll);
         let apple_has_transport_controls = apple_can_seek
+            || apple_can_repeat
             || apple_can_skip_to_previous
             || apple_can_skip_to_next
             || apple_can_pause
@@ -4329,6 +4355,25 @@ impl Render for PlayerView {
                     .accessibility_label("Play next Apple Music track")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.play_next_apple_track(cx);
+                    })),
+                )
+            })
+            .when(apple_can_repeat, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-cycle-apple-repeat",
+                        if apple_repeat_mode == AppleRepeatMode::Off {
+                            HardwareButtonTone::Neutral
+                        } else {
+                            HardwareButtonTone::Primary
+                        },
+                        self.skin,
+                        cx,
+                    )
+                    .label(apple_repeat_label)
+                    .accessibility_label(apple_repeat_accessibility_label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.cycle_apple_repeat(cx);
                     })),
                 )
             })
@@ -5594,10 +5639,10 @@ mod tests {
     use crate::app::transport::TransportState;
     use crate::apple_music::{
         AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaybackState, ApplePlaylist,
-        ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, CloudLibrary,
-        ConnectionResult, ConnectionSubscription, PlaylistPage, SubscriptionCapabilities,
-        SubscriptionOffer, TestConnection, TestPlayback, TestPlaylistPage, TestPosition,
-        TestTrackPage, TestTransport, TrackPage,
+        ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, CatalogPlayback,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, PlaylistPage,
+        SubscriptionCapabilities, SubscriptionOffer, TestConnection, TestPlayback,
+        TestPlaylistPage, TestPosition, TestTrackPage, TestTransport, TrackPage,
     };
     use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
@@ -5917,7 +5962,10 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Playing { .. }
                 ));
-                view.apple_music.use_test_transport(TestTransport::Playing);
+                view.apple_music
+                    .use_test_transport(TestTransport::RepeatPlaying {
+                        mode: AppleRepeatMode::All,
+                    });
             });
         });
         cx.update_window(window, |_, window, cx| {
@@ -5953,6 +6001,37 @@ mod tests {
             assert_eq!(
                 window.find("settings-seek-forward-apple-playback").label(),
                 Some("Seek Apple Music forward 10 seconds")
+            );
+            assert_eq!(
+                window.find("settings-cycle-apple-repeat").label(),
+                Some("Cycle Apple Music repeat mode, currently off")
+            );
+            window.click("settings-cycle-apple-repeat", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::SettingRepeat {
+                        target_mode: AppleRepeatMode::All,
+                        ..
+                    }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert_eq!(view.apple_music.repeat_mode(), AppleRepeatMode::All);
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { .. }
+                ));
+                view.apple_music.use_test_transport(TestTransport::Playing);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-cycle-apple-repeat").label(),
+                Some("Cycle Apple Music repeat mode, currently all")
             );
             window.click("settings-seek-forward-apple-playback", cx);
         })
