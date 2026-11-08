@@ -288,6 +288,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
       the request completes. Pause, resume, stop, previous, and next use the same typed,
       identity-checked transport boundary and expose observable transitional and terminal states.
+      Native elapsed time is exposed through an accessible progress indicator and remains stable
+      while paused.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -532,6 +534,35 @@ Apple Previous/Next queue-navigation evidence recorded on 2026-11-08:
   identifier, because both the selection and adjacency paths resolve the first matching identity.
   Position observation, whole-playlist activation, failure recovery, and manual keyboard/VoiceOver
   acceptance remain separate slices.
+
+Apple playback-position evidence recorded on 2026-11-08:
+
+- The native bridge reads `ApplicationMusicPlayer.playbackTime` on the main actor and returns a
+  versioned `position` envelope containing request identity, selected-entry identity, and bounded
+  non-negative elapsed milliseconds. Invalid, failed, stale-request, and wrong-track responses do
+  not replace the active snapshot; provider detail remains redacted.
+- Rust pairs the native elapsed value with the optional duration already owned by the loaded
+  playlist entry. It does not extrapolate from a local clock or claim access to Apple PCM. A
+  missing duration remains explicit and yields an indeterminate value rather than a fabricated
+  percentage.
+- GPUI runs one guarded Apple polling loop and samples the native boundary at approximately 5 Hz
+  while Playing. The Settings surface exposes elapsed time, duration, and a determinate progress
+  rail with `ProgressIndicator` semantics when duration is known. Pause retains the final observed
+  value; Stop and queue navigation clear the superseded snapshot. A failed observation remains
+  visible without terminating playback, and Resume retries it.
+- Live development-signed acceptance observed the accessible native progress advance from 00:03
+  to 00:09 against a 03:21 entry, remain unchanged during a two-second paused interval, and
+  disappear after Stop while the selected entry remained visibly stopped. The signed bundle
+  validator passes.
+- Coordinator tests cover native time plus loaded duration, queue-change clearing, mismatched-track
+  rejection, and failure recovery. The versioned parser covers valid identity/time and redacted
+  failure; the GPUI interaction test covers the accessible progress contract. Strict desktop
+  Clippy passes with warnings denied apart from the repository's explicit dead-code allowance, and
+  the full locked workspace passes 630 tests with 3 ignored.
+- This qualifies selected-entry playback-position observation. Seeking and reconciliation when
+  MusicKit automatically changes the current queue entry at a natural boundary remain separate
+  slices, as do whole-playlist activation, repeat/shuffle, and manual keyboard/VoiceOver
+  acceptance.
 
 Official Apple references checked through 2026-11-08:
 

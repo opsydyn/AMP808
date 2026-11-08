@@ -47,6 +47,8 @@ enum HardwareButtonTone {
     Primary,
 }
 
+const APPLE_MUSIC_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 struct AppleMusicPresentation {
     button_label: &'static str,
     accessibility_label: &'static str,
@@ -1334,6 +1336,7 @@ pub struct PlayerView {
     remote_source: Option<RemoteTransferCoordinator>,
     remote_transfer: Option<YtDlpTransfer>,
     apple_music: AppleMusicCoordinator,
+    apple_music_polling: bool,
     selected_apple_playlist: Option<AppleMusicId>,
     apple_track_search: Option<Entity<InputState>>,
     apple_track_search_subscription: Option<Subscription>,
@@ -1407,6 +1410,7 @@ impl PlayerView {
             remote_source: None,
             remote_transfer: None,
             apple_music: AppleMusicCoordinator::new(),
+            apple_music_polling: false,
             selected_apple_playlist: None,
             apple_track_search: None,
             apple_track_search_subscription: None,
@@ -1652,13 +1656,23 @@ impl PlayerView {
         self.apple_track_search_subscription = Some(subscription);
     }
 
-    fn schedule_apple_music_poll(&self, cx: &mut Context<Self>) {
+    fn schedule_apple_music_poll(&mut self, cx: &mut Context<Self>) {
+        if self.apple_music_polling {
+            return;
+        }
+        self.apple_music_polling = true;
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             loop {
-                executor.timer(Duration::from_millis(50)).await;
+                executor.timer(APPLE_MUSIC_POLL_INTERVAL).await;
                 let active = this
-                    .update(cx, |view, cx| view.poll_apple_music_connection(cx))
+                    .update(cx, |view, cx| {
+                        let active = view.poll_apple_music_connection(cx);
+                        if !active {
+                            view.apple_music_polling = false;
+                        }
+                        active
+                    })
                     .unwrap_or(false);
                 if !active {
                     break;
@@ -1675,6 +1689,11 @@ impl PlayerView {
         let previous_track_error = self.apple_music.track_error().map(str::to_owned);
         let previous_playback = self.apple_music.playback().clone();
         let previous_playback_error = self.apple_music.playback_error().map(str::to_owned);
+        let previous_position = self.apple_music.playback_position();
+        let previous_position_error = self
+            .apple_music
+            .playback_position_error()
+            .map(str::to_owned);
         let active = self.apple_music.poll();
         if apple_music_poll_requires_render(
             &previous_state,
@@ -1685,6 +1704,8 @@ impl PlayerView {
             || previous_track_error.as_deref() != self.apple_music.track_error()
             || &previous_playback != self.apple_music.playback()
             || previous_playback_error.as_deref() != self.apple_music.playback_error()
+            || previous_position != self.apple_music.playback_position()
+            || previous_position_error.as_deref() != self.apple_music.playback_position_error()
         {
             cx.notify();
         }
@@ -4109,6 +4130,24 @@ impl Render for PlayerView {
         );
         let apple_can_skip_to_previous = self.apple_music.can_skip_to_previous();
         let apple_can_skip_to_next = self.apple_music.can_skip_to_next();
+        let apple_playback_progress = self.apple_music.playback_position().map(|position| {
+            let elapsed = format_time(position.elapsed_ms() as f64 / 1_000.0);
+            let duration = position.duration_ms().map_or_else(
+                || "--:--".to_owned(),
+                |duration_ms| format_time(duration_ms as f64 / 1_000.0),
+            );
+            let percent = position.duration_ms().and_then(|duration_ms| {
+                (duration_ms > 0).then(|| {
+                    (position.elapsed_ms() as f64 / duration_ms as f64 * 100.0).clamp(0.0, 100.0)
+                })
+            });
+            let label = format!("Apple Music playback progress: {elapsed} elapsed of {duration}");
+            (elapsed, duration, percent, label)
+        });
+        let apple_position_error = self
+            .apple_music
+            .playback_position_error()
+            .map(|error| format!("Apple Music playback position unavailable / {error}"));
         let apple_track_count = apple_tracks.len();
         let apple_tracks = Arc::new(apple_tracks);
         let rendered_apple_tracks = Arc::clone(&apple_tracks);
@@ -4288,6 +4327,66 @@ impl Render for PlayerView {
                         .font_semibold()
                         .text_color(accent)
                         .child(status),
+                )
+            })
+            .when_some(
+                apple_playback_progress,
+                |panel, (elapsed, duration, percent, label)| {
+                    panel.child(
+                        div()
+                            .id("settings-apple-playback-progress")
+                            .test_support()
+                            .role(Role::ProgressIndicator)
+                            .aria_label(label)
+                            .aria_min_numeric_value(0.0)
+                            .aria_max_numeric_value(100.0)
+                            .when_some(percent, |progress, value| {
+                                progress.aria_numeric_value(value)
+                            })
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(text_muted)
+                                    .child(elapsed)
+                                    .child(duration),
+                            )
+                            .child(
+                                div()
+                                    .h(px(8.0))
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(accent.opacity(0.56))
+                                    .bg(canvas.opacity(0.76))
+                                    .when_some(percent, |rail, value| {
+                                        rail.child(
+                                            div()
+                                                .h_full()
+                                                .w(relative((value / 100.0).clamp(0.0, 1.0) as f32))
+                                                .rounded_full()
+                                                .bg(accent),
+                                        )
+                                    }),
+                            ),
+                    )
+                },
+            )
+            .when_some(apple_position_error, |panel, error| {
+                panel.child(
+                    div()
+                        .id("settings-apple-playback-position-error")
+                        .test_support()
+                        .role(Role::Status)
+                        .aria_label(error.clone())
+                        .text_xs()
+                        .text_color(text_muted)
+                        .child(error),
                 )
             })
             .when(apple_can_skip_to_previous, |panel| {
@@ -5432,8 +5531,8 @@ mod tests {
         AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaybackState, ApplePlaylist,
         ApplePlaylistTrack, ApplePlaylistTracksState, CatalogPlayback, CloudLibrary,
         ConnectionResult, ConnectionSubscription, PlaylistPage, SubscriptionCapabilities,
-        SubscriptionOffer, TestConnection, TestPlayback, TestPlaylistPage, TestTrackPage,
-        TestTransport, TrackPage,
+        SubscriptionOffer, TestConnection, TestPlayback, TestPlaylistPage, TestPosition,
+        TestTrackPage, TestTransport, TrackPage,
     };
     use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
@@ -5668,6 +5767,8 @@ mod tests {
                     ))]);
                 view.apple_music.use_test_playback(TestPlayback::Completed);
                 view.apple_music.use_test_transport(TestTransport::Paused);
+                view.apple_music
+                    .use_test_positions(vec![TestPosition::Completed { elapsed_ms: 12_345 }]);
             });
         });
 
@@ -5741,6 +5842,7 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Preparing { .. }
                 ));
+                assert!(view.poll_apple_music_connection(cx));
                 assert!(!view.poll_apple_music_connection(cx));
                 assert!(matches!(
                     view.apple_music.playback(),
@@ -5754,6 +5856,12 @@ mod tests {
             assert_eq!(
                 window.find("settings-apple-playback-status").label(),
                 Some("Playing through Apple Music")
+            );
+            let progress = window.find("settings-apple-playback-progress");
+            assert_eq!(progress.role(), Some(Role::ProgressIndicator));
+            assert_eq!(
+                progress.label(),
+                Some("Apple Music playback progress: 00:12 elapsed of 04:05")
             );
             assert_eq!(
                 window.find(("apple-playlist-track", 1_usize)).label(),

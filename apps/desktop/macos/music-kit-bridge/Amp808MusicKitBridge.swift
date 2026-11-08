@@ -128,6 +128,24 @@ private struct TransportEnvelope: Encodable {
     }
 }
 
+private struct PositionEnvelope: Encodable {
+    let version: Int
+    let kind: String
+    let requestID: UInt64
+    let trackID: String
+    let elapsedMS: UInt64
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case kind
+        case requestID = "request_id"
+        case trackID = "track_id"
+        case elapsedMS = "elapsed_ms"
+        case error
+    }
+}
+
 private func sendPlaylistEnvelope(
     _ envelope: PlaylistPageEnvelope,
     completion: ConnectionCompletion
@@ -185,6 +203,21 @@ private func sendTransportEnvelope(
 
     completion.send(
         "{\"version\":\(envelopeVersion),\"kind\":\"transport\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"status\":\"failed\",\"error\":\"encoding_failed\"}"
+    )
+}
+
+private func sendPositionEnvelope(
+    _ envelope: PositionEnvelope,
+    completion: ConnectionCompletion
+) {
+    if let data = try? JSONEncoder().encode(envelope),
+       let text = String(data: data, encoding: .utf8) {
+        completion.send(text)
+        return
+    }
+
+    completion.send(
+        "{\"version\":\(envelopeVersion),\"kind\":\"position\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"elapsed_ms\":0,\"error\":\"encoding_failed\"}"
     )
 }
 
@@ -833,6 +866,88 @@ public func controlPlayback(
         default:
             preconditionFailure("validated MusicKit transport command became invalid")
         }
+    }
+    return 1
+}
+
+@c(amp808_music_kit_position)
+public func observePlaybackPosition(
+    _ requestID: UInt64,
+    _ trackIDBytes: UnsafePointer<UInt8>?,
+    _ trackIDLength: UInt,
+    _ context: UnsafeMutableRawPointer?,
+    _ callback: Amp808MusicKitConnectionCallback?
+) -> UInt8 {
+    guard let callback else {
+        return 0
+    }
+    guard let usageDescription = Bundle.main.object(
+        forInfoDictionaryKey: "NSAppleMusicUsageDescription"
+    ) as? String, !usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 2
+    }
+    guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
+        return 3
+    }
+    guard trackIDLength <= UInt(Int.max),
+          let trackIDBytes,
+          let trackID = String(
+              bytes: UnsafeBufferPointer(
+                  start: trackIDBytes,
+                  count: Int(trackIDLength)
+              ),
+              encoding: .utf8
+          ),
+          !trackID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 4
+    }
+    let completion = ConnectionCompletion(context: context, callback: callback)
+
+    Task { @MainActor in
+        guard #available(macOS 14.0, *), MusicAuthorization.currentStatus == .authorized else {
+            sendPositionEnvelope(
+                PositionEnvelope(
+                    version: envelopeVersion,
+                    kind: "position",
+                    requestID: requestID,
+                    trackID: trackID,
+                    elapsedMS: 0,
+                    error: "access_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+
+        let playbackTime = ApplicationMusicPlayer.shared.playbackTime
+        let milliseconds = playbackTime * 1_000
+        guard milliseconds.isFinite,
+              milliseconds >= 0,
+              milliseconds < Double(UInt64.max) else {
+            sendPositionEnvelope(
+                PositionEnvelope(
+                    version: envelopeVersion,
+                    kind: "position",
+                    requestID: requestID,
+                    trackID: trackID,
+                    elapsedMS: 0,
+                    error: "position_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+        sendPositionEnvelope(
+            PositionEnvelope(
+                version: envelopeVersion,
+                kind: "position",
+                requestID: requestID,
+                trackID: trackID,
+                elapsedMS: UInt64(milliseconds.rounded(.down)),
+                error: nil
+            ),
+            completion: completion
+        )
     }
     return 1
 }
