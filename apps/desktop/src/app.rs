@@ -93,18 +93,38 @@ mod tests {
     }
 
     #[test]
-    fn built_in_skin_defines_dark_tactile_button_states() {
+    fn built_in_skin_defines_translucent_tactile_button_states() {
         let skin = Amp808Skin::built_in();
 
         assert_eq!(skin.control().hex(), 0x24_25_2b);
         assert_eq!(skin.control_hover().hex(), 0x31_33_3b);
         assert_eq!(skin.control_active().hex(), 0x17_18_1c);
         assert_eq!(skin.control_border().hex(), 0x4a_4c_55);
-        assert_eq!(skin.control_primary().hex(), 0xd8_4b_25);
-        assert_eq!(skin.control_primary_hover().hex(), 0xed_63_36);
-        assert_eq!(skin.control_primary_active().hex(), 0xb7_39_1d);
         assert_ne!(skin.control().hex(), skin.canvas().hex());
-        assert_ne!(skin.control_primary().hex(), skin.accent().hex());
+        assert_ne!(skin.control().hex(), skin.control_hover().hex());
+        assert_ne!(skin.control_hover().hex(), skin.control_active().hex());
+        assert_eq!(skin.control_primary().hex(), skin.accent().hex());
+        assert_eq!(skin.control_primary_foreground().hex(), skin.canvas().hex());
+        assert_ne!(
+            skin.control_primary().hex(),
+            skin.control_primary_hover().hex()
+        );
+        assert_ne!(
+            skin.control_primary_hover().hex(),
+            skin.control_primary_active().hex()
+        );
+
+        for opacity in [
+            skin.control_opacity(),
+            skin.control_hover_opacity(),
+            skin.control_active_opacity(),
+            skin.control_primary_opacity(),
+            skin.control_primary_hover_opacity(),
+            skin.control_primary_active_opacity(),
+        ] {
+            assert!(opacity.unit() > 0.0);
+            assert!(opacity.unit() < 1.0);
+        }
     }
 
     #[test]

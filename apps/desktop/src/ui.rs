@@ -1,5 +1,5 @@
 use gpui_kit::base::{Disableable, StyledExt, box_shadow};
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::{
     Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
@@ -21,6 +21,10 @@ use amp808_core::bpm::BpmEstimate;
 
 use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
+use crate::apple_music::{
+    AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, CatalogPlayback,
+    SubscriptionState,
+};
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
 use crate::media::{CoverArt, TrackMetadata, probe_cover_art};
@@ -42,8 +46,154 @@ enum HardwareButtonTone {
     Primary,
 }
 
+struct AppleMusicPresentation {
+    button_label: &'static str,
+    accessibility_label: &'static str,
+    status: String,
+    disabled: bool,
+    is_error: bool,
+}
+
+fn apple_music_presentation(
+    session: &AppleMusicSession,
+    error: Option<&str>,
+) -> AppleMusicPresentation {
+    if let Some(error) = error {
+        return AppleMusicPresentation {
+            button_label: "RETRY APPLE",
+            accessibility_label: "Retry Apple Music connection",
+            status: format!("APPLE MUSIC ERROR / {error}"),
+            disabled: false,
+            is_error: true,
+        };
+    }
+
+    match session.state() {
+        AppleMusicState::Unavailable => AppleMusicPresentation {
+            button_label: "RETRY APPLE",
+            accessibility_label: "Retry Apple Music connection",
+            status: "APPLE MUSIC UNAVAILABLE".to_owned(),
+            disabled: false,
+            is_error: true,
+        },
+        AppleMusicState::Unauthorised => AppleMusicPresentation {
+            button_label: "APPLE MUSIC",
+            accessibility_label: "Connect Apple Music",
+            status: "APPLE MUSIC / NOT CONNECTED".to_owned(),
+            disabled: false,
+            is_error: false,
+        },
+        AppleMusicState::Authorising { .. } => AppleMusicPresentation {
+            button_label: "CONNECTING",
+            accessibility_label: "Connecting to Apple Music",
+            status: "APPLE MUSIC / WAITING FOR AUTHORISATION".to_owned(),
+            disabled: true,
+            is_error: false,
+        },
+        AppleMusicState::AccessDenied => AppleMusicPresentation {
+            button_label: "RETRY APPLE",
+            accessibility_label: "Retry Apple Music connection after access was denied",
+            status: "APPLE MUSIC / ACCESS DENIED".to_owned(),
+            disabled: false,
+            is_error: true,
+        },
+        AppleMusicState::AccessRestricted => AppleMusicPresentation {
+            button_label: "RETRY APPLE",
+            accessibility_label: "Retry Apple Music connection after access was restricted",
+            status: "APPLE MUSIC / ACCESS RESTRICTED".to_owned(),
+            disabled: false,
+            is_error: true,
+        },
+        AppleMusicState::AccessRevoked => AppleMusicPresentation {
+            button_label: "RECONNECT APPLE",
+            accessibility_label: "Reconnect Apple Music after access was revoked",
+            status: "APPLE MUSIC / ACCESS REVOKED".to_owned(),
+            disabled: false,
+            is_error: true,
+        },
+        AppleMusicState::Ready
+        | AppleMusicState::LoadingPlaylists { .. }
+        | AppleMusicState::LibraryEmpty
+        | AppleMusicState::LibraryLoaded { .. } => {
+            let status = match session.subscription() {
+                SubscriptionState::Available(capabilities)
+                    if capabilities.catalog_playback() == CatalogPlayback::Available =>
+                {
+                    "APPLE MUSIC CONNECTED / CATALOG + LIBRARY"
+                }
+                SubscriptionState::Available(_) => "APPLE MUSIC CONNECTED / LIBRARY",
+                SubscriptionState::Unavailable => {
+                    "APPLE MUSIC CONNECTED / SUBSCRIPTION STATUS UNAVAILABLE"
+                }
+                SubscriptionState::NotChecked | SubscriptionState::Checking { .. } => {
+                    "APPLE MUSIC CONNECTED / CHECKING SUBSCRIPTION"
+                }
+            };
+            AppleMusicPresentation {
+                button_label: "CONNECTED",
+                accessibility_label: "Apple Music connected",
+                status: status.to_owned(),
+                disabled: true,
+                is_error: false,
+            }
+        }
+    }
+}
+
+fn apple_music_account_status(session: &AppleMusicSession, error: Option<&str>) -> String {
+    if let Some(error) = error {
+        return format!("Apple Music connection failed: {error}");
+    }
+
+    match session.state() {
+        AppleMusicState::Unavailable => "Apple Music is unavailable on this Mac".to_owned(),
+        AppleMusicState::Unauthorised => "Apple Music account is not connected".to_owned(),
+        AppleMusicState::Authorising { .. } => {
+            "Apple Music authorization is in progress".to_owned()
+        }
+        AppleMusicState::AccessDenied => "Apple Music access was denied".to_owned(),
+        AppleMusicState::AccessRestricted => "Apple Music access is restricted".to_owned(),
+        AppleMusicState::AccessRevoked => "Apple Music access was revoked".to_owned(),
+        AppleMusicState::Ready
+        | AppleMusicState::LoadingPlaylists { .. }
+        | AppleMusicState::LibraryEmpty
+        | AppleMusicState::LibraryLoaded { .. } => match session.subscription() {
+            SubscriptionState::Available(capabilities)
+                if capabilities.catalog_playback() == CatalogPlayback::Available =>
+            {
+                "Apple Music is connected with catalog and library access".to_owned()
+            }
+            SubscriptionState::Available(_) => {
+                "Apple Music is connected with library access".to_owned()
+            }
+            SubscriptionState::Unavailable => {
+                "Apple Music is connected; subscription status is unavailable".to_owned()
+            }
+            SubscriptionState::NotChecked | SubscriptionState::Checking { .. } => {
+                "Apple Music is connected; checking subscription".to_owned()
+            }
+        },
+    }
+}
+
+fn apple_music_poll_requires_render(
+    previous_state: &AppleMusicState,
+    previous_error: Option<&str>,
+    current_state: &AppleMusicState,
+    current_error: Option<&str>,
+) -> bool {
+    previous_state != current_state || previous_error != current_error
+}
+
 fn skin_hsla(color: crate::skin::SkinColor) -> Hsla {
     rgb(color.hex()).into()
+}
+
+fn skin_hsla_with_opacity(
+    color: crate::skin::SkinColor,
+    opacity: crate::skin::SkinOpacity,
+) -> Hsla {
+    skin_hsla(color).opacity(opacity.unit())
 }
 
 fn cover_image_from_art(art: Option<&CoverArt>) -> Option<Arc<Image>> {
@@ -722,6 +872,23 @@ pub fn init_skin_theme(cx: &mut App) {
         theme.caret = skin_hsla(skin.accent());
         theme.selection = skin_hsla(skin.accent()).opacity(0.35);
         theme.border = skin_hsla(skin.control_border());
+        theme.button = skin_hsla_with_opacity(skin.control(), skin.control_opacity());
+        theme.button_hover =
+            skin_hsla_with_opacity(skin.control_hover(), skin.control_hover_opacity());
+        theme.button_active =
+            skin_hsla_with_opacity(skin.control_active(), skin.control_active_opacity());
+        theme.button_foreground = skin_hsla(skin.text());
+        theme.button_primary =
+            skin_hsla_with_opacity(skin.control_primary(), skin.control_primary_opacity());
+        theme.button_primary_hover = skin_hsla_with_opacity(
+            skin.control_primary_hover(),
+            skin.control_primary_hover_opacity(),
+        );
+        theme.button_primary_active = skin_hsla_with_opacity(
+            skin.control_primary_active(),
+            skin.control_primary_active_opacity(),
+        );
+        theme.button_primary_foreground = skin_hsla(skin.control_primary_foreground());
         theme.secondary_foreground = skin_hsla(skin.text());
         theme.table = skin_hsla(skin.panel());
         theme.table_even = skin_hsla(skin.panel_raised());
@@ -757,45 +924,43 @@ fn hardware_button(
     id: impl Into<ElementId>,
     tone: HardwareButtonTone,
     skin: Amp808Skin,
-    cx: &App,
+    _cx: &App,
 ) -> Button {
-    let (surface, hover, active, foreground, border) = match tone {
-        HardwareButtonTone::Neutral => (
-            skin.control(),
-            skin.control_hover(),
-            skin.control_active(),
-            skin.text(),
-            skin.control_border(),
+    let mut shadows = vec![
+        box_shadow(
+            0.0,
+            3.0,
+            8.0,
+            -2.0,
+            skin_hsla(crate::skin::SkinColor::new(0x00_00_00)).opacity(0.72),
         ),
-        HardwareButtonTone::Primary => (
-            skin.control_primary(),
-            skin.control_primary_hover(),
-            skin.control_primary_active(),
-            skin.text(),
-            skin.accent(),
-        ),
+        box_shadow(0.0, -1.0, 2.0, -1.0, skin_hsla(skin.text()).opacity(0.28)),
+    ];
+    if tone == HardwareButtonTone::Primary {
+        shadows.push(box_shadow(
+            0.0,
+            0.0,
+            12.0,
+            -3.0,
+            skin_hsla(skin.accent()).opacity(0.52),
+        ));
+    }
+
+    let button = Button::new(id);
+    let button = match tone {
+        HardwareButtonTone::Neutral => button,
+        HardwareButtonTone::Primary => button.primary(),
+    };
+    let border = match tone {
+        HardwareButtonTone::Neutral => skin.control_border(),
+        HardwareButtonTone::Primary => skin.accent(),
     };
 
-    Button::new(id)
-        .custom(
-            ButtonCustomVariant::new(cx)
-                .color(skin_hsla(surface))
-                .hover(skin_hsla(hover))
-                .active(skin_hsla(active))
-                .foreground(skin_hsla(foreground))
-                .shadow(true),
-        )
-        .outline()
-        .rounded(px(6.0))
+    button
+        .border_1()
+        .rounded(px(8.0))
         .border_color(skin_hsla(border))
-        .text_color(skin_hsla(foreground))
-        .shadow(vec![box_shadow(
-            0.0,
-            2.0,
-            5.0,
-            -1.0,
-            skin_hsla(crate::skin::SkinColor::new(0x00_00_00)).opacity(0.62),
-        )])
+        .shadow(shadows)
 }
 
 gpui_kit::actions!(
@@ -1124,6 +1289,7 @@ pub struct PlayerView {
     milkdrop_performance_probe: PerformanceProbe,
     cosmic_performance_probe: PerformanceProbe,
     library_visible: bool,
+    settings_visible: bool,
     library_catalogue: Option<LibraryCatalogue>,
     library_status: LibraryStatus,
     library_search: Option<Entity<InputState>>,
@@ -1145,6 +1311,8 @@ pub struct PlayerView {
     remote_source_error: Option<String>,
     remote_source: Option<RemoteTransferCoordinator>,
     remote_transfer: Option<YtDlpTransfer>,
+    apple_music: AppleMusicCoordinator,
+    selected_apple_playlist: Option<AppleMusicId>,
 }
 
 impl PlayerView {
@@ -1191,6 +1359,7 @@ impl PlayerView {
             milkdrop_performance_probe: PerformanceProbe::from_env("AMP808_MILKDROP_METRICS"),
             cosmic_performance_probe: PerformanceProbe::from_env("AMP808_COSMIC_METRICS"),
             library_visible: false,
+            settings_visible: false,
             library_catalogue: None,
             library_status: LibraryStatus::Unloaded,
             library_search: None,
@@ -1212,6 +1381,8 @@ impl PlayerView {
             remote_source_error: None,
             remote_source: None,
             remote_transfer: None,
+            apple_music: AppleMusicCoordinator::new(),
+            selected_apple_playlist: None,
         };
         if let Some(store) = view.preset_bookmark_store.clone() {
             view.restore_preset_folder(store, cx);
@@ -1364,6 +1535,62 @@ impl PlayerView {
         self.remote_source = None;
         self.remote_source_error = None;
         cx.notify();
+    }
+
+    fn connect_apple_music(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.connect();
+        if matches!(
+            self.apple_music.session().state(),
+            AppleMusicState::Authorising { .. }
+        ) {
+            self.schedule_apple_music_poll(cx);
+        }
+        cx.notify();
+    }
+
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_visible = !self.settings_visible;
+        if self.settings_visible {
+            self.library_visible = false;
+            self.milkdrop.hide();
+        }
+        cx.notify();
+    }
+
+    fn select_apple_playlist(&mut self, id: AppleMusicId, cx: &mut Context<Self>) {
+        self.selected_apple_playlist = Some(id);
+        cx.notify();
+    }
+
+    fn schedule_apple_music_poll(&self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                executor.timer(Duration::from_millis(50)).await;
+                let active = this
+                    .update(cx, |view, cx| view.poll_apple_music_connection(cx))
+                    .unwrap_or(false);
+                if !active {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn poll_apple_music_connection(&mut self, cx: &mut Context<Self>) -> bool {
+        let previous_state = self.apple_music.session().state().clone();
+        let previous_error = self.apple_music.error().map(str::to_owned);
+        let active = self.apple_music.poll();
+        if apple_music_poll_requires_render(
+            &previous_state,
+            previous_error.as_deref(),
+            self.apple_music.session().state(),
+            self.apple_music.error(),
+        ) {
+            cx.notify();
+        }
+        active
     }
 
     fn color(&self, value: crate::skin::SkinColor) -> gpui_kit::Rgba {
@@ -1846,6 +2073,7 @@ impl PlayerView {
     fn toggle_library(&mut self, cx: &mut Context<Self>) {
         self.library_visible = !self.library_visible;
         if self.library_visible {
+            self.settings_visible = false;
             self.milkdrop.hide();
         }
         if self.library_visible && matches!(self.library_status, LibraryStatus::Unloaded) {
@@ -2286,6 +2514,7 @@ impl PlayerView {
                         view.error = None;
                         view.seeking = false;
                         view.library_visible = false;
+                        view.settings_visible = false;
                     }
                     Err(error) => view.error = Some(error.to_string()),
                 }
@@ -2536,6 +2765,15 @@ impl Render for PlayerView {
         let accent = self.color(self.skin.accent());
         let meter_low = self.color(self.skin.meter_low());
         let meter_high = self.color(self.skin.meter_high());
+        let AppleMusicPresentation {
+            button_label: apple_button_label,
+            accessibility_label: apple_accessibility_label,
+            status: apple_status,
+            disabled: apple_connection_disabled,
+            is_error: apple_status_is_error,
+        } = apple_music_presentation(self.apple_music.session(), self.apple_music.error());
+        let apple_account_status =
+            apple_music_account_status(self.apple_music.session(), self.apple_music.error());
         let reduce_motion = cx.reduce_motion();
         let motion_label = if reduce_motion {
             "Reduced motion enabled; essential audio levels remain active"
@@ -2625,7 +2863,10 @@ impl Render for PlayerView {
                 sample.underflow_frames
             );
         }
-        if !should_present_milkdrop(self.library_visible, self.visualizer_mode) {
+        if !should_present_milkdrop(
+            self.library_visible || self.settings_visible,
+            self.visualizer_mode,
+        ) {
             self.milkdrop.hide();
         }
         let (visualizer_label, visualizer_action_label) = match self.visualizer_mode {
@@ -3270,6 +3511,7 @@ impl Render for PlayerView {
                     .child(div().text_color(text).child(bitrate)),
             );
         let library_visible = self.library_visible;
+        let settings_visible = self.settings_visible;
         let queue_entries = self.queue.entries().to_vec();
         let queue_is_empty = self.queue.is_empty();
         let queue_status = match self.queue.len() {
@@ -3688,6 +3930,282 @@ impl Render for PlayerView {
                             ),
                     ),
             );
+        let apple_playlists = match self.apple_music.session().state() {
+            AppleMusicState::LibraryLoaded { playlists } => playlists.clone(),
+            _ => Vec::new(),
+        };
+        let apple_library_status = match self.apple_music.session().state() {
+            AppleMusicState::LoadingPlaylists { .. } => "Loading Apple Music playlists".to_owned(),
+            AppleMusicState::LibraryEmpty => "No Apple Music playlists found".to_owned(),
+            AppleMusicState::LibraryLoaded { playlists } => match playlists.len() {
+                1 => "1 Apple Music playlist".to_owned(),
+                count => format!("{count} Apple Music playlists"),
+            },
+            AppleMusicState::Ready => "Apple Music playlists are ready to load".to_owned(),
+            _ => "Connect Apple Music to show your playlists".to_owned(),
+        };
+        let selected_apple_playlist = self.selected_apple_playlist.clone();
+        let apple_playlist_gallery = div()
+            .id("settings-apple-library")
+            .test_support()
+            .role(Role::Group)
+            .aria_label("Apple Music playlist library")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .rounded_md()
+            .border_1()
+            .border_color(self.color(self.skin.control_border()))
+            .bg(panel_raised)
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(accent)
+                            .child("YOUR PLAYLISTS"),
+                    )
+                    .child(
+                        div()
+                            .id("settings-apple-library-status")
+                            .test_support()
+                            .role(Role::Status)
+                            .aria_label(apple_library_status.clone())
+                            .text_sm()
+                            .text_color(text)
+                            .child(apple_library_status),
+                    ),
+            )
+            .when(!apple_playlists.is_empty(), |gallery| {
+                gallery.child(
+                    div().flex().flex_wrap().gap_3().children(
+                        apple_playlists
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, playlist)| {
+                                let id = playlist.id().clone();
+                                let title =
+                                    playlist.name().unwrap_or("Untitled playlist").to_owned();
+                                let selected = selected_apple_playlist.as_ref() == Some(&id);
+                                let artwork_label = format!("Artwork for {title}");
+                                let artwork = playlist.artwork_url().map_or_else(
+                                    || {
+                                        div()
+                                            .id(("apple-playlist-artwork", index))
+                                            .test_support()
+                                            .role(Role::Image)
+                                            .aria_label(artwork_label.clone())
+                                            .flex()
+                                            .w_full()
+                                            .h(px(120.0))
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_md()
+                                            .bg(canvas.opacity(0.72))
+                                            .text_xs()
+                                            .text_color(text_muted)
+                                            .child("NO ART")
+                                            .into_any_element()
+                                    },
+                                    |artwork_url| {
+                                        div()
+                                            .id(("apple-playlist-artwork", index))
+                                            .test_support()
+                                            .role(Role::Image)
+                                            .aria_label(artwork_label.clone())
+                                            .w_full()
+                                            .h(px(120.0))
+                                            .overflow_hidden()
+                                            .rounded_md()
+                                            .child(
+                                                img(artwork_url.to_owned())
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Cover),
+                                            )
+                                            .into_any_element()
+                                    },
+                                );
+                                let accessibility_label = if selected {
+                                    format!("Apple Music playlist {title}, selected")
+                                } else {
+                                    format!("Select Apple Music playlist {title}")
+                                };
+
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w(px(176.0))
+                                    .gap_2()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(if selected {
+                                        accent
+                                    } else {
+                                        self.color(self.skin.control_border())
+                                    })
+                                    .bg(canvas.opacity(0.5))
+                                    .p_2()
+                                    .child(artwork)
+                                    .child(
+                                        hardware_button(
+                                            ("apple-playlist", index),
+                                            if selected {
+                                                HardwareButtonTone::Primary
+                                            } else {
+                                                HardwareButtonTone::Neutral
+                                            },
+                                            self.skin,
+                                            cx,
+                                        )
+                                        .label(title)
+                                        .accessibility_label(accessibility_label)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.select_apple_playlist(id.clone(), cx);
+                                            }),
+                                        ),
+                                    )
+                            }),
+                    ),
+                )
+            });
+        let settings_panel = div()
+            .id("settings-panel")
+            .test_support()
+            .role(Role::Group)
+            .aria_label("Settings and accounts")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(panel_raised)
+            .bg(panel)
+            .p_5()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_lg().font_semibold().child("SETTINGS"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_muted)
+                                    .child("ACCOUNTS / SERVICES / PRIVACY"),
+                            ),
+                    )
+                    .child(
+                        hardware_button(
+                            "settings-back-player",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("BACK TO PLAYER")
+                        .accessibility_label("Show player")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_settings(cx);
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-apple-account")
+                    .test_support()
+                    .role(Role::Group)
+                    .aria_label("Apple Music account")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if apple_status_is_error {
+                        meter_high
+                    } else {
+                        self.color(self.skin.control_border())
+                    })
+                    .bg(panel_raised)
+                    .p_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_semibold()
+                                            .text_color(accent)
+                                            .child("APPLE MUSIC"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("settings-apple-status")
+                                            .test_support()
+                                            .role(if apple_status_is_error {
+                                                Role::Alert
+                                            } else {
+                                                Role::Status
+                                            })
+                                            .aria_label(apple_account_status.clone())
+                                            .text_sm()
+                                            .text_color(text)
+                                            .child(apple_account_status),
+                                    ),
+                            )
+                            .child(
+                                hardware_button(
+                                    "settings-connect-apple-music",
+                                    HardwareButtonTone::Primary,
+                                    self.skin,
+                                    cx,
+                                )
+                                .key_context("Amp808Control")
+                                .label(apple_button_label)
+                                .accessibility_label(apple_accessibility_label)
+                                .disabled(apple_connection_disabled)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.connect_apple_music(cx);
+                                })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(text)
+                            .child(
+                                "Authorization is handled by macOS. AMP808 never asks for or stores Apple Music tokens.",
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child(
+                                "READ-ONLY LIBRARY + CATALOG METADATA / SYSTEM PLAYBACK LATER / NO PCM, BPM, EQ OR AUDIO-REACTIVE MILKDROP",
+                            ),
+                    ),
+            )
+            .child(apple_playlist_gallery);
         if !reduce_motion && !matches!(self.cosmic.status(), CosmicStatus::Failed(_)) {
             window.request_animation_frame();
         } else if self.visualizer_mode == VisualizerMode::MilkDrop
@@ -3777,6 +4295,24 @@ impl Render for PlayerView {
                             .gap_2()
                             .child(
                                 hardware_button(
+                                    "open-settings",
+                                    HardwareButtonTone::Primary,
+                                    self.skin,
+                                    cx,
+                                )
+                                .key_context("Amp808Control")
+                                .label(if settings_visible { "PLAYER" } else { "SETTINGS" })
+                                .accessibility_label(if settings_visible {
+                                    "Show player"
+                                } else {
+                                    "Open settings"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_settings(cx);
+                                })),
+                            )
+                            .child(
+                                hardware_button(
                                     "preview-remote-source",
                                     HardwareButtonTone::Neutral,
                                     self.skin,
@@ -3821,6 +4357,30 @@ impl Render for PlayerView {
                                     .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
                             ),
                     ),
+            )
+            .child(
+                div()
+                    .id("apple-music-status")
+                    .test_support()
+                    .role(if apple_status_is_error {
+                        Role::Alert
+                    } else {
+                        Role::Status
+                    })
+                    .aria_label(apple_status.clone())
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if apple_status_is_error {
+                        meter_high
+                    } else {
+                        self.color(self.skin.control_border())
+                    })
+                    .bg(panel)
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(if apple_status_is_error { text } else { text_muted })
+                    .child(apple_status),
             )
             .when(self.remote_source_form_visible, |root| {
                 let input = self
@@ -4146,8 +4706,9 @@ impl Render for PlayerView {
                         .child(notice),
                 )
             })
+            .when(settings_visible, |root| root.child(settings_panel))
             .when(library_visible, |root| root.child(library_panel))
-            .when(!library_visible, |root| root.child(
+            .when(!library_visible && !settings_visible, |root| root.child(
                 div()
                     .flex()
                     .flex_1()
@@ -4432,6 +4993,11 @@ mod tests {
     use amp808_core::bpm::BpmEstimate;
 
     use crate::app::transport::TransportState;
+    use crate::apple_music::{
+        AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaylist, CatalogPlayback,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, PlaylistPage,
+        SubscriptionCapabilities, SubscriptionOffer, TestConnection, TestPlaylistPage,
+    };
     use crate::media::{CoverArt, probe_metadata};
     use crate::milkdrop::MilkdropStatus;
     use crate::playback::DecodeWorkerState;
@@ -4442,10 +5008,259 @@ mod tests {
         ArtworkCache, ArtworkKey, LibraryCatalogue, LibrarySearchScope, LibrarySortDirection,
         LibrarySortField, LibraryStatus, LibraryTrack, PerformanceProbe, PlaybackToggle,
         PlayerView, PresetPreviewState, QueuedTrack, TechnicalMetadataDisplay, TrackDisplay,
-        VisualizerMode, cover_image_from_art, init_skin_theme, library_fuzzy_score,
-        library_metadata_score, milkdrop_status_label, playback_toggle, should_present_milkdrop,
-        signal_status, skin_hsla, sort_library_tracks,
+        VisualizerMode, apple_music_poll_requires_render, cover_image_from_art, init_skin_theme,
+        library_fuzzy_score, library_metadata_score, milkdrop_status_label, playback_toggle,
+        should_present_milkdrop, signal_status, skin_hsla, skin_hsla_with_opacity,
+        sort_library_tracks,
     };
+
+    #[test]
+    fn apple_music_poll_repaints_each_async_state_boundary() {
+        let authorising = AppleMusicState::Authorising {
+            request_id: crate::apple_music::RequestId::new(1),
+        };
+        let loading = AppleMusicState::LoadingPlaylists {
+            request_id: crate::apple_music::RequestId::new(2),
+        };
+
+        assert!(apple_music_poll_requires_render(
+            &authorising,
+            None,
+            &loading,
+            None,
+        ));
+        assert!(apple_music_poll_requires_render(
+            &loading,
+            None,
+            &AppleMusicState::LibraryEmpty,
+            None,
+        ));
+        assert!(apple_music_poll_requires_render(
+            &AppleMusicState::Ready,
+            None,
+            &AppleMusicState::Ready,
+            Some("playlist request failed"),
+        ));
+        assert!(!apple_music_poll_requires_render(
+            &loading, None, &loading, None,
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn apple_music_connection_is_visible_accessible_and_user_initiated(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.apple_music
+                    .use_test_connection(TestConnection::Pending);
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(view.read(cx).apple_music.test_connection_launches(), 0);
+            assert_eq!(window.find("open-settings").label(), Some("Open settings"));
+
+            window.click("open-settings", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-connect-apple-music").label(),
+                Some("Connect Apple Music")
+            );
+
+            window.click("settings-connect-apple-music", cx);
+            window.render_frame(cx);
+        })
+        .expect("test window remains available");
+
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).apple_music.test_connection_launches(), 1);
+            assert!(matches!(
+                view.read(cx).apple_music.session().state(),
+                AppleMusicState::Authorising { .. }
+            ));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn settings_accounts_view_owns_apple_music_sign_in(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.apple_music
+                    .use_test_connection(TestConnection::Pending);
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("open-settings").label(), Some("Open settings"));
+            assert_eq!(view.read(cx).apple_music.test_connection_launches(), 0);
+
+            window.click("open-settings", cx);
+            window.render_frame(cx);
+
+            assert_eq!(
+                window.find("settings-panel").label(),
+                Some("Settings and accounts")
+            );
+            assert_eq!(
+                window.find("settings-apple-status").label(),
+                Some("Apple Music account is not connected")
+            );
+            assert_eq!(
+                window.find("settings-connect-apple-music").label(),
+                Some("Connect Apple Music")
+            );
+
+            window.click("settings-connect-apple-music", cx);
+            window.render_frame(cx);
+        })
+        .expect("test window remains available");
+
+        cx.update(|cx| {
+            assert_eq!(view.read(cx).apple_music.test_connection_launches(), 1);
+            assert!(matches!(
+                view.read(cx).apple_music.session().state(),
+                AppleMusicState::Authorising { .. }
+            ));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn connected_settings_view_presents_a_selectable_apple_playlist_gallery(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        let capabilities = SubscriptionCapabilities::new(
+            CatalogPlayback::Available,
+            SubscriptionOffer::Unavailable,
+            CloudLibrary::Enabled,
+        );
+        let artwork = AppleArtworkUrl::try_from("https://example.apple/cosmic-orbit/300x300.jpg")
+            .expect("fixture artwork should be valid");
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.apple_music
+                    .use_test_connection(TestConnection::Completed(ConnectionResult::Authorised(
+                        ConnectionSubscription::Available(capabilities),
+                    )));
+                view.apple_music
+                    .use_test_playlist_pages(vec![TestPlaylistPage::Completed(PlaylistPage::new(
+                        vec![
+                            ApplePlaylist::with_artwork(
+                                AppleMusicId::try_from("p.cosmic")
+                                    .expect("fixture id should be valid"),
+                                Some("Cosmic Orbit".to_owned()),
+                                Some(artwork),
+                            ),
+                            ApplePlaylist::new(
+                                AppleMusicId::try_from("p.signal")
+                                    .expect("fixture id should be valid"),
+                                Some("Signal Drift".to_owned()),
+                            ),
+                        ],
+                        None,
+                    ))]);
+            });
+        });
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-settings", cx);
+            window.render_frame(cx);
+            window.click("settings-connect-apple-music", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.poll_apple_music_connection(cx));
+                assert!(!view.poll_apple_music_connection(cx));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-apple-library-status").label(),
+                Some("2 Apple Music playlists")
+            );
+            assert_eq!(
+                window.find(("apple-playlist-artwork", 0_usize)).label(),
+                Some("Artwork for Cosmic Orbit")
+            );
+            assert_eq!(
+                window.find(("apple-playlist", 1_usize)).label(),
+                Some("Select Apple Music playlist Signal Drift")
+            );
+
+            window.click(("apple-playlist", 1_usize), cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("apple-playlist", 1_usize)).label(),
+                Some("Apple Music playlist Signal Drift, selected")
+            );
+        })
+        .expect("test window remains available");
+    }
+
+    #[gpui_kit::test]
+    fn denied_apple_music_connection_is_visible_and_retryable(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+                cx.new(PlayerView::new)
+            })
+            .expect("test window opens")
+        });
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.apple_music
+                    .use_test_connection(TestConnection::Completed(ConnectionResult::Denied));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-settings", cx);
+            window.render_frame(cx);
+            window.click("settings-connect-apple-music", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(!view.poll_apple_music_connection(cx));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("apple-music-status").label(),
+                Some("APPLE MUSIC / ACCESS DENIED")
+            );
+            assert_eq!(
+                window.find("settings-connect-apple-music").label(),
+                Some("Retry Apple Music connection after access was denied")
+            );
+        })
+        .expect("test window remains available");
+    }
 
     #[test]
     fn technical_metadata_display_uses_decoder_facts_and_honest_fallbacks() {
@@ -4684,6 +5499,32 @@ mod tests {
             assert_eq!(theme.foreground, skin_hsla(skin.text()));
             assert_eq!(theme.muted_foreground, skin_hsla(skin.text_muted()));
             assert_eq!(theme.ring, skin_hsla(skin.accent()));
+            assert_eq!(
+                theme.button,
+                skin_hsla_with_opacity(skin.control(), skin.control_opacity())
+            );
+            assert_eq!(theme.tokens.button.background, theme.button.into());
+            assert_eq!(
+                theme.button_hover,
+                skin_hsla_with_opacity(skin.control_hover(), skin.control_hover_opacity())
+            );
+            assert_eq!(
+                theme.button_active,
+                skin_hsla_with_opacity(skin.control_active(), skin.control_active_opacity())
+            );
+            assert_eq!(theme.button_foreground, skin_hsla(skin.text()));
+            assert_eq!(
+                theme.button_primary,
+                skin_hsla_with_opacity(skin.control_primary(), skin.control_primary_opacity())
+            );
+            assert_eq!(
+                theme.button_primary_foreground,
+                skin_hsla(skin.control_primary_foreground())
+            );
+            assert_eq!(
+                theme.tokens.button_primary.background,
+                theme.button_primary.into()
+            );
             assert_eq!(theme.table, skin_hsla(skin.panel()));
             assert_eq!(theme.table_even, skin_hsla(skin.panel_raised()));
             assert_eq!(theme.table_head, skin_hsla(skin.field()));
@@ -6795,10 +7636,15 @@ mod tests {
             )
             .unwrap()
         });
-
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(window.find("player-root").focused(), Some(true));
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| {
+            assert_eq!(window.find("open-settings").focused(), Some(true));
             window.press("tab", cx);
         })
         .unwrap();

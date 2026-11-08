@@ -1,5 +1,13 @@
 mod analysis;
 mod app;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "Apple GUI wiring follows the pure domain-contract slice"
+    )
+)]
+mod apple_music;
 mod audio;
 mod cosmic;
 mod library;

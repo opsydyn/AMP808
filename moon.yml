@@ -18,6 +18,8 @@ fileGroups:
     - 'rust-toolchain.toml'
   desktopSources:
     - 'apps/desktop/assets/**/*'
+    - 'apps/desktop/build.rs'
+    - 'apps/desktop/macos/**/*'
     - 'apps/desktop/src/**/*'
     - 'apps/desktop/tests/**/*'
     - 'apps/desktop/Cargo.toml'
@@ -58,6 +60,14 @@ tasks:
     command: 'cargo check --locked -p amp808-r3tr0'
     inputs:
       - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-apple-config-check:
+    command: 'bash scripts/check-apple-music-bundle-config.sh'
+    inputs:
+      - 'apps/desktop/macos/Info.plist'
+      - 'apps/desktop/macos/AMP808-R3TR0.entitlements'
+      - 'scripts/check-apple-music-bundle-config.sh'
     options:
       runInCI: false
   desktop-test:

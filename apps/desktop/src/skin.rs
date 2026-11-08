@@ -59,12 +59,19 @@ pub struct Amp808Skin {
     control_primary: SkinColor,
     control_primary_hover: SkinColor,
     control_primary_active: SkinColor,
+    control_primary_foreground: SkinColor,
     field: SkinColor,
     field_border: SkinColor,
     meter_low: SkinColor,
     meter_high: SkinColor,
     panel_opacity: SkinOpacity,
     raised_panel_opacity: SkinOpacity,
+    control_opacity: SkinOpacity,
+    control_hover_opacity: SkinOpacity,
+    control_active_opacity: SkinOpacity,
+    control_primary_opacity: SkinOpacity,
+    control_primary_hover_opacity: SkinOpacity,
+    control_primary_active_opacity: SkinOpacity,
 }
 
 impl Amp808Skin {
@@ -80,15 +87,22 @@ impl Amp808Skin {
             control_hover: SkinColor::new(0x31_33_3b),
             control_active: SkinColor::new(0x17_18_1c),
             control_border: SkinColor::new(0x4a_4c_55),
-            control_primary: SkinColor::new(0xd8_4b_25),
-            control_primary_hover: SkinColor::new(0xed_63_36),
-            control_primary_active: SkinColor::new(0xb7_39_1d),
+            control_primary: SkinColor::new(0xf8_a1_25),
+            control_primary_hover: SkinColor::new(0xff_b5_44),
+            control_primary_active: SkinColor::new(0xef_a1_37),
+            control_primary_foreground: SkinColor::new(0x11_12_14),
             field: SkinColor::new(0x17_18_1c),
             field_border: SkinColor::new(0x74_77_82),
             meter_low: SkinColor::new(0xf1_f8_27),
             meter_high: SkinColor::new(0xe7_2e_2e),
             panel_opacity: SkinOpacity::new(204),
             raised_panel_opacity: SkinOpacity::new(230),
+            control_opacity: SkinOpacity::new(224),
+            control_hover_opacity: SkinOpacity::new(235),
+            control_active_opacity: SkinOpacity::new(245),
+            control_primary_opacity: SkinOpacity::new(235),
+            control_primary_hover_opacity: SkinOpacity::new(230),
+            control_primary_active_opacity: SkinOpacity::new(242),
         }
     }
 
@@ -144,6 +158,10 @@ impl Amp808Skin {
         self.control_primary_active
     }
 
+    pub const fn control_primary_foreground(self) -> SkinColor {
+        self.control_primary_foreground
+    }
+
     pub const fn field(self) -> SkinColor {
         self.field
     }
@@ -166,5 +184,105 @@ impl Amp808Skin {
 
     pub const fn raised_panel_opacity(self) -> SkinOpacity {
         self.raised_panel_opacity
+    }
+
+    pub const fn control_opacity(self) -> SkinOpacity {
+        self.control_opacity
+    }
+
+    pub const fn control_hover_opacity(self) -> SkinOpacity {
+        self.control_hover_opacity
+    }
+
+    pub const fn control_active_opacity(self) -> SkinOpacity {
+        self.control_active_opacity
+    }
+
+    pub const fn control_primary_opacity(self) -> SkinOpacity {
+        self.control_primary_opacity
+    }
+
+    pub const fn control_primary_hover_opacity(self) -> SkinOpacity {
+        self.control_primary_hover_opacity
+    }
+
+    pub const fn control_primary_active_opacity(self) -> SkinOpacity {
+        self.control_primary_active_opacity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AAA_NORMAL_TEXT_CONTRAST: f32 = 7.0;
+
+    fn composite(surface: SkinColor, opacity: SkinOpacity, backdrop: SkinColor) -> SkinColor {
+        let alpha = opacity.unit();
+        let blend = |shift: u32| {
+            let foreground = ((surface.0 >> shift) & 0xff) as f32;
+            let background = ((backdrop.0 >> shift) & 0xff) as f32;
+            (foreground.mul_add(alpha, background * (1.0 - alpha))).round() as u32
+        };
+
+        SkinColor::new((blend(16) << 16) | (blend(8) << 8) | blend(0))
+    }
+
+    #[test]
+    fn enabled_button_labels_keep_aaa_contrast_over_extreme_backdrops() {
+        let skin = Amp808Skin::built_in();
+        let backdrops = [
+            ("black", SkinColor::new(0x00_00_00)),
+            ("white", SkinColor::new(0xff_ff_ff)),
+        ];
+        let states = [
+            (
+                "neutral",
+                skin.control(),
+                skin.control_opacity(),
+                skin.text(),
+            ),
+            (
+                "neutral hover",
+                skin.control_hover(),
+                skin.control_hover_opacity(),
+                skin.text(),
+            ),
+            (
+                "neutral active",
+                skin.control_active(),
+                skin.control_active_opacity(),
+                skin.text(),
+            ),
+            (
+                "primary",
+                skin.control_primary(),
+                skin.control_primary_opacity(),
+                skin.control_primary_foreground(),
+            ),
+            (
+                "primary hover",
+                skin.control_primary_hover(),
+                skin.control_primary_hover_opacity(),
+                skin.control_primary_foreground(),
+            ),
+            (
+                "primary active",
+                skin.control_primary_active(),
+                skin.control_primary_active_opacity(),
+                skin.control_primary_foreground(),
+            ),
+        ];
+
+        for (state, surface, opacity, foreground) in states {
+            for (backdrop_name, backdrop) in backdrops {
+                let rendered_surface = composite(surface, opacity, backdrop);
+                let contrast = foreground.contrast_ratio(rendered_surface);
+                assert!(
+                    contrast >= AAA_NORMAL_TEXT_CONTRAST,
+                    "{state} on {backdrop_name} has {contrast:.2}:1 contrast"
+                );
+            }
+        }
     }
 }

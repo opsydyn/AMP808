@@ -154,3 +154,10 @@ Implementation note, March 7, 2026:
   layout and exposes `VIS` in the control strip again.
 - `README.md` now documents the supported Apple Music surface as `Music.app` transport plus
   synthetic visualizers, with no Apple Music API setup in the user-facing path.
+
+Partial supersession note, June 24, 2026:
+
+- ADR-0020 supersedes this ADR's pause on user-visible Apple Music API product work because the
+  project now has Apple Developer Program access.
+- This ADR's honesty boundary remains active: `music-app` visualizers are transport-linked and
+  synthetic, not true sample-derived waveform, FFT, EQ, or BPM analysis.

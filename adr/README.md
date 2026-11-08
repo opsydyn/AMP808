@@ -38,6 +38,7 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0017: Add a Ratzilla Web 808 player target](0017-add-ratzilla-web-808-player-target.md) (proposed, 2026-06-15)
 - [ADR-0018: Add a Web Audio EQ control graph for browser knobs](0018-add-web-audio-eq-control-graph.md) (accepted, 2026-06-20)
 - [ADR-0019: Define the web external provider and ffmpeg.wasm boundary](0019-web-external-provider-and-ffmpeg-wasm-boundary.md) (accepted, 2026-06-21)
+- [ADR-0020: Reopen Apple Music API for TUI-rich Music.app integration](0020-reopen-apple-music-api-for-tui-rich-music-app-integration.md) (accepted, 2026-06-24)
 - [ADR-0021: Adopt a Moon-orchestrated Cargo monorepo layout](0021-adopt-moon-cargo-monorepo-layout.md) (accepted, 2026-11-04)
 - [ADR-0022: Add the macOS-first AMP808-R3TR0 desktop player with GPUI Kit](0022-add-amp808-r3tr0-macos-desktop-player.md) (accepted, 2026-11-04)
 - [ADR-0023: Adopt projectM for authentic MilkDrop visualisation](0023-adopt-projectm-for-authentic-milkdrop-visualisation.md) (superseded, 2026-11-05)
@@ -52,3 +53,4 @@ An Architecture Decision Record (ADR) captures an important architecture decisio
 - [ADR-0032: Run yt-dlp behind a cancellable desktop transfer adapter](0032-run-yt-dlp-behind-a-cancellable-desktop-transfer-adapter.md) (accepted, 2026-11-07)
 - [ADR-0033: Add a local-first MilkDrop preset gallery with reversible live preview](0033-add-a-local-first-milkdrop-preset-gallery.md) (accepted, 2026-11-07)
 - [ADR-0034: Persist the local MilkDrop folder with a macOS security-scoped bookmark](0034-persist-the-local-milkdrop-folder-with-a-macos-security-scoped-bookmark.md) (accepted, 2026-11-07)
+- [ADR-0035: Ship Apple Music as the first desktop media adapter](0035-ship-apple-music-as-the-first-desktop-media-adapter.md) (accepted, 2026-11-07)

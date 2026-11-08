@@ -190,3 +190,10 @@ Superseded 2026-03-07:
 
 - Superseded by ADR-0014 for supported product direction.
 - The internal Apple Music API client may remain in the codebase, but user-visible/productized Apple Music metadata work is paused until the economics and token-delivery story justify revisiting it.
+
+Revival note 2026-06-24:
+
+- ADR-0020 reopens the Apple Music API direction for native/TUI use now that Apple Developer Program
+  access exists.
+- The metadata-only separation in this ADR remains useful prior art, but ADR-0020 is the current
+  governing decision for future Apple Music API work.
