@@ -221,7 +221,8 @@ struct WirePosition {
     version: u16,
     kind: String,
     request_id: u64,
-    track_id: String,
+    playlist_id: String,
+    playlist_index: u64,
     elapsed_ms: u64,
     error: Option<String>,
 }
@@ -726,7 +727,8 @@ impl TransportResponse {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PositionResponse {
     request_id: RequestId,
-    track_id: AppleMusicId,
+    playlist_id: AppleMusicId,
+    playlist_index: usize,
     elapsed_ms: u64,
 }
 
@@ -750,11 +752,14 @@ impl PositionResponse {
         if wire.error.is_some() {
             return Err(BridgeProtocolError::PositionFailed);
         }
-        let track_id = AppleMusicId::try_from(wire.track_id.as_str())
-            .map_err(|_error| BridgeProtocolError::InvalidTrackIdentifier)?;
+        let playlist_id = AppleMusicId::try_from(wire.playlist_id.as_str())
+            .map_err(|_error| BridgeProtocolError::InvalidPlaylistIdentifier)?;
+        let playlist_index = usize::try_from(wire.playlist_index)
+            .map_err(|_error| BridgeProtocolError::InvalidPlaylistIndex)?;
         Ok(Self {
             request_id: RequestId::new(wire.request_id),
-            track_id,
+            playlist_id,
+            playlist_index,
             elapsed_ms: wire.elapsed_ms,
         })
     }
@@ -763,8 +768,12 @@ impl PositionResponse {
         self.request_id
     }
 
-    pub(crate) const fn track_id(&self) -> &AppleMusicId {
-        &self.track_id
+    pub(crate) const fn playlist_id(&self) -> &AppleMusicId {
+        &self.playlist_id
+    }
+
+    pub(crate) const fn playlist_index(&self) -> usize {
+        self.playlist_index
     }
 
     pub(crate) const fn elapsed_ms(&self) -> u64 {
@@ -772,10 +781,16 @@ impl PositionResponse {
     }
 
     #[cfg(test)]
-    fn completed_for_test(request_id: RequestId, track_id: AppleMusicId, elapsed_ms: u64) -> Self {
+    fn completed_for_test(
+        request_id: RequestId,
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
+        elapsed_ms: u64,
+    ) -> Self {
         Self {
             request_id,
-            track_id,
+            playlist_id,
+            playlist_index,
             elapsed_ms,
         }
     }
@@ -826,6 +841,7 @@ pub(crate) enum BridgeProtocolError {
     InconsistentConnection,
     InvalidPlaylistCursor,
     InvalidPlaylistIdentifier,
+    InvalidPlaylistIndex,
     InvalidTrackIdentifier,
     PlaylistRequestFailed,
     TrackRequestFailed,
@@ -867,6 +883,9 @@ impl fmt::Display for BridgeProtocolError {
             Self::InvalidPlaylistIdentifier => {
                 formatter.write_str("Apple Music returned an invalid playlist identifier")
             }
+            Self::InvalidPlaylistIndex => {
+                formatter.write_str("Apple Music returned an invalid playlist position")
+            }
             Self::InvalidTrackIdentifier => {
                 formatter.write_str("Apple Music returned an invalid playlist entry identifier")
             }
@@ -899,6 +918,7 @@ impl Error for BridgeProtocolError {
             | Self::InconsistentConnection
             | Self::InvalidPlaylistCursor
             | Self::InvalidPlaylistIdentifier
+            | Self::InvalidPlaylistIndex
             | Self::InvalidTrackIdentifier
             | Self::PlaylistRequestFailed
             | Self::TrackRequestFailed
@@ -1239,6 +1259,7 @@ impl PlaybackTask {
         request_id: RequestId,
         playlist_id: &AppleMusicId,
         track_id: &AppleMusicId,
+        playlist_index: usize,
     ) -> Result<Self, BridgeCallError> {
         let playlist_id = playlist_id.as_str().as_bytes();
         let track_id = track_id.as_str().as_bytes();
@@ -1254,6 +1275,7 @@ impl PlaybackTask {
                 playlist_id.len(),
                 track_id.as_ptr(),
                 track_id.len(),
+                playlist_index as u64,
                 context,
                 playback_callback,
             )
@@ -1279,6 +1301,7 @@ impl PlaybackTask {
         _request_id: RequestId,
         _playlist_id: &AppleMusicId,
         _track_id: &AppleMusicId,
+        _playlist_index: usize,
     ) -> Result<Self, BridgeCallError> {
         Err(BridgeCallError::Unavailable)
     }
@@ -1408,25 +1431,14 @@ pub(crate) struct PositionTask {
 
 impl PositionTask {
     #[cfg(all(amp808_music_kit_bridge, not(test)))]
-    pub(crate) fn start(
-        request_id: RequestId,
-        track_id: &AppleMusicId,
-    ) -> Result<Self, BridgeCallError> {
-        let track_id = track_id.as_str().as_bytes();
+    pub(crate) fn start(request_id: RequestId) -> Result<Self, BridgeCallError> {
         let (sender, receiver) = mpsc::channel();
         let context = Box::new(PositionCallbackContext { sender });
         let context = Box::into_raw(context).cast::<c_void>();
         // SAFETY: the identifier bytes remain live for the synchronous bridge call. Swift copies
         // them before returning, and the unique callback context is consumed exactly once.
-        let accepted = unsafe {
-            amp808_music_kit_position(
-                request_id.value(),
-                track_id.as_ptr(),
-                track_id.len(),
-                context,
-                position_callback,
-            )
-        };
+        let accepted =
+            unsafe { amp808_music_kit_position(request_id.value(), context, position_callback) };
         if accepted != 1 {
             // SAFETY: a rejected request did not retain the unique context allocation.
             drop(unsafe { Box::from_raw(context.cast::<PositionCallbackContext>()) });
@@ -1444,10 +1456,7 @@ impl PositionTask {
     }
 
     #[cfg(all(not(amp808_music_kit_bridge), not(test)))]
-    pub(crate) const fn start(
-        _request_id: RequestId,
-        _track_id: &AppleMusicId,
-    ) -> Result<Self, BridgeCallError> {
+    pub(crate) const fn start(_request_id: RequestId) -> Result<Self, BridgeCallError> {
         Err(BridgeCallError::Unavailable)
     }
 
@@ -1481,13 +1490,17 @@ impl PositionTask {
     #[cfg(test)]
     pub(crate) fn completed_for_test(
         request_id: RequestId,
-        track_id: AppleMusicId,
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
         elapsed_ms: u64,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Ok(PositionResponse::completed_for_test(
-                request_id, track_id, elapsed_ms,
+                request_id,
+                playlist_id,
+                playlist_index,
+                elapsed_ms,
             )))
             .expect("the test position receiver remains live during construction");
         Self {
@@ -1721,6 +1734,7 @@ unsafe extern "C" {
         playlist_id_length: usize,
         track_id: *const u8,
         track_id_length: usize,
+        playlist_index: u64,
         context: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
     ) -> u8;
@@ -1736,8 +1750,6 @@ unsafe extern "C" {
     #[cfg(not(test))]
     fn amp808_music_kit_position(
         request_id: u64,
-        track_id: *const u8,
-        track_id_length: usize,
         context: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
     ) -> u8;
@@ -2040,19 +2052,20 @@ mod tests {
     #[test]
     fn position_envelope_preserves_identity_and_native_elapsed_time() {
         let response = PositionResponse::parse(
-            br#"{"version":1,"kind":"position","request_id":63,"track_id":"i.first","elapsed_ms":12345,"error":null}"#,
+            br#"{"version":1,"kind":"position","request_id":63,"playlist_id":"p.cosmic","playlist_index":7,"elapsed_ms":12345,"error":null}"#,
         )
         .expect("a finite native position should cross the bridge");
 
         assert_eq!(response.request_id(), RequestId::new(63));
-        assert_eq!(response.track_id().as_str(), "i.first");
+        assert_eq!(response.playlist_id().as_str(), "p.cosmic");
+        assert_eq!(response.playlist_index(), 7);
         assert_eq!(response.elapsed_ms(), 12_345);
     }
 
     #[test]
     fn position_failure_is_redacted_at_the_bridge_boundary() {
         let error = PositionResponse::parse(
-            br#"{"version":1,"kind":"position","request_id":64,"track_id":"i.private","elapsed_ms":0,"error":"private provider detail"}"#,
+            br#"{"version":1,"kind":"position","request_id":64,"playlist_id":"p.private","playlist_index":0,"elapsed_ms":0,"error":"private provider detail"}"#,
         )
         .expect_err("a failed native observation must not report a position");
 

@@ -6,6 +6,17 @@ private let expectedBundleIdentifier = "com.opsydyn.amp808r3tr0"
 private let playlistPageSize = 50
 private let playlistTrackPageSize = 100
 
+private struct PlaybackQueueContext: Sendable {
+    let playlistID: String
+    let playlistIndicesByQueueEntryID: [String: Int]
+}
+
+private enum PlaybackContextError: Error {
+    case currentEntryUnavailable
+}
+
+@MainActor private var playbackQueueContext: PlaybackQueueContext?
+
 public typealias Amp808MusicKitConnectionCallback = @convention(c) (
     UnsafeMutableRawPointer?,
     UnsafeMutablePointer<UInt8>?,
@@ -132,7 +143,8 @@ private struct PositionEnvelope: Encodable {
     let version: Int
     let kind: String
     let requestID: UInt64
-    let trackID: String
+    let playlistID: String
+    let playlistIndex: UInt64
     let elapsedMS: UInt64
     let error: String?
 
@@ -140,7 +152,8 @@ private struct PositionEnvelope: Encodable {
         case version
         case kind
         case requestID = "request_id"
-        case trackID = "track_id"
+        case playlistID = "playlist_id"
+        case playlistIndex = "playlist_index"
         case elapsedMS = "elapsed_ms"
         case error
     }
@@ -217,7 +230,7 @@ private func sendPositionEnvelope(
     }
 
     completion.send(
-        "{\"version\":\(envelopeVersion),\"kind\":\"position\",\"request_id\":\(envelope.requestID),\"track_id\":\"\",\"elapsed_ms\":0,\"error\":\"encoding_failed\"}"
+        "{\"version\":\(envelopeVersion),\"kind\":\"position\",\"request_id\":\(envelope.requestID),\"playlist_id\":\"\",\"playlist_index\":0,\"elapsed_ms\":0,\"error\":\"encoding_failed\"}"
     )
 }
 
@@ -513,6 +526,9 @@ public func requestTrackPage(
                 guard let next = try await entries.nextBatch(limit: playlistTrackPageSize) else {
                     break
                 }
+                guard !next.isEmpty else {
+                    break
+                }
                 entries += next
             }
 
@@ -567,6 +583,7 @@ public func playTrack(
     _ playlistIDLength: UInt,
     _ trackIDBytes: UnsafePointer<UInt8>?,
     _ trackIDLength: UInt,
+    _ playlistIndexValue: UInt64,
     _ context: UnsafeMutableRawPointer?,
     _ callback: Amp808MusicKitConnectionCallback?
 ) -> UInt8 {
@@ -601,6 +618,9 @@ public func playTrack(
               encoding: .utf8
           ),
           !trackID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 4
+    }
+    guard let playlistIndex = Int(exactly: playlistIndexValue) else {
         return 4
     }
     let completion = ConnectionCompletion(context: context, callback: callback)
@@ -643,15 +663,31 @@ public func playTrack(
 
             let detailedPlaylist = try await playlist.with([.entries])
             var entries = detailedPlaylist.entries ?? []
-            var entry = entries.first { $0.id.rawValue == trackID }
-            while entry == nil, entries.hasNextBatch {
+            while entries.hasNextBatch {
                 guard let next = try await entries.nextBatch(limit: playlistTrackPageSize) else {
                     break
                 }
+                guard !next.isEmpty else {
+                    break
+                }
                 entries += next
-                entry = next.first { $0.id.rawValue == trackID }
             }
-            guard let entry else {
+            guard entries.indices.contains(playlistIndex) else {
+                sendPlaybackEnvelope(
+                    PlaybackEnvelope(
+                        version: envelopeVersion,
+                        kind: "playback",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "track_not_found"
+                    ),
+                    completion: completion
+                )
+                return
+            }
+            let entry = entries[playlistIndex]
+            guard entry.id.rawValue == trackID else {
                 sendPlaybackEnvelope(
                     PlaybackEnvelope(
                         version: envelopeVersion,
@@ -667,11 +703,50 @@ public func playTrack(
             }
 
             let player = ApplicationMusicPlayer.shared
+            await MainActor.run {
+                playbackQueueContext = nil
+            }
             player.queue = ApplicationMusicPlayer.Queue(
                 playlist: detailedPlaylist,
                 startingAt: entry
             )
             try await player.prepareToPlay()
+            guard let selectedQueueEntry = player.queue.currentEntry else {
+                throw PlaybackContextError.currentEntryUnavailable
+            }
+            let queueEntries = player.queue.entries
+            guard let selectedQueueIndex = queueEntries.firstIndex(where: {
+                $0.id == selectedQueueEntry.id
+            }) else {
+                throw PlaybackContextError.currentEntryUnavailable
+            }
+            var playlistIndicesByQueueEntryID: [String: Int] = [:]
+            for queueIndex in queueEntries.indices {
+                let queueDistance = queueEntries.distance(
+                    from: selectedQueueIndex,
+                    to: queueIndex
+                )
+                let (mappedPlaylistIndex, overflowed) = playlistIndex
+                    .addingReportingOverflow(queueDistance)
+                guard !overflowed,
+                      entries.indices.contains(mappedPlaylistIndex),
+                      let queueItemID = queueEntries[queueIndex].item?.id,
+                      let playlistItemID = entries[mappedPlaylistIndex].item?.id,
+                      queueItemID == playlistItemID else {
+                    throw PlaybackContextError.currentEntryUnavailable
+                }
+                playlistIndicesByQueueEntryID[queueEntries[queueIndex].id] = mappedPlaylistIndex
+            }
+            guard playlistIndicesByQueueEntryID[selectedQueueEntry.id] == playlistIndex else {
+                throw PlaybackContextError.currentEntryUnavailable
+            }
+            let queueContext = PlaybackQueueContext(
+                playlistID: playlistID,
+                playlistIndicesByQueueEntryID: playlistIndicesByQueueEntryID
+            )
+            await MainActor.run {
+                playbackQueueContext = queueContext
+            }
             try await player.play()
             sendPlaybackEnvelope(
                 PlaybackEnvelope(
@@ -873,8 +948,6 @@ public func controlPlayback(
 @c(amp808_music_kit_position)
 public func observePlaybackPosition(
     _ requestID: UInt64,
-    _ trackIDBytes: UnsafePointer<UInt8>?,
-    _ trackIDLength: UInt,
     _ context: UnsafeMutableRawPointer?,
     _ callback: Amp808MusicKitConnectionCallback?
 ) -> UInt8 {
@@ -889,18 +962,6 @@ public func observePlaybackPosition(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard trackIDLength <= UInt(Int.max),
-          let trackIDBytes,
-          let trackID = String(
-              bytes: UnsafeBufferPointer(
-                  start: trackIDBytes,
-                  count: Int(trackIDLength)
-              ),
-              encoding: .utf8
-          ),
-          !trackID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        return 4
-    }
     let completion = ConnectionCompletion(context: context, callback: callback)
 
     Task { @MainActor in
@@ -910,7 +971,8 @@ public func observePlaybackPosition(
                     version: envelopeVersion,
                     kind: "position",
                     requestID: requestID,
-                    trackID: trackID,
+                    playlistID: "",
+                    playlistIndex: 0,
                     elapsedMS: 0,
                     error: "access_unavailable"
                 ),
@@ -921,7 +983,27 @@ public func observePlaybackPosition(
 
         let playbackTime = ApplicationMusicPlayer.shared.playbackTime
         let milliseconds = playbackTime * 1_000
-        guard milliseconds.isFinite,
+        let player = ApplicationMusicPlayer.shared
+        guard let playbackQueueContext,
+              let currentEntry = player.queue.currentEntry,
+              let playlistIndex = playbackQueueContext
+                  .playlistIndicesByQueueEntryID[currentEntry.id] else {
+            sendPositionEnvelope(
+                PositionEnvelope(
+                    version: envelopeVersion,
+                    kind: "position",
+                    requestID: requestID,
+                    playlistID: "",
+                    playlistIndex: 0,
+                    elapsedMS: 0,
+                    error: "position_unavailable"
+                ),
+                completion: completion
+            )
+            return
+        }
+        guard let encodedPlaylistIndex = UInt64(exactly: playlistIndex),
+              milliseconds.isFinite,
               milliseconds >= 0,
               milliseconds < Double(UInt64.max) else {
             sendPositionEnvelope(
@@ -929,7 +1011,8 @@ public func observePlaybackPosition(
                     version: envelopeVersion,
                     kind: "position",
                     requestID: requestID,
-                    trackID: trackID,
+                    playlistID: playbackQueueContext.playlistID,
+                    playlistIndex: 0,
                     elapsedMS: 0,
                     error: "position_unavailable"
                 ),
@@ -942,7 +1025,8 @@ public func observePlaybackPosition(
                 version: envelopeVersion,
                 kind: "position",
                 requestID: requestID,
-                trackID: trackID,
+                playlistID: playbackQueueContext.playlistID,
+                playlistIndex: encodedPlaylistIndex,
                 elapsedMS: UInt64(milliseconds.rounded(.down)),
                 error: nil
             ),

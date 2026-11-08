@@ -564,6 +564,39 @@ Apple playback-position evidence recorded on 2026-11-08:
   slices, as do whole-playlist activation, repeat/shuffle, and manual keyboard/VoiceOver
   acceptance.
 
+Apple current-entry reconciliation evidence recorded on 2026-11-08:
+
+- Playlist occurrence, rather than playlist-entry identifier alone, is now the playback identity.
+  GPUI passes the original ordered playlist index even when search filters the visible rows; Swift
+  validates both that index and the expected opaque entry identifier before constructing the
+  MusicKit queue. This removes the previously recorded ambiguity for duplicate playlist entries.
+- After `prepareToPlay`, Swift builds an immutable mapping from MusicKit's queue-entry identifiers
+  to ordered playlist indices. Position observations return the authoritative playlist identifier
+  and occurrence index. The mapping is owned on `MainActor`, while MusicKit's non-Sendable player
+  remains in its established task rather than crossing actor isolation.
+- Rust snapshots the exact ordered playlist handed to MusicKit. A matching native occurrence
+  updates the Playing identity and selects that occurrence's duration; a response for another
+  playlist or outside the playback snapshot cannot replace active state. Browsing a different
+  playlist therefore cannot corrupt the active playback identity or duration.
+- Coordinator tests cover natural-entry reconciliation, exact duplicate-occurrence selection,
+  duration changes, wrong-playlist rejection, and occurrence-aware Previous/Next behavior. Bridge
+  parser tests cover the versioned playlist identity/index envelope, and the existing GPUI
+  interaction test continues to cover active-row, progress, and transport semantics.
+- The strict locked desktop Clippy gate passes with warnings denied apart from the repository's
+  explicit dead-code allowance. The development-signed Swift bridge compiles, links, signs, and
+  passes the bundle validator.
+- The final signed build also validates every available native queue item's MusicKit item identity
+  against the corresponding fully loaded playlist entry before accepting playback. A live request
+  for the second playlist occurrence passed this guard, began at 00:00 with that row active, and
+  was stopped through keyboard navigation.
+- Live signed observation confirmed stable playback and accessible progress from 00:04 through
+  04:59, plus keyboard activation of Stop. MusicKit did not change `currentEntry` during that run,
+  even though the selected entry's listed duration was 03:21, so an actual native natural-boundary
+  reconciliation was not observed and is not claimed as accepted.
+- This qualifies deterministic occurrence identity and automated reconciliation behavior. Seeking,
+  repeat/shuffle, whole-playlist activation, a live observed natural transition, and manual
+  VoiceOver acceptance remain separate work.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>

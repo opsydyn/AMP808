@@ -267,6 +267,7 @@ mod unavailable {
             _request_id: RequestId,
             _playlist_id: &AppleMusicId,
             _track_id: &AppleMusicId,
+            _playlist_index: usize,
         ) -> Result<Self, BridgeCallError> {
             Err(BridgeCallError)
         }
@@ -374,7 +375,8 @@ mod unavailable {
 
     pub(crate) struct PositionResponse {
         request_id: RequestId,
-        track_id: AppleMusicId,
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
         elapsed_ms: u64,
     }
 
@@ -383,8 +385,12 @@ mod unavailable {
             self.request_id
         }
 
-        pub(crate) const fn track_id(&self) -> &AppleMusicId {
-            &self.track_id
+        pub(crate) const fn playlist_id(&self) -> &AppleMusicId {
+            &self.playlist_id
+        }
+
+        pub(crate) const fn playlist_index(&self) -> usize {
+            self.playlist_index
         }
 
         pub(crate) const fn elapsed_ms(&self) -> u64 {
@@ -399,10 +405,7 @@ mod unavailable {
     }
 
     impl PositionTask {
-        pub(crate) const fn start(
-            _request_id: RequestId,
-            _track_id: &AppleMusicId,
-        ) -> Result<Self, BridgeCallError> {
+        pub(crate) const fn start(_request_id: RequestId) -> Result<Self, BridgeCallError> {
             Err(BridgeCallError)
         }
 
@@ -440,14 +443,16 @@ mod unavailable {
         #[cfg(test)]
         pub(crate) fn completed_for_test(
             request_id: RequestId,
-            track_id: AppleMusicId,
+            playlist_id: AppleMusicId,
+            playlist_index: usize,
             elapsed_ms: u64,
         ) -> Self {
             let (sender, receiver) = mpsc::channel();
             sender
                 .send(Ok(PositionResponse {
                     request_id,
-                    track_id,
+                    playlist_id,
+                    playlist_index,
                     elapsed_ms,
                 }))
                 .expect("the test position receiver remains live during construction");
@@ -772,6 +777,24 @@ pub(crate) enum ApplePlaybackState {
 pub(crate) struct ApplePlaybackPosition {
     elapsed_ms: u64,
     duration_ms: Option<u64>,
+}
+
+/// Retains the exact ordered playlist snapshot handed to MusicKit for playback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplePlaybackQueue {
+    playlist_id: AppleMusicId,
+    tracks: Vec<ApplePlaylistTrack>,
+    current_index: usize,
+}
+
+impl ApplePlaybackQueue {
+    fn track(&self, index: usize) -> Option<&ApplePlaylistTrack> {
+        self.tracks.get(index)
+    }
+
+    fn current_track(&self) -> Option<&ApplePlaylistTrack> {
+        self.track(self.current_index)
+    }
 }
 
 impl ApplePlaybackPosition {
@@ -1350,10 +1373,12 @@ pub(crate) struct AppleMusicCoordinator {
     track_pager: Option<TrackPager>,
     track_error: Option<String>,
     playback: ApplePlaybackState,
+    playback_queue: Option<ApplePlaybackQueue>,
     playback_task: Option<PlaybackTask>,
     playback_request_id: Option<RequestId>,
     transport_task: Option<TransportTask>,
     transport_request_id: Option<RequestId>,
+    transport_target_index: Option<usize>,
     position: Option<ApplePlaybackPosition>,
     position_task: Option<PositionTask>,
     position_request_id: Option<RequestId>,
@@ -1378,7 +1403,7 @@ pub(crate) struct AppleMusicCoordinator {
     #[cfg(test)]
     test_playback_launches: usize,
     #[cfg(test)]
-    test_playback_request: Option<(AppleMusicId, AppleMusicId)>,
+    test_playback_request: Option<(AppleMusicId, AppleMusicId, usize)>,
     #[cfg(test)]
     test_transport: Option<TestTransport>,
     #[cfg(test)]
@@ -1432,6 +1457,11 @@ pub(crate) enum TestPosition {
         track_id: AppleMusicId,
         elapsed_ms: u64,
     },
+    CompletedForOccurrence {
+        playlist_id: AppleMusicId,
+        playlist_index: usize,
+        elapsed_ms: u64,
+    },
 }
 
 impl AppleMusicCoordinator {
@@ -1450,10 +1480,12 @@ impl AppleMusicCoordinator {
             track_pager: None,
             track_error: None,
             playback: ApplePlaybackState::Idle,
+            playback_queue: None,
             playback_task: None,
             playback_request_id: None,
             transport_task: None,
             transport_request_id: None,
+            transport_target_index: None,
             position: None,
             position_task: None,
             position_request_id: None,
@@ -1518,11 +1550,24 @@ impl AppleMusicCoordinator {
         self.position_error.as_deref()
     }
 
-    pub(crate) fn play_track(&mut self, playlist_id: AppleMusicId, track_id: AppleMusicId) {
+    pub(crate) fn active_playlist_occurrence(&self) -> Option<(&AppleMusicId, usize)> {
+        self.playback_queue
+            .as_ref()
+            .map(|queue| (&queue.playlist_id, queue.current_index))
+    }
+
+    pub(crate) fn play_track(
+        &mut self,
+        playlist_id: AppleMusicId,
+        track_id: AppleMusicId,
+        playlist_index: usize,
+    ) {
         self.playback_task.take();
         self.transport_task.take();
         self.transport_request_id = None;
+        self.transport_target_index = None;
         self.reset_position_observation();
+        self.playback_queue = self.playback_queue_snapshot(&playlist_id, &track_id, playlist_index);
         let request_id = self.next_request_id();
         self.playback_request_id = Some(request_id);
         self.playback_error = None;
@@ -1530,7 +1575,7 @@ impl AppleMusicCoordinator {
             track_id: track_id.clone(),
             request_id,
         };
-        match self.create_playback_task(request_id, &playlist_id, &track_id) {
+        match self.create_playback_task(request_id, &playlist_id, &track_id, playlist_index) {
             Ok(task) => self.playback_task = Some(task),
             Err(error) => self.fail_playback(track_id, error.to_string()),
         }
@@ -1543,6 +1588,7 @@ impl AppleMusicCoordinator {
         let track_id = track_id.clone();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
+        self.transport_target_index = None;
         self.playback_error = None;
         self.playback = ApplePlaybackState::Pausing {
             track_id: track_id.clone(),
@@ -1562,6 +1608,7 @@ impl AppleMusicCoordinator {
         self.position_error = None;
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
+        self.transport_target_index = None;
         self.playback_error = None;
         self.playback = ApplePlaybackState::Resuming {
             track_id: track_id.clone(),
@@ -1583,6 +1630,7 @@ impl AppleMusicCoordinator {
         self.reset_position_observation();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
+        self.transport_target_index = None;
         self.playback_error = None;
         self.playback = ApplePlaybackState::Stopping {
             track_id: track_id.clone(),
@@ -1598,12 +1646,14 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return;
         };
-        let Some(target_track_id) = self.next_track_id(track_id).cloned() else {
+        let Some((target_index, target_track_id)) = self.next_track(track_id) else {
             return;
         };
+        let target_track_id = target_track_id.clone();
         self.reset_position_observation();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
+        self.transport_target_index = Some(target_index);
         self.playback_error = None;
         self.playback = ApplePlaybackState::SkippingNext {
             track_id: target_track_id.clone(),
@@ -1620,19 +1670,21 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return false;
         };
-        self.next_track_id(track_id).is_some()
+        self.next_track(track_id).is_some()
     }
 
     pub(crate) fn skip_to_previous(&mut self) {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return;
         };
-        let Some(target_track_id) = self.previous_track_id(track_id).cloned() else {
+        let Some((target_index, target_track_id)) = self.previous_track(track_id) else {
             return;
         };
+        let target_track_id = target_track_id.clone();
         self.reset_position_observation();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
+        self.transport_target_index = Some(target_index);
         self.playback_error = None;
         self.playback = ApplePlaybackState::SkippingPrevious {
             track_id: target_track_id.clone(),
@@ -1652,30 +1704,50 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return false;
         };
-        self.previous_track_id(track_id).is_some()
+        self.previous_track(track_id).is_some()
     }
 
-    fn next_track_id(&self, active_track_id: &AppleMusicId) -> Option<&AppleMusicId> {
-        let ApplePlaylistTracksState::Loaded { tracks, .. } = &self.playlist_tracks else {
+    fn next_track(&self, active_track_id: &AppleMusicId) -> Option<(usize, &AppleMusicId)> {
+        let queue = self.playback_queue.as_ref()?;
+        if queue.current_track()?.id() != active_track_id {
             return None;
-        };
-        tracks
-            .iter()
-            .position(|track| track.id() == active_track_id)
-            .and_then(|index| tracks.get(index.saturating_add(1)))
-            .map(ApplePlaylistTrack::id)
+        }
+        let index = queue.current_index.checked_add(1)?;
+        queue.track(index).map(|track| (index, track.id()))
     }
 
-    fn previous_track_id(&self, active_track_id: &AppleMusicId) -> Option<&AppleMusicId> {
-        let ApplePlaylistTracksState::Loaded { tracks, .. } = &self.playlist_tracks else {
+    fn previous_track(&self, active_track_id: &AppleMusicId) -> Option<(usize, &AppleMusicId)> {
+        let queue = self.playback_queue.as_ref()?;
+        if queue.current_track()?.id() != active_track_id {
+            return None;
+        }
+        let index = queue.current_index.checked_sub(1)?;
+        queue.track(index).map(|track| (index, track.id()))
+    }
+
+    fn playback_queue_snapshot(
+        &self,
+        playlist_id: &AppleMusicId,
+        track_id: &AppleMusicId,
+        playlist_index: usize,
+    ) -> Option<ApplePlaybackQueue> {
+        let ApplePlaylistTracksState::Loaded {
+            playlist_id: loaded_playlist_id,
+            tracks,
+        } = &self.playlist_tracks
+        else {
             return None;
         };
-        tracks
-            .iter()
-            .position(|track| track.id() == active_track_id)
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| tracks.get(index))
-            .map(ApplePlaylistTrack::id)
+        if loaded_playlist_id != playlist_id
+            || tracks.get(playlist_index).map(ApplePlaylistTrack::id) != Some(track_id)
+        {
+            return None;
+        }
+        Some(ApplePlaybackQueue {
+            playlist_id: playlist_id.clone(),
+            tracks: tracks.clone(),
+            current_index: playlist_index,
+        })
     }
 
     pub(crate) fn load_playlist_tracks(&mut self, playlist_id: AppleMusicId) {
@@ -1777,43 +1849,44 @@ impl AppleMusicCoordinator {
         if active_request != Some(response.request_id()) {
             return;
         }
-        let Some(active_track_id) = self.active_playback_track() else {
+        let Some(queue) = self.playback_queue.as_mut() else {
             return;
         };
-        if active_track_id != response.track_id() {
+        if &queue.playlist_id != response.playlist_id() {
             return;
         }
-        let duration_ms = self.active_track_duration_ms(active_track_id);
+        let Some(track) = queue.track(response.playlist_index()).cloned() else {
+            self.position_error = Some(
+                "Apple Music returned a playlist position outside the playback queue".to_owned(),
+            );
+            return;
+        };
+        queue.current_index = response.playlist_index();
+        if matches!(self.playback, ApplePlaybackState::Playing { .. }) {
+            self.playback = ApplePlaybackState::Playing {
+                track_id: track.id().clone(),
+            };
+        }
         self.position = Some(ApplePlaybackPosition {
             elapsed_ms: response.elapsed_ms(),
-            duration_ms,
+            duration_ms: track.duration_ms(),
         });
         self.position_error = None;
     }
 
     fn start_position_observation(&mut self) {
-        let Some(track_id) = self.active_playback_track().cloned() else {
+        if self.playback_queue.is_none() {
             return;
-        };
+        }
         let request_id = self.next_request_id();
         self.position_request_id = Some(request_id);
-        match self.create_position_task(request_id, &track_id) {
+        match self.create_position_task(request_id) {
             Ok(task) => self.position_task = Some(task),
             Err(error) => {
                 self.position_request_id = None;
                 self.position_error = Some(error.to_string());
             }
         }
-    }
-
-    fn active_track_duration_ms(&self, track_id: &AppleMusicId) -> Option<u64> {
-        let ApplePlaylistTracksState::Loaded { tracks, .. } = &self.playlist_tracks else {
-            return None;
-        };
-        tracks
-            .iter()
-            .find(|track| track.id() == track_id)
-            .and_then(ApplePlaylistTrack::duration_ms)
     }
 
     fn reset_position_observation(&mut self) {
@@ -2129,6 +2202,10 @@ impl AppleMusicCoordinator {
             );
             return;
         }
+        let navigated_queue = matches!(
+            self.playback,
+            ApplePlaybackState::SkippingNext { .. } | ApplePlaybackState::SkippingPrevious { .. }
+        );
         self.playback = match (&self.playback, response_status) {
             (ApplePlaybackState::Pausing { .. }, AppleTransportStatus::Paused) => {
                 ApplePlaybackState::Paused {
@@ -2162,7 +2239,14 @@ impl AppleMusicCoordinator {
                 return;
             }
         };
+        if navigated_queue
+            && let Some(target_index) = self.transport_target_index
+            && let Some(queue) = self.playback_queue.as_mut()
+        {
+            queue.current_index = target_index;
+        }
         self.transport_request_id = None;
+        self.transport_target_index = None;
         self.playback_error = None;
     }
 
@@ -2200,6 +2284,7 @@ impl AppleMusicCoordinator {
         self.playback_request_id = None;
         self.transport_task.take();
         self.transport_request_id = None;
+        self.transport_target_index = None;
         self.reset_position_observation();
         self.playback_error = Some(error);
     }
@@ -2267,8 +2352,9 @@ impl AppleMusicCoordinator {
         request_id: RequestId,
         playlist_id: &AppleMusicId,
         track_id: &AppleMusicId,
+        playlist_index: usize,
     ) -> Result<PlaybackTask, BridgeCallError> {
-        PlaybackTask::start(request_id, playlist_id, track_id)
+        PlaybackTask::start(request_id, playlist_id, track_id, playlist_index)
     }
 
     #[cfg(not(test))]
@@ -2285,9 +2371,8 @@ impl AppleMusicCoordinator {
     fn create_position_task(
         &mut self,
         request_id: RequestId,
-        track_id: &AppleMusicId,
     ) -> Result<PositionTask, BridgeCallError> {
-        PositionTask::start(request_id, track_id)
+        PositionTask::start(request_id)
     }
 
     #[cfg(test)]
@@ -2320,20 +2405,57 @@ impl AppleMusicCoordinator {
     fn create_position_task(
         &mut self,
         request_id: RequestId,
-        track_id: &AppleMusicId,
     ) -> Result<PositionTask, BridgeCallError> {
+        let fallback = self
+            .playback_queue
+            .as_ref()
+            .map(|queue| (queue.playlist_id.clone(), queue.current_index));
         match self.test_positions.pop_front() {
             Some(TestPosition::Failed) => Ok(PositionTask::failed_for_test()),
-            Some(TestPosition::Completed { elapsed_ms }) => Ok(PositionTask::completed_for_test(
-                request_id,
-                track_id.clone(),
-                elapsed_ms,
-            )),
+            Some(TestPosition::Completed { elapsed_ms }) => fallback.map_or_else(
+                || Ok(PositionTask::pending_for_test()),
+                |(playlist_id, playlist_index)| {
+                    Ok(PositionTask::completed_for_test(
+                        request_id,
+                        playlist_id,
+                        playlist_index,
+                        elapsed_ms,
+                    ))
+                },
+            ),
             Some(TestPosition::CompletedForTrack {
                 track_id,
                 elapsed_ms,
+            }) => self
+                .playback_queue
+                .as_ref()
+                .and_then(|queue| {
+                    queue
+                        .tracks
+                        .iter()
+                        .position(|track| track.id() == &track_id)
+                        .map(|playlist_index| (queue.playlist_id.clone(), playlist_index))
+                })
+                .map_or_else(
+                    || Ok(PositionTask::pending_for_test()),
+                    |(playlist_id, playlist_index)| {
+                        Ok(PositionTask::completed_for_test(
+                            request_id,
+                            playlist_id,
+                            playlist_index,
+                            elapsed_ms,
+                        ))
+                    },
+                ),
+            Some(TestPosition::CompletedForOccurrence {
+                playlist_id,
+                playlist_index,
+                elapsed_ms,
             }) => Ok(PositionTask::completed_for_test(
-                request_id, track_id, elapsed_ms,
+                request_id,
+                playlist_id,
+                playlist_index,
+                elapsed_ms,
             )),
             None => Ok(PositionTask::pending_for_test()),
         }
@@ -2345,9 +2467,10 @@ impl AppleMusicCoordinator {
         request_id: RequestId,
         playlist_id: &AppleMusicId,
         track_id: &AppleMusicId,
+        playlist_index: usize,
     ) -> Result<PlaybackTask, BridgeCallError> {
         self.test_playback_launches = self.test_playback_launches.saturating_add(1);
-        self.test_playback_request = Some((playlist_id.clone(), track_id.clone()));
+        self.test_playback_request = Some((playlist_id.clone(), track_id.clone(), playlist_index));
         Ok(match self.test_playback.unwrap_or(TestPlayback::Pending) {
             TestPlayback::Pending => PlaybackTask::pending_for_test(),
             TestPlayback::Completed => {
@@ -2450,7 +2573,9 @@ impl AppleMusicCoordinator {
     }
 
     #[cfg(test)]
-    pub(crate) const fn test_playback_request(&self) -> Option<&(AppleMusicId, AppleMusicId)> {
+    pub(crate) const fn test_playback_request(
+        &self,
+    ) -> Option<&(AppleMusicId, AppleMusicId, usize)> {
         self.test_playback_request.as_ref()
     }
 }
@@ -2459,12 +2584,12 @@ impl AppleMusicCoordinator {
 mod tests {
     use super::{
         AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState,
-        ApplePlaybackState, ApplePlaylist, ApplePlaylistTrack, ApplePlaylistTracksState,
-        AuthorisationOutcome, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
-        ConnectionSubscription, PageCursor, PageProgress, PaginationError, PlaylistPage,
-        PlaylistPager, RequestId, SubscriptionCapabilities, SubscriptionOffer, SubscriptionState,
-        TestConnection, TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport,
-        TrackPage, TransitionOutcome,
+        ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist, ApplePlaylistTrack,
+        ApplePlaylistTracksState, AuthorisationOutcome, AuthorisationStatus, CatalogPlayback,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PageProgress,
+        PaginationError, PlaylistPage, PlaylistPager, RequestId, SubscriptionCapabilities,
+        SubscriptionOffer, SubscriptionState, TestConnection, TestPlayback, TestPlaylistPage,
+        TestPosition, TestTrackPage, TestTransport, TrackPage, TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -3021,7 +3146,7 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
 
-        coordinator.play_track(playlist_id.clone(), track_id.clone());
+        coordinator.play_track(playlist_id.clone(), track_id.clone(), 0);
         assert!(matches!(
             coordinator.playback(),
             ApplePlaybackState::Preparing { track_id: active, .. } if active == &track_id
@@ -3036,7 +3161,7 @@ mod tests {
         assert_eq!(coordinator.test_playback_launches(), 1);
         assert_eq!(
             coordinator.test_playback_request(),
-            Some(&(playlist_id, track_id))
+            Some(&(playlist_id, track_id, 0))
         );
     }
 
@@ -3048,8 +3173,8 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Pending);
 
-        coordinator.play_track(playlist_id.clone(), first);
-        coordinator.play_track(playlist_id, second.clone());
+        coordinator.play_track(playlist_id.clone(), first, 0);
+        coordinator.play_track(playlist_id, second.clone(), 1);
 
         assert!(matches!(
             coordinator.playback(),
@@ -3066,7 +3191,7 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_transport(TestTransport::Paused);
-        coordinator.play_track(playlist_id, track_id.clone());
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
         assert!(!coordinator.poll());
 
         coordinator.pause();
@@ -3089,7 +3214,7 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_transport(TestTransport::Paused);
-        coordinator.play_track(playlist_id, track_id.clone());
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
         assert!(!coordinator.poll());
         coordinator.pause();
         assert!(!coordinator.poll());
@@ -3115,7 +3240,7 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_transport(TestTransport::Stopped);
-        coordinator.play_track(playlist_id, track_id.clone());
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
         assert!(!coordinator.poll());
 
         coordinator.stop();
@@ -3138,7 +3263,7 @@ mod tests {
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_transport(TestTransport::Paused);
-        coordinator.play_track(playlist_id, track_id.clone());
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
         assert!(!coordinator.poll());
         coordinator.pause();
         assert!(!coordinator.poll());
@@ -3163,7 +3288,7 @@ mod tests {
         let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.play_track(playlist_id, track_id.clone());
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
         assert!(!coordinator.poll());
         coordinator.use_test_transport(TestTransport::Playing);
 
@@ -3207,7 +3332,7 @@ mod tests {
         coordinator.load_playlist_tracks(playlist_id.clone());
         assert!(!coordinator.poll());
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.play_track(playlist_id, second);
+        coordinator.play_track(playlist_id, second, 1);
         assert!(!coordinator.poll());
         coordinator.use_test_transport(TestTransport::Playing);
 
@@ -3251,7 +3376,7 @@ mod tests {
         coordinator.load_playlist_tracks(playlist_id.clone());
         assert!(!coordinator.poll());
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.play_track(playlist_id, second);
+        coordinator.play_track(playlist_id, second, 1);
         assert!(!coordinator.poll());
         coordinator.use_test_transport(TestTransport::Playing);
 
@@ -3289,7 +3414,7 @@ mod tests {
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_positions(vec![TestPosition::Completed { elapsed_ms: 12_345 }]);
 
-        coordinator.play_track(playlist_id, track_id);
+        coordinator.play_track(playlist_id, track_id, 0);
         assert!(coordinator.poll());
         assert!(!coordinator.poll());
 
@@ -3298,6 +3423,120 @@ mod tests {
             .expect("native position should be exposed after the matching response");
         assert_eq!(position.elapsed_ms(), 12_345);
         assert_eq!(position.duration_ms(), Some(245_000));
+    }
+
+    #[test]
+    fn native_position_reconciles_a_naturally_advanced_queue_entry() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let first = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
+        let second = AppleMusicId::try_from("i.second").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                ApplePlaylistTrack::new(
+                    first.clone(),
+                    "First Light".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(245_000),
+                ),
+                ApplePlaylistTrack::new(
+                    second.clone(),
+                    "Second Sun".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(203_000),
+                ),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedForTrack {
+            track_id: second.clone(),
+            elapsed_ms: 1_250,
+        }]);
+
+        coordinator.play_track(playlist_id, first, 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id: second }
+        );
+        assert_eq!(
+            coordinator.playback_position(),
+            Some(ApplePlaybackPosition {
+                elapsed_ms: 1_250,
+                duration_ms: Some(203_000),
+            })
+        );
+    }
+
+    #[test]
+    fn playback_identity_preserves_a_duplicate_playlist_occurrence() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let duplicate = AppleMusicId::try_from("i.echo").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                ApplePlaylistTrack::new(
+                    duplicate.clone(),
+                    "Echo One".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(180_000),
+                ),
+                ApplePlaylistTrack::new(
+                    AppleMusicId::try_from("i.bridge").expect("fixture id should be valid"),
+                    "Bridge".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(200_000),
+                ),
+                ApplePlaylistTrack::new(
+                    duplicate.clone(),
+                    "Echo Two".to_owned(),
+                    "Signal Artist".to_owned(),
+                    None,
+                    Some(240_000),
+                ),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedForOccurrence {
+            playlist_id: playlist_id.clone(),
+            playlist_index: 2,
+            elapsed_ms: 5_000,
+        }]);
+
+        coordinator.play_track(playlist_id.clone(), duplicate.clone(), 2);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+
+        assert_eq!(
+            coordinator.test_playback_request(),
+            Some(&(playlist_id.clone(), duplicate, 2))
+        );
+        assert_eq!(
+            coordinator.active_playlist_occurrence(),
+            Some((&playlist_id, 2))
+        );
+        assert_eq!(
+            coordinator
+                .playback_position()
+                .and_then(ApplePlaybackPosition::duration_ms),
+            Some(240_000)
+        );
     }
 
     #[test]
@@ -3330,7 +3569,7 @@ mod tests {
         assert!(!coordinator.poll());
         coordinator.use_test_playback(TestPlayback::Completed);
         coordinator.use_test_positions(vec![TestPosition::Completed { elapsed_ms: 12_345 }]);
-        coordinator.play_track(playlist_id, first);
+        coordinator.play_track(playlist_id, first, 0);
         assert!(coordinator.poll());
         assert!(!coordinator.poll());
         assert!(coordinator.playback_position().is_some());
@@ -3342,11 +3581,11 @@ mod tests {
     }
 
     #[test]
-    fn position_for_a_different_track_cannot_replace_the_active_snapshot() {
+    fn position_for_a_different_playlist_cannot_replace_the_active_snapshot() {
         let playlist_id =
             AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
         let active = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
-        let other = AppleMusicId::try_from("i.other").expect("fixture id should be valid");
+        let other_playlist = AppleMusicId::try_from("p.other").expect("fixture id should be valid");
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
             playlist_id.clone(),
@@ -3362,12 +3601,13 @@ mod tests {
         coordinator.load_playlist_tracks(playlist_id.clone());
         assert!(!coordinator.poll());
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.use_test_positions(vec![TestPosition::CompletedForTrack {
-            track_id: other,
+        coordinator.use_test_positions(vec![TestPosition::CompletedForOccurrence {
+            playlist_id: other_playlist,
+            playlist_index: 0,
             elapsed_ms: 99_000,
         }]);
 
-        coordinator.play_track(playlist_id, active);
+        coordinator.play_track(playlist_id, active, 0);
         assert!(coordinator.poll());
         assert!(!coordinator.poll());
 
@@ -3398,7 +3638,7 @@ mod tests {
             TestPosition::Failed,
             TestPosition::Completed { elapsed_ms: 20_000 },
         ]);
-        coordinator.play_track(playlist_id, track_id);
+        coordinator.play_track(playlist_id, track_id, 0);
         assert!(coordinator.poll());
         assert!(!coordinator.poll());
         assert!(coordinator.playback_position_error().is_some());

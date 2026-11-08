@@ -1596,11 +1596,16 @@ impl PlayerView {
         cx.notify();
     }
 
-    fn play_apple_track(&mut self, id: AppleMusicId, cx: &mut Context<Self>) {
+    fn play_apple_track(
+        &mut self,
+        id: AppleMusicId,
+        playlist_index: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(playlist_id) = self.selected_apple_playlist.clone() else {
             return;
         };
-        self.apple_music.play_track(playlist_id, id);
+        self.apple_music.play_track(playlist_id, id, playlist_index);
         self.schedule_apple_music_poll(cx);
         cx.notify();
     }
@@ -4073,8 +4078,9 @@ impl Render for PlayerView {
         let apple_tracks = match self.apple_music.playlist_tracks() {
             ApplePlaylistTracksState::Loaded { tracks, .. } => tracks
                 .iter()
-                .filter(|track| apple_track_matches(track, &apple_track_query))
-                .cloned()
+                .enumerate()
+                .filter(|(_, track)| apple_track_matches(track, &apple_track_query))
+                .map(|(playlist_index, track)| (playlist_index, track.clone()))
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
@@ -4122,6 +4128,10 @@ impl Render for PlayerView {
             }
         };
         let apple_playback = self.apple_music.playback().clone();
+        let apple_active_occurrence = self
+            .apple_music
+            .active_playlist_occurrence()
+            .map(|(playlist_id, playlist_index)| (playlist_id.clone(), playlist_index));
         let apple_can_pause = matches!(&apple_playback, ApplePlaybackState::Playing { .. });
         let apple_can_resume = matches!(&apple_playback, ApplePlaybackState::Paused { .. });
         let apple_can_stop = matches!(
@@ -4158,70 +4168,34 @@ impl Render for PlayerView {
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .filter_map(|index| {
-                        let track = rendered_apple_tracks.get(index)?;
+                        let (playlist_index, track) = rendered_apple_tracks.get(index)?;
+                        let playlist_index = *playlist_index;
                         let album = track.album().unwrap_or("Unknown album");
                         let duration = apple_track_duration(track.duration_ms());
-                        let active = match &apple_playback {
-                            ApplePlaybackState::Preparing { track_id, .. }
-                            | ApplePlaybackState::Playing { track_id }
-                            | ApplePlaybackState::Pausing { track_id, .. }
-                            | ApplePlaybackState::Paused { track_id }
-                            | ApplePlaybackState::Resuming { track_id, .. }
-                            | ApplePlaybackState::Stopping { track_id, .. }
-                            | ApplePlaybackState::Stopped { track_id }
-                            | ApplePlaybackState::SkippingNext { track_id, .. }
-                            | ApplePlaybackState::SkippingPrevious { track_id, .. }
-                            | ApplePlaybackState::Failed { track_id } => track_id == track.id(),
-                            ApplePlaybackState::Idle => false,
-                        };
+                        let active = apple_active_occurrence.as_ref().is_some_and(
+                            |(playlist_id, active_index)| {
+                                Some(playlist_id) == this.selected_apple_playlist.as_ref()
+                                    && *active_index == playlist_index
+                            },
+                        );
                         let state = match &apple_playback {
-                            ApplePlaybackState::Preparing { track_id, .. }
-                                if track_id == track.id() =>
-                            {
-                                ", preparing"
-                            }
-                            ApplePlaybackState::Playing { track_id } if track_id == track.id() => {
-                                ", playing"
-                            }
-                            ApplePlaybackState::Pausing { track_id, .. }
-                                if track_id == track.id() =>
-                            {
-                                ", pausing"
-                            }
-                            ApplePlaybackState::Paused { track_id } if track_id == track.id() => {
-                                ", paused"
-                            }
-                            ApplePlaybackState::Resuming { track_id, .. }
-                                if track_id == track.id() =>
-                            {
-                                ", resuming"
-                            }
-                            ApplePlaybackState::Stopping { track_id, .. }
-                                if track_id == track.id() =>
-                            {
-                                ", stopping"
-                            }
-                            ApplePlaybackState::Stopped { track_id } if track_id == track.id() => {
-                                ", stopped"
-                            }
-                            ApplePlaybackState::SkippingNext { track_id, .. }
-                                if track_id == track.id() =>
-                            {
-                                ", skipping next"
-                            }
-                            ApplePlaybackState::SkippingPrevious { track_id, .. }
-                                if track_id == track.id() =>
-                            {
+                            ApplePlaybackState::Preparing { .. } if active => ", preparing",
+                            ApplePlaybackState::Playing { .. } if active => ", playing",
+                            ApplePlaybackState::Pausing { .. } if active => ", pausing",
+                            ApplePlaybackState::Paused { .. } if active => ", paused",
+                            ApplePlaybackState::Resuming { .. } if active => ", resuming",
+                            ApplePlaybackState::Stopping { .. } if active => ", stopping",
+                            ApplePlaybackState::Stopped { .. } if active => ", stopped",
+                            ApplePlaybackState::SkippingNext { .. } if active => ", skipping next",
+                            ApplePlaybackState::SkippingPrevious { .. } if active => {
                                 ", skipping previous"
                             }
-                            ApplePlaybackState::Failed { track_id } if track_id == track.id() => {
-                                ", playback failed"
-                            }
+                            ApplePlaybackState::Failed { .. } if active => ", playback failed",
                             _ => "",
                         };
                         let accessibility_label = format!(
                             "Play track {}: {}, by {}, album {}, duration {}{}",
-                            index + 1,
+                            playlist_index + 1,
                             track.title(),
                             track.artist(),
                             album,
@@ -4230,7 +4204,7 @@ impl Render for PlayerView {
                         );
                         let display_label = format!(
                             "{:02}  {}  /  {}  /  {}  ·  {}",
-                            index + 1,
+                            playlist_index + 1,
                             track.title(),
                             track.artist(),
                             album,
@@ -4253,7 +4227,7 @@ impl Render for PlayerView {
                             .accessibility_label(accessibility_label)
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
-                                    this.play_apple_track(track_id.clone(), cx);
+                                    this.play_apple_track(track_id.clone(), playlist_index, cx);
                                 },
                             )),
                         )
