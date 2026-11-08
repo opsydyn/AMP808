@@ -4,6 +4,7 @@ import MusicKit
 private let envelopeVersion = 1
 private let expectedBundleIdentifier = "com.opsydyn.amp808r3tr0"
 private let playlistPageSize = 50
+private let playlistTrackPageSize = 100
 
 public typealias Amp808MusicKitConnectionCallback = @convention(c) (
     UnsafeMutableRawPointer?,
@@ -53,6 +54,44 @@ private struct PlaylistPageEnvelope: Encodable {
     }
 }
 
+private struct TrackEnvelopeItem: Encodable {
+    let id: String
+    let title: String
+    let artist: String
+    let album: String?
+    let durationMS: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case artist
+        case album
+        case durationMS = "duration_ms"
+    }
+}
+
+private struct TrackPageEnvelope: Encodable {
+    let version: Int
+    let kind: String
+    let requestID: UInt64
+    let playlistID: String
+    let requestedCursor: String?
+    let nextCursor: String?
+    let tracks: [TrackEnvelopeItem]
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case kind
+        case requestID = "request_id"
+        case playlistID = "playlist_id"
+        case requestedCursor = "requested_cursor"
+        case nextCursor = "next_cursor"
+        case tracks
+        case error
+    }
+}
+
 private func sendPlaylistEnvelope(
     _ envelope: PlaylistPageEnvelope,
     completion: ConnectionCompletion
@@ -66,6 +105,28 @@ private func sendPlaylistEnvelope(
     completion.send(
         "{\"version\":\(envelopeVersion),\"kind\":\"playlist_page\",\"request_id\":\(envelope.requestID),\"requested_cursor\":null,\"next_cursor\":null,\"playlists\":[],\"error\":\"encoding_failed\"}"
     )
+}
+
+private func sendTrackEnvelope(
+    _ envelope: TrackPageEnvelope,
+    completion: ConnectionCompletion
+) {
+    if let data = try? JSONEncoder().encode(envelope),
+       let text = String(data: data, encoding: .utf8) {
+        completion.send(text)
+        return
+    }
+
+    completion.send(
+        "{\"version\":\(envelopeVersion),\"kind\":\"playlist_track_page\",\"request_id\":\(envelope.requestID),\"playlist_id\":\"\",\"requested_cursor\":null,\"next_cursor\":null,\"tracks\":[],\"error\":\"encoding_failed\"}"
+    )
+}
+
+private func durationMilliseconds(_ duration: TimeInterval?) -> UInt64? {
+    guard let duration, duration.isFinite, duration >= 0 else {
+        return nil
+    }
+    return UInt64((duration * 1_000).rounded())
 }
 
 private func httpsArtworkURL(_ artwork: Artwork?) -> String? {
@@ -245,6 +306,152 @@ public func requestPlaylistPage(
                     requestedCursor: offset == 0 ? nil : String(offset),
                     nextCursor: nil,
                     playlists: [],
+                    error: "request_failed"
+                ),
+                completion: completion
+            )
+        }
+    }
+    return 1
+}
+
+@c(amp808_music_kit_request_track_page)
+public func requestTrackPage(
+    _ requestID: UInt64,
+    _ playlistIDBytes: UnsafePointer<UInt8>?,
+    _ playlistIDLength: UInt,
+    _ offset: UInt64,
+    _ context: UnsafeMutableRawPointer?,
+    _ callback: Amp808MusicKitConnectionCallback?
+) -> UInt8 {
+    guard let callback else {
+        return 0
+    }
+    guard let usageDescription = Bundle.main.object(
+        forInfoDictionaryKey: "NSAppleMusicUsageDescription"
+    ) as? String, !usageDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 2
+    }
+    guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
+        return 3
+    }
+    guard offset <= UInt64(Int.max),
+          playlistIDLength <= UInt(Int.max),
+          let playlistIDBytes,
+          let playlistID = String(
+              bytes: UnsafeBufferPointer(
+                  start: playlistIDBytes,
+                  count: Int(playlistIDLength)
+              ),
+              encoding: .utf8
+          ),
+          !playlistID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return 4
+    }
+    let completion = ConnectionCompletion(context: context, callback: callback)
+
+    Task {
+        let requestedCursor = offset == 0 ? nil : String(offset)
+        guard #available(macOS 14.0, *) else {
+            sendTrackEnvelope(
+                TrackPageEnvelope(
+                    version: envelopeVersion,
+                    kind: "playlist_track_page",
+                    requestID: requestID,
+                    playlistID: playlistID,
+                    requestedCursor: requestedCursor,
+                    nextCursor: nil,
+                    tracks: [],
+                    error: "unsupported_system"
+                ),
+                completion: completion
+            )
+            return
+        }
+        guard MusicAuthorization.currentStatus == .authorized else {
+            sendTrackEnvelope(
+                TrackPageEnvelope(
+                    version: envelopeVersion,
+                    kind: "playlist_track_page",
+                    requestID: requestID,
+                    playlistID: playlistID,
+                    requestedCursor: requestedCursor,
+                    nextCursor: nil,
+                    tracks: [],
+                    error: "access_denied"
+                ),
+                completion: completion
+            )
+            return
+        }
+
+        do {
+            var request = MusicLibraryRequest<Playlist>()
+            request.limit = 1
+            request.filter(matching: \.id, equalTo: MusicItemID(playlistID))
+            let response = try await request.response()
+            guard let playlist = response.items.first else {
+                sendTrackEnvelope(
+                    TrackPageEnvelope(
+                        version: envelopeVersion,
+                        kind: "playlist_track_page",
+                        requestID: requestID,
+                        playlistID: playlistID,
+                        requestedCursor: requestedCursor,
+                        nextCursor: nil,
+                        tracks: [],
+                        error: "playlist_not_found"
+                    ),
+                    completion: completion
+                )
+                return
+            }
+
+            let detailedPlaylist = try await playlist.with([.entries])
+            var entries = detailedPlaylist.entries ?? []
+            let requiredCount = Int(offset) + playlistTrackPageSize
+            while entries.count < requiredCount, entries.hasNextBatch {
+                guard let next = try await entries.nextBatch(limit: playlistTrackPageSize) else {
+                    break
+                }
+                entries += next
+            }
+
+            let start = min(Int(offset), entries.count)
+            let end = min(start + playlistTrackPageSize, entries.count)
+            let tracks = entries[start..<end].map { entry in
+                TrackEnvelopeItem(
+                    id: entry.id.rawValue,
+                    title: entry.title,
+                    artist: entry.artistName,
+                    album: entry.albumTitle,
+                    durationMS: durationMilliseconds(entry.duration)
+                )
+            }
+            let hasMore = end < entries.count || entries.hasNextBatch
+            sendTrackEnvelope(
+                TrackPageEnvelope(
+                    version: envelopeVersion,
+                    kind: "playlist_track_page",
+                    requestID: requestID,
+                    playlistID: playlistID,
+                    requestedCursor: requestedCursor,
+                    nextCursor: hasMore ? String(end) : nil,
+                    tracks: tracks,
+                    error: nil
+                ),
+                completion: completion
+            )
+        } catch {
+            sendTrackEnvelope(
+                TrackPageEnvelope(
+                    version: envelopeVersion,
+                    kind: "playlist_track_page",
+                    requestID: requestID,
+                    playlistID: playlistID,
+                    requestedCursor: requestedCursor,
+                    nextCursor: nil,
+                    tracks: [],
                     error: "request_failed"
                 ),
                 completion: completion

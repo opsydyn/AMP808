@@ -273,6 +273,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       requests a developer token, music-user token, private key, team ID, or key ID.
 - [x] All playlist pages load in order; repeated or malformed cursors fail without
       presenting partial data as complete.
+- [x] Selecting a playlist loads all ordered playlist entries through validated pages and presents
+      a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
 - [ ] Selecting a playable song or playlist sets the system music queue and begins playback through
       `SystemMusicPlayer`; transport state remains observable after the request completes.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
@@ -409,12 +411,38 @@ Read-only playlist-gallery evidence recorded on 2026-11-08:
   loading, system playback, manual keyboard/VoiceOver acceptance, denial/revocation, and relaunch
   persistence remain open.
 
+Selected-playlist track-browser evidence recorded on 2026-11-08:
+
+- MusicKit playlist entries are loaded through the playlist relationship and its documented
+  `MusicItemCollection` pagination. The versioned FFI envelope preserves opaque entry identity,
+  playlist identity, order, duplicates, title, artist, optional album, optional duration, request
+  identity, and cursor progression; malformed identifiers, repeated cursors, wrong-playlist pages,
+  stale selections, and provider failures remain typed and redacted.
+- The GPUI Settings surface now uses a master/detail flow. The bounded playlist gallery is replaced
+  on selection by a visible track browser with a `CHANGE PLAYLIST` recovery action, fuzzy search
+  across title/artist/album, honest `Unknown album` and `--:--` fallbacks, and a virtualized result
+  list with status and list-item accessibility semantics.
+- The development-signed app loaded a real selected playlist containing 48 entries and exposed
+  ordered title, artist, album, and duration metadata. A live multi-term artist query reduced the
+  status to `1 of 48 tracks shown`, and the return action restored the playlist gallery. No
+  playback or library mutation was performed.
+- Focused Apple and GPUI tests pass, strict desktop Clippy passes with warnings denied apart from
+  the repository's explicit dead-code allowance, formatting and `git diff --check` pass, and the
+  full workspace passes 611 tests with 3 live-only tests ignored. The signed bundle validator also
+  passes.
+- This qualifies read-only selected-playlist loading, pagination, search, virtualization,
+  master/detail recovery, and live metadata display. `SystemMusicPlayer` handoff, manual
+  keyboard/VoiceOver acceptance, denial/revocation, offline/failure, and relaunch persistence
+  remain separate gates.
+
 Official Apple references checked on 2026-11-07:
 
 - <https://developer.apple.com/help/account/services/musickit/>
 - <https://developer.apple.com/documentation/musickit/musicauthorization>
 - <https://developer.apple.com/documentation/musickit/using-automatic-token-generation-for-apple-music-api>
 - <https://developer.apple.com/documentation/applemusicapi/get-all-library-playlists>
+- <https://developer.apple.com/documentation/musickit/playlist/entries>
+- <https://developer.apple.com/documentation/musickit/musicitemcollection>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/bundleresources/information-property-list/nsapplemusicusagedescription>

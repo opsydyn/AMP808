@@ -13,9 +13,9 @@ use std::{
 use serde::Deserialize;
 
 use super::{
-    AppleArtworkUrl, AppleMusicId, ApplePlaylist, AuthorisationStatus, CatalogPlayback,
-    CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PlaylistPage, RequestId,
-    SubscriptionCapabilities, SubscriptionOffer,
+    AppleArtworkUrl, AppleMusicId, ApplePlaylist, ApplePlaylistTrack, AuthorisationStatus,
+    CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
+    PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -30,6 +30,11 @@ struct ConnectionCallbackContext {
 #[cfg(not(test))]
 struct PlaylistCallbackContext {
     sender: mpsc::Sender<Result<PlaylistPageResponse, BridgeCallError>>,
+}
+
+#[cfg(not(test))]
+struct TrackCallbackContext {
+    sender: mpsc::Sender<Result<TrackPageResponse, BridgeCallError>>,
 }
 
 /// Owns one allocation created by the Swift bridge.
@@ -145,6 +150,29 @@ struct WirePlaylistPage {
     requested_cursor: Option<String>,
     next_cursor: Option<String>,
     playlists: Vec<WirePlaylist>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTrack {
+    id: String,
+    title: String,
+    artist: String,
+    album: Option<String>,
+    duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTrackPage {
+    version: u16,
+    kind: String,
+    request_id: u64,
+    playlist_id: String,
+    requested_cursor: Option<String>,
+    next_cursor: Option<String>,
+    tracks: Vec<WireTrack>,
     error: Option<String>,
 }
 
@@ -436,6 +464,96 @@ impl PlaylistPageResponse {
     }
 }
 
+/// Contains one validated page of entries for a selected Apple Music playlist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrackPageResponse {
+    request_id: RequestId,
+    requested_cursor: Option<PageCursor>,
+    page: TrackPage,
+}
+
+impl TrackPageResponse {
+    fn parse(bytes: &[u8]) -> Result<Self, BridgeProtocolError> {
+        if bytes.len() > MAX_BRIDGE_ENVELOPE_BYTES {
+            return Err(BridgeProtocolError::EnvelopeTooLarge {
+                actual: bytes.len(),
+                maximum: MAX_BRIDGE_ENVELOPE_BYTES,
+            });
+        }
+        let text = str::from_utf8(bytes).map_err(BridgeProtocolError::InvalidUtf8)?;
+        let wire: WireTrackPage =
+            serde_json::from_str(text).map_err(BridgeProtocolError::MalformedEnvelope)?;
+        if wire.version != CAPABILITY_ENVELOPE_VERSION {
+            return Err(BridgeProtocolError::UnsupportedVersion);
+        }
+        if wire.kind != "playlist_track_page" {
+            return Err(BridgeProtocolError::UnexpectedKind);
+        }
+        if wire.error.is_some() {
+            return Err(BridgeProtocolError::TrackRequestFailed);
+        }
+        let playlist_id = AppleMusicId::try_from(wire.playlist_id.as_str())
+            .map_err(|_error| BridgeProtocolError::InvalidPlaylistIdentifier)?;
+        let requested_cursor = wire
+            .requested_cursor
+            .as_deref()
+            .map(PageCursor::try_from)
+            .transpose()
+            .map_err(|_error| BridgeProtocolError::InvalidPlaylistCursor)?;
+        let next_cursor = wire
+            .next_cursor
+            .as_deref()
+            .map(PageCursor::try_from)
+            .transpose()
+            .map_err(|_error| BridgeProtocolError::InvalidPlaylistCursor)?;
+        let tracks = wire
+            .tracks
+            .into_iter()
+            .map(|track| {
+                let id = AppleMusicId::try_from(track.id.as_str())
+                    .map_err(|_error| BridgeProtocolError::InvalidTrackIdentifier)?;
+                Ok(ApplePlaylistTrack::new(
+                    id,
+                    track.title,
+                    track.artist,
+                    track.album,
+                    track.duration_ms,
+                ))
+            })
+            .collect::<Result<Vec<_>, BridgeProtocolError>>()?;
+        Ok(Self {
+            request_id: RequestId::new(wire.request_id),
+            requested_cursor,
+            page: TrackPage::new(playlist_id, tracks, next_cursor),
+        })
+    }
+
+    pub(crate) const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub(crate) const fn requested_cursor(&self) -> Option<&PageCursor> {
+        self.requested_cursor.as_ref()
+    }
+
+    pub(crate) fn into_page(self) -> TrackPage {
+        self.page
+    }
+
+    #[cfg(test)]
+    fn completed_for_test(
+        request_id: RequestId,
+        requested_cursor: Option<PageCursor>,
+        page: TrackPage,
+    ) -> Self {
+        Self {
+            request_id,
+            requested_cursor,
+            page,
+        }
+    }
+}
+
 fn require_no_subscription(
     wire: &WireConnection<'_>,
     has_capabilities: bool,
@@ -481,7 +599,9 @@ pub(crate) enum BridgeProtocolError {
     InconsistentConnection,
     InvalidPlaylistCursor,
     InvalidPlaylistIdentifier,
+    InvalidTrackIdentifier,
     PlaylistRequestFailed,
+    TrackRequestFailed,
 }
 
 impl fmt::Display for BridgeProtocolError {
@@ -517,8 +637,14 @@ impl fmt::Display for BridgeProtocolError {
             Self::InvalidPlaylistIdentifier => {
                 formatter.write_str("Apple Music returned an invalid playlist identifier")
             }
+            Self::InvalidTrackIdentifier => {
+                formatter.write_str("Apple Music returned an invalid playlist entry identifier")
+            }
             Self::PlaylistRequestFailed => {
                 formatter.write_str("Apple Music could not load the playlist library")
+            }
+            Self::TrackRequestFailed => {
+                formatter.write_str("Apple Music could not load the selected playlist")
             }
         }
     }
@@ -536,7 +662,9 @@ impl Error for BridgeProtocolError {
             | Self::InconsistentConnection
             | Self::InvalidPlaylistCursor
             | Self::InvalidPlaylistIdentifier
-            | Self::PlaylistRequestFailed => None,
+            | Self::InvalidTrackIdentifier
+            | Self::PlaylistRequestFailed
+            | Self::TrackRequestFailed => None,
         }
     }
 }
@@ -761,6 +889,103 @@ impl PlaylistTask {
     }
 }
 
+/// Receives one terminal page from a selected Apple Music playlist.
+pub(crate) struct TrackTask {
+    receiver: mpsc::Receiver<Result<TrackPageResponse, BridgeCallError>>,
+    #[cfg(test)]
+    _test_sender: Option<mpsc::Sender<Result<TrackPageResponse, BridgeCallError>>>,
+}
+
+impl TrackTask {
+    #[cfg(all(amp808_music_kit_bridge, not(test)))]
+    pub(crate) fn start(
+        request_id: RequestId,
+        playlist_id: &AppleMusicId,
+        requested_cursor: Option<&PageCursor>,
+    ) -> Result<Self, BridgeCallError> {
+        let offset = requested_cursor.map_or(Ok(0_u64), |cursor| {
+            cursor
+                .as_str()
+                .parse::<u64>()
+                .map_err(|_error| BridgeCallError::InvalidPlaylistCursor)
+        })?;
+        let playlist_id = playlist_id.as_str().as_bytes();
+        let (sender, receiver) = mpsc::channel();
+        let context = Box::new(TrackCallbackContext { sender });
+        let context = Box::into_raw(context).cast::<c_void>();
+        // SAFETY: the string bytes remain live for the duration of the synchronous bridge call;
+        // Swift copies them before returning. The unique callback context is consumed once.
+        let accepted = unsafe {
+            amp808_music_kit_request_track_page(
+                request_id.value(),
+                playlist_id.as_ptr(),
+                playlist_id.len(),
+                offset,
+                context,
+                track_page_callback,
+            )
+        };
+        if accepted != 1 {
+            // SAFETY: a rejected request did not retain the unique context allocation.
+            drop(unsafe { Box::from_raw(context.cast::<TrackCallbackContext>()) });
+            return Err(match accepted {
+                2 => BridgeCallError::MissingUsageDescription,
+                3 => BridgeCallError::UnexpectedBundleIdentifier,
+                _ => BridgeCallError::StartRejected,
+            });
+        }
+        Ok(Self {
+            receiver,
+            #[cfg(test)]
+            _test_sender: None,
+        })
+    }
+
+    #[cfg(all(not(amp808_music_kit_bridge), not(test)))]
+    pub(crate) const fn start(
+        _request_id: RequestId,
+        _playlist_id: &AppleMusicId,
+        _requested_cursor: Option<&PageCursor>,
+    ) -> Result<Self, BridgeCallError> {
+        Err(BridgeCallError::Unavailable)
+    }
+
+    pub(crate) fn try_recv(
+        &self,
+    ) -> Result<Result<TrackPageResponse, BridgeCallError>, mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_for_test() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            receiver,
+            _test_sender: Some(sender),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_for_test(
+        request_id: RequestId,
+        requested_cursor: Option<PageCursor>,
+        page: TrackPage,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(TrackPageResponse::completed_for_test(
+                request_id,
+                requested_cursor,
+                page,
+            )))
+            .expect("the test track receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+}
+
 /// Consumes one native callback context and sends one validated terminal result.
 ///
 /// # Safety
@@ -838,6 +1063,35 @@ unsafe fn deliver_playlist_page(
     let _ = context.sender.send(result);
 }
 
+#[cfg(not(test))]
+unsafe fn deliver_track_page(
+    context: *mut c_void,
+    pointer: *mut u8,
+    length: usize,
+    release: BridgeRelease,
+) {
+    let Some(context) = NonNull::new(context.cast::<TrackCallbackContext>()) else {
+        if !pointer.is_null() {
+            // SAFETY: the callback transfers its unique response allocation.
+            unsafe { release(pointer) };
+        }
+        return;
+    };
+    // SAFETY: the FFI contract transfers the unique context back exactly once.
+    let context = unsafe { Box::from_raw(context.as_ptr()) };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: the callback transfers one matching bridge allocation to this owner.
+        let buffer = unsafe { OwnedBridgeBuffer::from_raw_parts(pointer, length, release) }
+            .map_err(|_error| BridgeCallError::MissingResponse)?;
+        let bytes = buffer
+            .as_bounded_bytes()
+            .map_err(BridgeCallError::Protocol)?;
+        TrackPageResponse::parse(bytes).map_err(BridgeCallError::Protocol)
+    }))
+    .unwrap_or(Err(BridgeCallError::CallbackPanicked));
+    let _ = context.sender.send(result);
+}
+
 #[cfg(amp808_music_kit_bridge)]
 unsafe extern "C" {
     fn amp808_music_kit_capability_probe(request_id: u64, output_length: *mut usize) -> *mut u8;
@@ -849,6 +1103,15 @@ unsafe extern "C" {
     #[cfg(not(test))]
     fn amp808_music_kit_request_playlist_page(
         request_id: u64,
+        offset: u64,
+        context: *mut c_void,
+        callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
+    ) -> u8;
+    #[cfg(not(test))]
+    fn amp808_music_kit_request_track_page(
+        request_id: u64,
+        playlist_id: *const u8,
+        playlist_id_length: usize,
         offset: u64,
         context: *mut c_void,
         callback: unsafe extern "C" fn(*mut c_void, *mut u8, usize),
@@ -868,6 +1131,13 @@ unsafe extern "C" fn playlist_page_callback(context: *mut c_void, pointer: *mut 
     // SAFETY: Swift invokes this exactly once with the unique context supplied by
     // `PlaylistTask::start` and transfers its matching response allocation to Rust.
     unsafe { deliver_playlist_page(context, pointer, length, amp808_music_kit_release_buffer) };
+}
+
+#[cfg(all(amp808_music_kit_bridge, not(test)))]
+unsafe extern "C" fn track_page_callback(context: *mut c_void, pointer: *mut u8, length: usize) {
+    // SAFETY: Swift invokes this exactly once with the unique context supplied by
+    // `TrackTask::start` and transfers its matching response allocation to Rust.
+    unsafe { deliver_track_page(context, pointer, length, amp808_music_kit_release_buffer) };
 }
 
 #[cfg(amp808_music_kit_bridge)]
@@ -908,7 +1178,8 @@ mod tests {
     use super::{
         BridgeCallError, BridgeProtocolError, CapabilityResponse, ConnectionCallbackContext,
         ConnectionResponse, ConnectionTask, MAX_BRIDGE_ENVELOPE_BYTES, OwnedBridgeBuffer,
-        PlaylistPageResponse, SubscriptionResponse, deliver_connection, probe_capability,
+        PlaylistPageResponse, SubscriptionResponse, TrackPageResponse, deliver_connection,
+        probe_capability,
     };
     use crate::apple_music::{
         AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
@@ -1033,6 +1304,26 @@ mod tests {
         let page = response.into_page();
         assert_eq!(page.playlists().len(), 1);
         assert_eq!(page.playlists()[0].artwork_url(), None);
+    }
+
+    #[test]
+    fn track_page_envelope_preserves_playlist_entry_metadata_and_order() {
+        let response = TrackPageResponse::parse(
+            br#"{"version":1,"kind":"playlist_track_page","request_id":53,"playlist_id":"p.cosmic","requested_cursor":null,"next_cursor":"2","tracks":[{"id":"i.first","title":"First Light","artist":"Signal Artist","album":"Orbit One","duration_ms":183500},{"id":"i.second","title":"Second Sun","artist":"Signal Artist","album":null,"duration_ms":null}],"error":null}"#,
+        )
+        .expect("a supported track page should parse");
+
+        assert_eq!(response.request_id(), RequestId::new(53));
+        let page = response.into_page();
+        assert_eq!(page.playlist_id.as_str(), "p.cosmic");
+        assert_eq!(page.tracks.len(), 2);
+        assert_eq!(page.tracks[0].title(), "First Light");
+        assert_eq!(page.tracks[0].duration_ms(), Some(183_500));
+        assert_eq!(page.tracks[1].album(), None);
+        assert_eq!(
+            page.next_cursor.map(|cursor| cursor.0),
+            Some("2".to_owned())
+        );
     }
 
     #[test]
