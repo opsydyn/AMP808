@@ -288,8 +288,9 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
       the request completes. Pause, resume, stop, previous, and next use the same typed,
       identity-checked transport boundary and expose observable transitional and terminal states.
-      Native elapsed time is exposed through an accessible progress indicator and remains stable
-      while paused.
+      Bounded relative seeking uses that boundary only when native elapsed time and duration are
+      known. Native elapsed time is exposed through an accessible progress indicator and remains
+      stable while paused.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -661,6 +662,38 @@ Whole-playlist activation evidence recorded on 2026-11-08:
   Seeking, repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance
   remain separate work.
 
+Apple playback seeking evidence recorded on 2026-11-08:
+
+- The coordinator accepts relative seek intent only while Apple playback is Playing and both
+  authoritative elapsed time and a positive current-entry duration are available. It clamps the
+  target into the current entry, clears the superseded position observation, exposes an explicit
+  `Seeking` state, and returns to Playing only after the identity-checked MusicKit transport
+  response. Missing timing data causes a no-op rather than a fabricated local clock.
+- The existing transport boundary now carries a typed `Seek { position_ms }` command as bridge
+  command 5 with an unsigned millisecond payload. Existing pause, resume, stop, next, and previous
+  commands retain codes 0 through 4 and a zero payload. Swift assigns the converted seconds to
+  `ApplicationMusicPlayer.playbackTime`; subsequent position polling remains the authoritative
+  result instead of treating the requested target as proof of completion.
+- GPUI exposes keyboard-focusable `Seek Apple Music back 10 seconds` and
+  `Seek Apple Music forward 10 seconds` buttons only while seek prerequisites hold. Live visual
+  inspection found the first layout pushed Pause and Stop below the fixed footer. The corrected
+  build groups seek, queue navigation, Pause, and Stop in one wrapping transport row so all five
+  controls remain visible at the default window size.
+- Coordinator tests cover target calculation, native confirmation, missing-position rejection,
+  and duration clamping. A macOS boundary test covers command and payload encoding, while the GPUI
+  interaction test covers both accessible controls and the observable Seeking-to-Playing
+  transition. The desktop suite passes 238 tests, strict focused Clippy passes with warnings
+  denied apart from the repository's explicit dead-code allowance, the full locked workspace
+  passes, Swift 6 bridge tests pass with warnings denied, and the signed bundle passes validation.
+- In the first signed run, +10 advanced progress from 00:01 to 00:14 and -10 moved it back to
+  00:08, proving both native directions before the layout defect was corrected. In the final
+  signed build, all five controls were visible without scrolling, +10 advanced progress from
+  00:06 to 00:21, and the visible Stop control removed progress and exposed
+  `Apple Music playback stopped`.
+- This qualifies bounded relative seeking during active Apple playback. Paused seeking,
+  repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance remain
+  separate work.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
@@ -670,6 +703,7 @@ Official Apple references checked through 2026-11-08:
 - <https://developer.apple.com/documentation/musickit/playlist/entries>
 - <https://developer.apple.com/documentation/musickit/musicitemcollection>
 - <https://developer.apple.com/documentation/musickit/applicationmusicplayer>
+- <https://developer.apple.com/documentation/musickit/musicplayer/playbacktime>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>

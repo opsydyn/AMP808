@@ -839,6 +839,7 @@ public func playTrack(
 public func controlPlayback(
     _ requestID: UInt64,
     _ command: UInt8,
+    _ positionMilliseconds: UInt64,
     _ trackIDBytes: UnsafePointer<UInt8>?,
     _ trackIDLength: UInt,
     _ context: UnsafeMutableRawPointer?,
@@ -855,7 +856,7 @@ public func controlPlayback(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard command <= 4 else {
+    guard command <= 5 else {
         return 4
     }
     guard trackIDLength <= UInt(Int.max),
@@ -997,6 +998,19 @@ public func controlPlayback(
                     completion: completion
                 )
             }
+        case 5:
+            player.playbackTime = TimeInterval(positionMilliseconds) / 1_000
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "playing",
+                    error: nil
+                ),
+                completion: completion
+            )
         default:
             preconditionFailure("validated MusicKit transport command became invalid")
         }

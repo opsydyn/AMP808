@@ -1631,6 +1631,12 @@ impl PlayerView {
         cx.notify();
     }
 
+    fn seek_apple_playback_by(&mut self, delta_ms: i64, cx: &mut Context<Self>) {
+        self.apple_music.seek_by(delta_ms);
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
     fn stop_apple_playback(&mut self, cx: &mut Context<Self>) {
         self.apple_music.stop();
         self.schedule_apple_music_poll(cx);
@@ -4130,6 +4136,7 @@ impl Render for PlayerView {
             ApplePlaybackState::SkippingPrevious { .. } => {
                 Some("Skipping to previous Apple Music track".to_owned())
             }
+            ApplePlaybackState::Seeking { .. } => Some("Seeking Apple Music playback".to_owned()),
             ApplePlaybackState::Failed { .. } => {
                 Some(self.apple_music.playback_error().map_or_else(
                     || "Apple Music playback could not start".to_owned(),
@@ -4150,6 +4157,12 @@ impl Render for PlayerView {
         );
         let apple_can_skip_to_previous = self.apple_music.can_skip_to_previous();
         let apple_can_skip_to_next = self.apple_music.can_skip_to_next();
+        let apple_can_seek = matches!(&apple_playback, ApplePlaybackState::Playing { .. })
+            && self
+                .apple_music
+                .playback_position()
+                .and_then(|position| position.duration_ms())
+                .is_some_and(|duration_ms| duration_ms > 0);
         let apple_playback_progress = self.apple_music.playback_position().map(|position| {
             let elapsed = format_time(position.elapsed_ms() as f64 / 1_000.0);
             let duration = position.duration_ms().map_or_else(
@@ -4200,6 +4213,7 @@ impl Render for PlayerView {
                             ApplePlaybackState::SkippingPrevious { .. } if active => {
                                 ", skipping previous"
                             }
+                            ApplePlaybackState::Seeking { .. } if active => ", seeking",
                             ApplePlaybackState::Failed { .. } if active => ", playback failed",
                             _ => "",
                         };
@@ -4248,6 +4262,121 @@ impl Render for PlayerView {
         .w_full()
         .h(px(220.0))
         .track_scroll(&apple_track_scroll);
+        let apple_has_transport_controls = apple_can_seek
+            || apple_can_skip_to_previous
+            || apple_can_skip_to_next
+            || apple_can_pause
+            || apple_can_resume
+            || apple_can_stop;
+        let apple_transport_controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .when(apple_can_seek, |controls| {
+                controls
+                    .child(
+                        hardware_button(
+                            "settings-seek-back-apple-playback",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("-10S APPLE")
+                        .accessibility_label("Seek Apple Music back 10 seconds")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.seek_apple_playback_by(-10_000, cx);
+                        })),
+                    )
+                    .child(
+                        hardware_button(
+                            "settings-seek-forward-apple-playback",
+                            HardwareButtonTone::Neutral,
+                            self.skin,
+                            cx,
+                        )
+                        .label("+10S APPLE")
+                        .accessibility_label("Seek Apple Music forward 10 seconds")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.seek_apple_playback_by(10_000, cx);
+                        })),
+                    )
+            })
+            .when(apple_can_skip_to_previous, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-previous-apple-track",
+                        HardwareButtonTone::Neutral,
+                        self.skin,
+                        cx,
+                    )
+                    .label("PREVIOUS APPLE")
+                    .accessibility_label("Play previous Apple Music track")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.play_previous_apple_track(cx);
+                    })),
+                )
+            })
+            .when(apple_can_skip_to_next, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-next-apple-track",
+                        HardwareButtonTone::Neutral,
+                        self.skin,
+                        cx,
+                    )
+                    .label("NEXT APPLE")
+                    .accessibility_label("Play next Apple Music track")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.play_next_apple_track(cx);
+                    })),
+                )
+            })
+            .when(apple_can_pause, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-pause-apple-playback",
+                        HardwareButtonTone::Primary,
+                        self.skin,
+                        cx,
+                    )
+                    .label("PAUSE APPLE")
+                    .accessibility_label("Pause Apple Music playback")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pause_apple_playback(cx);
+                    })),
+                )
+            })
+            .when(apple_can_resume, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-resume-apple-playback",
+                        HardwareButtonTone::Primary,
+                        self.skin,
+                        cx,
+                    )
+                    .label("RESUME APPLE")
+                    .accessibility_label("Resume Apple Music playback")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.resume_apple_playback(cx);
+                    })),
+                )
+            })
+            .when(apple_can_stop, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-stop-apple-playback",
+                        HardwareButtonTone::Neutral,
+                        self.skin,
+                        cx,
+                    )
+                    .label("STOP APPLE")
+                    .accessibility_label("Stop Apple Music playback")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.stop_apple_playback(cx);
+                    })),
+                )
+            });
         let apple_track_panel = div()
             .id("settings-apple-playlist-tracks")
             .test_support()
@@ -4397,80 +4526,8 @@ impl Render for PlayerView {
                         .child(error),
                 )
             })
-            .when(apple_can_skip_to_previous, |panel| {
-                panel.child(
-                    hardware_button(
-                        "settings-previous-apple-track",
-                        HardwareButtonTone::Neutral,
-                        self.skin,
-                        cx,
-                    )
-                    .label("PREVIOUS APPLE")
-                    .accessibility_label("Play previous Apple Music track")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.play_previous_apple_track(cx);
-                    })),
-                )
-            })
-            .when(apple_can_skip_to_next, |panel| {
-                panel.child(
-                    hardware_button(
-                        "settings-next-apple-track",
-                        HardwareButtonTone::Neutral,
-                        self.skin,
-                        cx,
-                    )
-                    .label("NEXT APPLE")
-                    .accessibility_label("Play next Apple Music track")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.play_next_apple_track(cx);
-                    })),
-                )
-            })
-            .when(apple_can_pause, |panel| {
-                panel.child(
-                    hardware_button(
-                        "settings-pause-apple-playback",
-                        HardwareButtonTone::Primary,
-                        self.skin,
-                        cx,
-                    )
-                    .label("PAUSE APPLE")
-                    .accessibility_label("Pause Apple Music playback")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.pause_apple_playback(cx);
-                    })),
-                )
-            })
-            .when(apple_can_resume, |panel| {
-                panel.child(
-                    hardware_button(
-                        "settings-resume-apple-playback",
-                        HardwareButtonTone::Primary,
-                        self.skin,
-                        cx,
-                    )
-                    .label("RESUME APPLE")
-                    .accessibility_label("Resume Apple Music playback")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.resume_apple_playback(cx);
-                    })),
-                )
-            })
-            .when(apple_can_stop, |panel| {
-                panel.child(
-                    hardware_button(
-                        "settings-stop-apple-playback",
-                        HardwareButtonTone::Neutral,
-                        self.skin,
-                        cx,
-                    )
-                    .label("STOP APPLE")
-                    .accessibility_label("Stop Apple Music playback")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.stop_apple_playback(cx);
-                    })),
-                )
+            .when(apple_has_transport_controls, |panel| {
+                panel.child(apple_transport_controls)
             })
             .when(apple_track_count > 0, |panel| panel.child(apple_track_list));
         let selected_apple_playlist = self.selected_apple_playlist.clone();
@@ -5889,6 +5946,35 @@ mod tests {
                 window.find("settings-next-apple-track").label(),
                 Some("Play next Apple Music track")
             );
+            assert_eq!(
+                window.find("settings-seek-back-apple-playback").label(),
+                Some("Seek Apple Music back 10 seconds")
+            );
+            assert_eq!(
+                window.find("settings-seek-forward-apple-playback").label(),
+                Some("Seek Apple Music forward 10 seconds")
+            );
+            window.click("settings-seek-forward-apple-playback", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Seeking {
+                        target_ms: 22_345,
+                        ..
+                    }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { .. }
+                ));
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
             window.click("settings-next-apple-track", cx);
         })
         .expect("test window remains available");

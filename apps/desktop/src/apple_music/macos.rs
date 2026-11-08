@@ -12,13 +12,11 @@ use std::{
 
 use serde::Deserialize;
 
-#[cfg(not(test))]
-use super::AppleTransportCommand;
 use super::{
     AppleArtworkUrl, AppleMusicId, AppleObservedPlaybackStatus, ApplePlaylist, ApplePlaylistTrack,
-    AppleTransportStatus, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
-    ConnectionSubscription, PageCursor, PlaylistPage, RequestId, SubscriptionCapabilities,
-    SubscriptionOffer, TrackPage,
+    AppleTransportCommand, AppleTransportStatus, AuthorisationStatus, CatalogPlayback,
+    CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PlaylistPage, RequestId,
+    SubscriptionCapabilities, SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -1381,6 +1379,17 @@ pub(crate) struct TransportTask {
     _test_sender: Option<mpsc::Sender<Result<TransportResponse, BridgeCallError>>>,
 }
 
+const fn transport_bridge_arguments(command: AppleTransportCommand) -> (u8, u64) {
+    match command {
+        AppleTransportCommand::Pause => (0, 0),
+        AppleTransportCommand::Resume => (1, 0),
+        AppleTransportCommand::Stop => (2, 0),
+        AppleTransportCommand::Next => (3, 0),
+        AppleTransportCommand::Previous => (4, 0),
+        AppleTransportCommand::Seek { position_ms } => (5, position_ms),
+    }
+}
+
 impl TransportTask {
     #[cfg(all(amp808_music_kit_bridge, not(test)))]
     pub(crate) fn start(
@@ -1392,18 +1401,14 @@ impl TransportTask {
         let (sender, receiver) = mpsc::channel();
         let context = Box::new(TransportCallbackContext { sender });
         let context = Box::into_raw(context).cast::<c_void>();
+        let (command, position_ms) = transport_bridge_arguments(command);
         // SAFETY: the identifier bytes remain live for the synchronous bridge call. Swift copies
         // them before returning, and the unique callback context is consumed exactly once.
         let accepted = unsafe {
             amp808_music_kit_transport(
                 request_id.value(),
-                match command {
-                    AppleTransportCommand::Pause => 0,
-                    AppleTransportCommand::Resume => 1,
-                    AppleTransportCommand::Stop => 2,
-                    AppleTransportCommand::Next => 3,
-                    AppleTransportCommand::Previous => 4,
-                },
+                command,
+                position_ms,
                 track_id.as_ptr(),
                 track_id.len(),
                 context,
@@ -1832,6 +1837,7 @@ unsafe extern "C" {
     fn amp808_music_kit_transport(
         request_id: u64,
         command: u8,
+        position_ms: u64,
         track_id: *const u8,
         track_id_length: usize,
         context: *mut c_void,
@@ -1928,11 +1934,12 @@ mod tests {
         ConnectionResponse, ConnectionTask, MAX_BRIDGE_ENVELOPE_BYTES, OwnedBridgeBuffer,
         PlaybackResponse, PlaylistPageResponse, PositionResponse, SubscriptionResponse,
         TrackPageResponse, TransportResponse, deliver_connection, probe_capability,
+        transport_bridge_arguments,
     };
     use crate::apple_music::{
-        AppleObservedPlaybackStatus, AppleTransportStatus, AuthorisationStatus, CatalogPlayback,
-        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, RequestId,
-        SubscriptionCapabilities, SubscriptionOffer,
+        AppleObservedPlaybackStatus, AppleTransportCommand, AppleTransportStatus,
+        AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+        ConnectionSubscription, PageCursor, RequestId, SubscriptionCapabilities, SubscriptionOffer,
     };
 
     static RELEASE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -1940,6 +1947,16 @@ mod tests {
     static NULL_RELEASE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static CONNECTION_RELEASE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static CONNECTION_BUFFER_LENGTH: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn seek_transport_encoding_carries_the_target_milliseconds() {
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::Seek {
+                position_ms: 22_000,
+            }),
+            (5, 22_000)
+        );
+    }
 
     unsafe extern "C" fn release_test_buffer(pointer: *mut u8) {
         RELEASE_COUNT.fetch_add(1, Ordering::SeqCst);

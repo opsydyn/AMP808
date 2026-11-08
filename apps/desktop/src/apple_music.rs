@@ -786,6 +786,7 @@ enum AppleTransportCommand {
     Stop,
     Next,
     Previous,
+    Seek { position_ms: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -842,6 +843,11 @@ pub(crate) enum ApplePlaybackState {
     SkippingPrevious {
         track_id: AppleMusicId,
         request_id: RequestId,
+    },
+    Seeking {
+        track_id: AppleMusicId,
+        request_id: RequestId,
+        target_ms: u64,
     },
     Failed {
         track_id: AppleMusicId,
@@ -1483,6 +1489,8 @@ pub(crate) struct AppleMusicCoordinator {
     #[cfg(test)]
     test_transport: Option<TestTransport>,
     #[cfg(test)]
+    test_transport_request: Option<AppleTransportCommand>,
+    #[cfg(test)]
     test_positions: VecDeque<TestPosition>,
 }
 
@@ -1597,6 +1605,8 @@ impl AppleMusicCoordinator {
             test_playback_request: None,
             #[cfg(test)]
             test_transport: None,
+            #[cfg(test)]
+            test_transport_request: None,
             #[cfg(test)]
             test_positions: VecDeque::new(),
         }
@@ -1811,6 +1821,47 @@ impl AppleMusicCoordinator {
             return false;
         };
         self.previous_track(track_id).is_some()
+    }
+
+    pub(crate) fn seek_by(&mut self, delta_ms: i64) {
+        let ApplePlaybackState::Playing { track_id } = &self.playback else {
+            return;
+        };
+        let Some(position) = self.position else {
+            return;
+        };
+        let Some(duration_ms) = position.duration_ms().filter(|duration| *duration > 0) else {
+            return;
+        };
+        let target_ms = if delta_ms.is_negative() {
+            position
+                .elapsed_ms()
+                .saturating_sub(delta_ms.unsigned_abs())
+        } else {
+            position.elapsed_ms().saturating_add(delta_ms as u64)
+        }
+        .min(duration_ms);
+        let track_id = track_id.clone();
+        self.reset_position_observation();
+        let request_id = self.next_request_id();
+        self.transport_request_id = Some(request_id);
+        self.transport_target_index = None;
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::Seeking {
+            track_id: track_id.clone(),
+            request_id,
+            target_ms,
+        };
+        match self.create_transport_task(
+            request_id,
+            &track_id,
+            AppleTransportCommand::Seek {
+                position_ms: target_ms,
+            },
+        ) {
+            Ok(task) => self.transport_task = Some(task),
+            Err(error) => self.fail_playback(track_id, error.to_string()),
+        }
     }
 
     fn next_track(&self, active_track_id: &AppleMusicId) -> Option<(usize, &AppleMusicId)> {
@@ -2346,6 +2397,11 @@ impl AppleMusicCoordinator {
                     track_id: response_track_id,
                 }
             }
+            (ApplePlaybackState::Seeking { .. }, AppleTransportStatus::Playing) => {
+                ApplePlaybackState::Playing {
+                    track_id: response_track_id,
+                }
+            }
             _ => {
                 self.fail_active_playback(
                     "Apple Music returned an inconsistent transport result".to_owned(),
@@ -2375,6 +2431,7 @@ impl AppleMusicCoordinator {
             | ApplePlaybackState::Stopped { track_id }
             | ApplePlaybackState::SkippingNext { track_id, .. }
             | ApplePlaybackState::SkippingPrevious { track_id, .. }
+            | ApplePlaybackState::Seeking { track_id, .. }
             | ApplePlaybackState::Failed { track_id } => Some(track_id),
             ApplePlaybackState::Idle => None,
         }
@@ -2494,8 +2551,9 @@ impl AppleMusicCoordinator {
         &mut self,
         request_id: RequestId,
         track_id: &AppleMusicId,
-        _command: AppleTransportCommand,
+        command: AppleTransportCommand,
     ) -> Result<TransportTask, BridgeCallError> {
+        self.test_transport_request = Some(command);
         match self.test_transport.unwrap_or(TestTransport::Paused) {
             TestTransport::Paused => Ok(TransportTask::completed_for_test(
                 request_id,
@@ -2722,6 +2780,11 @@ impl AppleMusicCoordinator {
     ) -> Option<&(AppleMusicId, AppleMusicId, usize)> {
         self.test_playback_request.as_ref()
     }
+
+    #[cfg(test)]
+    const fn test_transport_request(&self) -> Option<AppleTransportCommand> {
+        self.test_transport_request
+    }
 }
 
 #[cfg(test)]
@@ -2729,12 +2792,12 @@ mod tests {
     use super::{
         AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState,
         AppleObservedPlaybackStatus, ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist,
-        ApplePlaylistTrack, ApplePlaylistTracksState, AuthorisationOutcome, AuthorisationStatus,
-        CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
-        PageProgress, PaginationError, PlaylistPage, PlaylistPager, RequestId,
-        SubscriptionCapabilities, SubscriptionOffer, SubscriptionState, TestConnection,
-        TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport, TrackPage,
-        TransitionOutcome,
+        ApplePlaylistTrack, ApplePlaylistTracksState, AppleTransportCommand, AuthorisationOutcome,
+        AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+        ConnectionSubscription, PageCursor, PageProgress, PaginationError, PlaylistPage,
+        PlaylistPager, RequestId, SubscriptionCapabilities, SubscriptionOffer, SubscriptionState,
+        TestConnection, TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport,
+        TrackPage, TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -3633,6 +3696,123 @@ mod tests {
             .expect("native position should be exposed after the matching response");
         assert_eq!(position.elapsed_ms(), 12_345);
         assert_eq!(position.duration_ms(), Some(245_000));
+    }
+
+    #[test]
+    fn seek_uses_native_position_and_waits_for_music_kit_confirmation() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(245_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedWithDuration {
+            elapsed_ms: 12_000,
+            duration_ms: 245_000,
+        }]);
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        coordinator.seek_by(10_000);
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Seeking {
+                track_id: active,
+                target_ms: 22_000,
+                ..
+            } if active == &track_id
+        ));
+        assert_eq!(
+            coordinator.test_transport_request(),
+            Some(AppleTransportCommand::Seek {
+                position_ms: 22_000,
+            })
+        );
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id }
+        );
+    }
+
+    #[test]
+    fn seek_without_an_authoritative_position_is_a_no_op() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(!coordinator.poll());
+
+        coordinator.seek_by(10_000);
+
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id }
+        );
+        assert_eq!(coordinator.test_transport_request(), None);
+    }
+
+    #[test]
+    fn seek_target_is_clamped_to_the_current_entry_duration() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(245_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![TestPosition::CompletedWithDuration {
+            elapsed_ms: 240_000,
+            duration_ms: 245_000,
+        }]);
+        coordinator.play_track(playlist_id, track_id, 0);
+        assert!(coordinator.poll());
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        coordinator.seek_by(10_000);
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Seeking {
+                target_ms: 245_000,
+                ..
+            }
+        ));
+        assert_eq!(
+            coordinator.test_transport_request(),
+            Some(AppleTransportCommand::Seek {
+                position_ms: 245_000,
+            })
+        );
     }
 
     #[test]
