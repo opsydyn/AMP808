@@ -669,6 +669,7 @@ impl TransportResponse {
         let status = match wire.status.as_str() {
             "paused" => AppleTransportStatus::Paused,
             "playing" => AppleTransportStatus::Playing,
+            "stopped" => AppleTransportStatus::Stopped,
             _ => return Err(BridgeProtocolError::TransportFailed),
         };
         let track_id = AppleMusicId::try_from(wire.track_id.as_str())
@@ -1259,6 +1260,7 @@ impl TransportTask {
                 match command {
                     AppleTransportCommand::Pause => 0,
                     AppleTransportCommand::Resume => 1,
+                    AppleTransportCommand::Stop => 2,
                 },
                 track_id.as_ptr(),
                 track_id.len(),
@@ -1774,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_envelopes_map_pause_and_resume_without_losing_identity() {
+    fn transport_envelopes_map_pause_resume_and_stop_without_losing_identity() {
         let paused = TransportResponse::parse(
             br#"{"version":1,"kind":"transport","request_id":59,"track_id":"i.first","status":"paused","error":null}"#,
         )
@@ -1790,6 +1792,14 @@ mod tests {
         assert_eq!(playing.request_id(), RequestId::new(60));
         assert_eq!(playing.status(), AppleTransportStatus::Playing);
         assert_eq!(playing.into_track_id().as_str(), "i.first");
+
+        let stopped = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":62,"track_id":"i.first","status":"stopped","error":null}"#,
+        )
+        .expect("a stopped response should cross the bridge");
+        assert_eq!(stopped.request_id(), RequestId::new(62));
+        assert_eq!(stopped.status(), AppleTransportStatus::Stopped);
+        assert_eq!(stopped.into_track_id().as_str(), "i.first");
     }
 
     #[test]

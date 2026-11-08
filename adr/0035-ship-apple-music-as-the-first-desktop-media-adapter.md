@@ -286,8 +286,8 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
 - [x] Selecting a playable playlist entry sets the app-scoped MusicKit queue and begins playback
       through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
-      the request completes. Pause and resume use the same typed, identity-checked transport
-      boundary and expose observable transitional and terminal states.
+      the request completes. Pause, resume, and stop use the same typed, identity-checked
+      transport boundary and expose observable transitional and terminal states.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -463,9 +463,9 @@ Selected-entry MusicKit playback evidence recorded on 2026-11-08:
 - Bridge responses remain versioned and bounded, request and track identities are checked before
   state changes, newer requests supersede unfinished ones, and provider failures are redacted at
   the Rust boundary. Local PCM, BPM, EQ, and audio-reactive MilkDrop remain explicitly unavailable.
-- This qualifies one-entry selection and playback start. Stop, next/previous, position
-  observation, queue navigation, whole-playlist activation, failure recovery, and manual
-  keyboard/VoiceOver acceptance remain separate slices.
+- This qualifies one-entry selection and playback start. Next/previous, position observation,
+  queue navigation, whole-playlist activation, failure recovery, and manual keyboard/VoiceOver
+  acceptance remain separate slices.
 
 Apple pause/resume transport evidence recorded on 2026-11-08:
 
@@ -485,8 +485,27 @@ Apple pause/resume transport evidence recorded on 2026-11-08:
 - Focused coordinator, bridge-parser, redaction, and GPUI tests pass. Strict desktop Clippy passes
   with warnings denied apart from the repository's explicit dead-code allowance; the full locked
   workspace passes 619 tests with 3 ignored, and the signed bundle validator passes.
-- This qualifies observable pause/resume and accessible pointer activation. Stop, next/previous,
+- This qualifies observable pause/resume and accessible pointer activation. Next/previous,
   position observation, queue navigation, whole-playlist activation, failure recovery, and manual
+  keyboard/VoiceOver acceptance remain separate slices.
+
+Apple Stop transport evidence recorded on 2026-11-08:
+
+- The existing typed transport command and response boundary now includes Stop and the validated
+  `stopped` result. The coordinator exposes `Stopping` until the response matches both request and
+  track identity, then preserves the selected entry in an observable `Stopped` state. A wrong
+  terminal status fails closed as a playback error.
+- Stop is valid from both Playing and Paused. GPUI exposes a distinct `STOP APPLE` button with the
+  accessibility label `Stop Apple Music playback` in both states, removes transport controls after
+  completion, and labels the selected entry and status as stopped.
+- Live development-signed acceptance observed Playing with Pause and Stop controls, then
+  `Apple Music playback stopped` after activating Stop. Both active transport controls disappeared,
+  and the selected entry remained visibly labelled stopped. The app was closed after acceptance.
+- Focused state-machine, inconsistent-response, bridge-parser, and GPUI tests pass. Strict desktop
+  Clippy passes with warnings denied apart from the repository's explicit dead-code allowance; the
+  full locked workspace passes 622 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies explicit termination of app-scoped Apple playback. Next/previous, position
+  observation, queue navigation, whole-playlist activation, failure recovery, and manual
   keyboard/VoiceOver acceptance remain separate slices.
 
 Official Apple references checked through 2026-11-08:

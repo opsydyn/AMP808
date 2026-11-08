@@ -625,12 +625,14 @@ pub(crate) enum ApplePlaylistTracksState {
 enum AppleTransportCommand {
     Pause,
     Resume,
+    Stop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppleTransportStatus {
     Paused,
     Playing,
+    Stopped,
 }
 
 /// Describes the selected-track handoff to Apple's app-scoped MusicKit player.
@@ -654,6 +656,13 @@ pub(crate) enum ApplePlaybackState {
     Resuming {
         track_id: AppleMusicId,
         request_id: RequestId,
+    },
+    Stopping {
+        track_id: AppleMusicId,
+        request_id: RequestId,
+    },
+    Stopped {
+        track_id: AppleMusicId,
     },
     Failed {
         track_id: AppleMusicId,
@@ -1286,8 +1295,9 @@ pub(crate) enum TestPlayback {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TestTransport {
-    CompletedPaused,
-    CompletedPlaying,
+    Paused,
+    Playing,
+    Stopped,
 }
 
 impl AppleMusicCoordinator {
@@ -1408,6 +1418,26 @@ impl AppleMusicCoordinator {
             request_id,
         };
         match self.create_transport_task(request_id, &track_id, AppleTransportCommand::Resume) {
+            Ok(task) => self.transport_task = Some(task),
+            Err(error) => self.fail_playback(track_id, error.to_string()),
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        let track_id = match &self.playback {
+            ApplePlaybackState::Playing { track_id } | ApplePlaybackState::Paused { track_id } => {
+                track_id.clone()
+            }
+            _ => return,
+        };
+        let request_id = self.next_request_id();
+        self.transport_request_id = Some(request_id);
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::Stopping {
+            track_id: track_id.clone(),
+            request_id,
+        };
+        match self.create_transport_task(request_id, &track_id, AppleTransportCommand::Stop) {
             Ok(task) => self.transport_task = Some(task),
             Err(error) => self.fail_playback(track_id, error.to_string()),
         }
@@ -1774,6 +1804,11 @@ impl AppleMusicCoordinator {
                     track_id: response_track_id,
                 }
             }
+            (ApplePlaybackState::Stopping { .. }, AppleTransportStatus::Stopped) => {
+                ApplePlaybackState::Stopped {
+                    track_id: response_track_id,
+                }
+            }
             _ => {
                 self.fail_active_playback(
                     "Apple Music returned an inconsistent transport result".to_owned(),
@@ -1792,6 +1827,8 @@ impl AppleMusicCoordinator {
             | ApplePlaybackState::Pausing { track_id, .. }
             | ApplePlaybackState::Paused { track_id }
             | ApplePlaybackState::Resuming { track_id, .. }
+            | ApplePlaybackState::Stopping { track_id, .. }
+            | ApplePlaybackState::Stopped { track_id }
             | ApplePlaybackState::Failed { track_id } => Some(track_id),
             ApplePlaybackState::Idle => None,
         }
@@ -1902,19 +1939,21 @@ impl AppleMusicCoordinator {
         track_id: &AppleMusicId,
         _command: AppleTransportCommand,
     ) -> Result<TransportTask, BridgeCallError> {
-        match self
-            .test_transport
-            .unwrap_or(TestTransport::CompletedPaused)
-        {
-            TestTransport::CompletedPaused => Ok(TransportTask::completed_for_test(
+        match self.test_transport.unwrap_or(TestTransport::Paused) {
+            TestTransport::Paused => Ok(TransportTask::completed_for_test(
                 request_id,
                 track_id.clone(),
                 AppleTransportStatus::Paused,
             )),
-            TestTransport::CompletedPlaying => Ok(TransportTask::completed_for_test(
+            TestTransport::Playing => Ok(TransportTask::completed_for_test(
                 request_id,
                 track_id.clone(),
                 AppleTransportStatus::Playing,
+            )),
+            TestTransport::Stopped => Ok(TransportTask::completed_for_test(
+                request_id,
+                track_id.clone(),
+                AppleTransportStatus::Stopped,
             )),
         }
     }
@@ -2640,7 +2679,7 @@ mod tests {
         let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.use_test_transport(TestTransport::CompletedPaused);
+        coordinator.use_test_transport(TestTransport::Paused);
         coordinator.play_track(playlist_id, track_id.clone());
         assert!(!coordinator.poll());
 
@@ -2663,12 +2702,12 @@ mod tests {
         let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
         let mut coordinator = AppleMusicCoordinator::new();
         coordinator.use_test_playback(TestPlayback::Completed);
-        coordinator.use_test_transport(TestTransport::CompletedPaused);
+        coordinator.use_test_transport(TestTransport::Paused);
         coordinator.play_track(playlist_id, track_id.clone());
         assert!(!coordinator.poll());
         coordinator.pause();
         assert!(!coordinator.poll());
-        coordinator.use_test_transport(TestTransport::CompletedPlaying);
+        coordinator.use_test_transport(TestTransport::Playing);
 
         coordinator.resume();
         assert!(matches!(
@@ -2679,6 +2718,78 @@ mod tests {
         assert_eq!(
             coordinator.playback(),
             &ApplePlaybackState::Playing { track_id }
+        );
+    }
+
+    #[test]
+    fn stop_exposes_stopping_until_music_kit_confirms_stopped() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_transport(TestTransport::Stopped);
+        coordinator.play_track(playlist_id, track_id.clone());
+        assert!(!coordinator.poll());
+
+        coordinator.stop();
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Stopping { track_id: active, .. } if active == &track_id
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Stopped { track_id }
+        );
+    }
+
+    #[test]
+    fn stop_is_available_while_apple_playback_is_paused() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_transport(TestTransport::Paused);
+        coordinator.play_track(playlist_id, track_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.pause();
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Stopped);
+
+        coordinator.stop();
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::Stopping { track_id: active, .. } if active == &track_id
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Stopped { track_id }
+        );
+    }
+
+    #[test]
+    fn stop_rejects_an_inconsistent_native_transport_result() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, track_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        coordinator.stop();
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Failed { track_id }
+        );
+        assert_eq!(
+            coordinator.playback_error(),
+            Some("Apple Music returned an inconsistent transport result")
         );
     }
 }

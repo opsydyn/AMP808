@@ -688,7 +688,7 @@ public func controlPlayback(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard command <= 1 else {
+    guard command <= 2 else {
         return 4
     }
     guard trackIDLength <= UInt(Int.max),
@@ -763,6 +763,19 @@ public func controlPlayback(
                     completion: completion
                 )
             }
+        case 2:
+            player.stop()
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: "stopped",
+                    error: nil
+                ),
+                completion: completion
+            )
         default:
             preconditionFailure("validated MusicKit transport command became invalid")
         }
