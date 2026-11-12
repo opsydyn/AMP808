@@ -5,6 +5,33 @@ import MusicKit
 private enum QueueOccurrenceMapTests {
     static func main() {
         requireEqual(
+            queueIndexForSelectedOccurrence(
+                playlistCount: 4,
+                queueCount: 4,
+                selectedPlaylistIndex: 2
+            ),
+            2,
+            "a full playlist queue must select the requested occurrence"
+        )
+        requireEqual(
+            queueIndexForSelectedOccurrence(
+                playlistCount: 4,
+                queueCount: 2,
+                selectedPlaylistIndex: 2
+            ),
+            0,
+            "a suffix queue must select its first occurrence"
+        )
+        requireEqual(
+            queueIndexForSelectedOccurrence(
+                playlistCount: 4,
+                queueCount: 3,
+                selectedPlaylistIndex: 2
+            ),
+            nil,
+            "an unexpected queue shape must fail closed"
+        )
+        requireEqual(
             orderedQueueOccurrenceMap(
                 playlistCount: 5,
                 queueCount: 3,
@@ -23,6 +50,16 @@ private enum QueueOccurrenceMapTests {
             ),
             [0: 0, 1: 1, 2: 2, 3: 3],
             "a full queue must preserve duplicate occurrence positions"
+        )
+        requireEqual(
+            orderedQueueOccurrenceMap(
+                playlistCount: 4,
+                queueCount: 4,
+                selectedPlaylistIndex: 2,
+                selectedQueueIndex: 0
+            ),
+            nil,
+            "a full queue that ignores the selected occurrence must fail closed"
         )
         requireEqual(
             orderedQueueOccurrenceMap(
@@ -73,6 +110,17 @@ private enum QueueOccurrenceMapTests {
             ),
             ["queue-2": 2, "queue-3": 3],
             "a suffix queue must retain playlist occurrence identity"
+        )
+        requireEqual(
+            resolvedQueueEntryOccurrenceMap(
+                existing: nil,
+                entryIDs: ["queue-2", "queue-3"],
+                playlistCount: 4,
+                selectedPlaylistIndex: 2,
+                currentQueueEntryID: "queue-2"
+            ),
+            ["queue-2": 2, "queue-3": 3],
+            "a later current entry must resolve a queue anchor that was unavailable after play"
         )
         requireEqual(
             queueEntryOccurrenceMap(
@@ -154,6 +202,16 @@ private enum QueueOccurrenceMapTests {
             nil,
             "unknown shuffle values must fail closed"
         )
+    }
+
+    private static func requireEqual(
+        _ actual: Int?,
+        _ expected: Int?,
+        _ message: String
+    ) {
+        guard actual == expected else {
+            fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
+        }
     }
 
     private static func requireEqual(

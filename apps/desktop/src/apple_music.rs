@@ -8,6 +8,8 @@ use std::{collections::BTreeSet, error::Error, fmt, mem, sync::mpsc::TryRecvErro
 #[cfg(test)]
 use std::collections::VecDeque;
 
+const POSITION_UNAVAILABLE_RETRY_LIMIT: u8 = 20;
+
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -27,11 +29,27 @@ mod unavailable {
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(crate) struct BridgeCallError;
+    pub(crate) enum BridgeCallError {
+        Unavailable,
+        PositionUnavailable,
+    }
+
+    impl BridgeCallError {
+        pub(crate) const fn is_position_unavailable(&self) -> bool {
+            matches!(self, Self::PositionUnavailable)
+        }
+    }
 
     impl fmt::Display for BridgeCallError {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("the MusicKit bridge is unavailable on this platform")
+            match self {
+                Self::Unavailable => {
+                    formatter.write_str("the MusicKit bridge is unavailable on this platform")
+                }
+                Self::PositionUnavailable => {
+                    formatter.write_str("Apple Music playback position is unavailable")
+                }
+            }
         }
     }
 
@@ -60,7 +78,7 @@ mod unavailable {
 
     impl ConnectionTask {
         pub(crate) const fn start(_request_id: RequestId) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -126,7 +144,7 @@ mod unavailable {
             _request_id: RequestId,
             _requested_cursor: Option<&PageCursor>,
         ) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -201,7 +219,7 @@ mod unavailable {
             _playlist_id: &AppleMusicId,
             _requested_cursor: Option<&PageCursor>,
         ) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -272,7 +290,7 @@ mod unavailable {
             _track_id: &AppleMusicId,
             _playlist_index: usize,
         ) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -347,7 +365,7 @@ mod unavailable {
             _track_id: &AppleMusicId,
             _command: AppleTransportCommand,
         ) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -447,7 +465,7 @@ mod unavailable {
 
     impl PositionTask {
         pub(crate) const fn start(_request_id: RequestId) -> Result<Self, BridgeCallError> {
-            Err(BridgeCallError)
+            Err(BridgeCallError::Unavailable)
         }
 
         pub(crate) fn try_recv(
@@ -473,7 +491,19 @@ mod unavailable {
         pub(crate) fn failed_for_test() -> Self {
             let (sender, receiver) = mpsc::channel();
             sender
-                .send(Err(BridgeCallError))
+                .send(Err(BridgeCallError::Unavailable))
+                .expect("the test position receiver remains live during construction");
+            Self {
+                receiver: Some(receiver),
+                _test_sender: None,
+            }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn position_unavailable_for_test() -> Self {
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Err(BridgeCallError::PositionUnavailable))
                 .expect("the test position receiver remains live during construction");
             Self {
                 receiver: Some(receiver),
@@ -1563,6 +1593,7 @@ pub(crate) struct AppleMusicCoordinator {
     position: Option<ApplePlaybackPosition>,
     position_task: Option<PositionTask>,
     position_request_id: Option<RequestId>,
+    position_unavailable_attempts: u8,
     position_error: Option<String>,
     playback_error: Option<String>,
     repeat_mode: AppleRepeatMode,
@@ -1639,6 +1670,7 @@ pub(crate) enum TestTransport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TestPosition {
     Failed,
+    PositionUnavailable,
     Completed {
         elapsed_ms: u64,
     },
@@ -1686,6 +1718,7 @@ impl AppleMusicCoordinator {
             position: None,
             position_task: None,
             position_request_id: None,
+            position_unavailable_attempts: 0,
             position_error: None,
             playback_error: None,
             repeat_mode: AppleRepeatMode::Off,
@@ -2207,6 +2240,16 @@ impl AppleMusicCoordinator {
         let response = match event {
             Ok(response) => response,
             Err(error) => {
+                if error.is_position_unavailable() {
+                    self.position_unavailable_attempts =
+                        self.position_unavailable_attempts.saturating_add(1);
+                    if self.position_unavailable_attempts < POSITION_UNAVAILABLE_RETRY_LIMIT {
+                        self.position_error = None;
+                    } else {
+                        self.position_error = Some(error.to_string());
+                    }
+                    return;
+                }
                 self.position_error = Some(error.to_string());
                 return;
             }
@@ -2227,6 +2270,7 @@ impl AppleMusicCoordinator {
             return;
         };
         queue.current_index = response.playlist_index();
+        self.position_unavailable_attempts = 0;
         if response.playback_status() == Some(AppleObservedPlaybackStatus::Stopped) {
             self.playback = ApplePlaybackState::Stopped {
                 track_id: track.id().clone(),
@@ -2265,6 +2309,7 @@ impl AppleMusicCoordinator {
     fn reset_position_observation(&mut self) {
         self.position_task.take();
         self.position_request_id = None;
+        self.position_unavailable_attempts = 0;
         self.position = None;
         self.position_error = None;
     }
@@ -2886,6 +2931,9 @@ impl AppleMusicCoordinator {
             .map(|queue| (queue.playlist_id.clone(), queue.current_index));
         match self.test_positions.pop_front() {
             Some(TestPosition::Failed) => Ok(PositionTask::failed_for_test()),
+            Some(TestPosition::PositionUnavailable) => {
+                Ok(PositionTask::position_unavailable_for_test())
+            }
             Some(TestPosition::Completed { elapsed_ms }) => fallback.map_or_else(
                 || Ok(PositionTask::pending_for_test()),
                 |(playlist_id, playlist_index)| {
@@ -3096,10 +3144,11 @@ mod tests {
         AppleObservedPlaybackStatus, ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist,
         ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, AppleShuffleMode,
         AppleTransportCommand, AuthorisationOutcome, AuthorisationStatus, CatalogPlayback,
-        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PageProgress,
-        PaginationError, PlaylistPage, PlaylistPager, RequestId, SubscriptionCapabilities,
-        SubscriptionOffer, SubscriptionState, TestConnection, TestPlayback, TestPlaylistPage,
-        TestPosition, TestTrackPage, TestTransport, TrackPage, TransitionOutcome,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, POSITION_UNAVAILABLE_RETRY_LIMIT,
+        PageCursor, PageProgress, PaginationError, PlaylistPage, PlaylistPager, RequestId,
+        SubscriptionCapabilities, SubscriptionOffer, SubscriptionState, TestConnection,
+        TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport, TrackPage,
+        TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -4755,5 +4804,95 @@ mod tests {
             Some(20_000)
         );
         assert_eq!(coordinator.playback_position_error(), None);
+    }
+
+    #[test]
+    fn transient_position_unavailability_recovers_while_playback_remains_active() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(245_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![
+            TestPosition::PositionUnavailable,
+            TestPosition::Completed { elapsed_ms: 1_250 },
+        ]);
+
+        coordinator.play_track(playlist_id, track_id, 0);
+
+        assert!(
+            coordinator.poll(),
+            "a transient native race should keep polling active"
+        );
+        assert!(
+            coordinator.poll(),
+            "the retry should remain observable while pending"
+        );
+        assert!(
+            coordinator.poll(),
+            "the retry response should remain active until observed"
+        );
+        assert!(
+            !coordinator.poll(),
+            "a successful retry should settle the test poller"
+        );
+        assert_eq!(
+            coordinator
+                .playback_position()
+                .map(|position| position.elapsed_ms()),
+            Some(1_250)
+        );
+        assert_eq!(coordinator.playback_position_error(), None);
+    }
+
+    #[test]
+    fn persistent_position_unavailability_stops_after_the_bounded_retry_window() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![ApplePlaylistTrack::new(
+                track_id.clone(),
+                "First Light".to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                Some(245_000),
+            )],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.use_test_positions(vec![
+            TestPosition::PositionUnavailable;
+            usize::from(POSITION_UNAVAILABLE_RETRY_LIMIT) + 1
+        ]);
+        coordinator.play_track(playlist_id, track_id, 0);
+
+        let mut polls = 0;
+        while coordinator.poll() {
+            polls += 1;
+            assert!(polls < 100, "bounded position retries should terminate");
+        }
+
+        assert_eq!(
+            coordinator.playback_position_error(),
+            Some("Apple Music playback position is unavailable")
+        );
     }
 }

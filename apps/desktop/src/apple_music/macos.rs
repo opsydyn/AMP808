@@ -1085,6 +1085,12 @@ impl fmt::Display for BridgeCallError {
     }
 }
 
+impl BridgeCallError {
+    pub(crate) const fn is_position_unavailable(&self) -> bool {
+        matches!(self, Self::Protocol(BridgeProtocolError::PositionFailed))
+    }
+}
+
 impl Error for BridgeCallError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
@@ -1659,6 +1665,20 @@ impl PositionTask {
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Err(BridgeCallError::StartRejected))
+            .expect("the test position receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn position_unavailable_for_test() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(BridgeCallError::Protocol(
+                BridgeProtocolError::PositionFailed,
+            )))
             .expect("the test position receiver remains live during construction");
         Self {
             receiver,

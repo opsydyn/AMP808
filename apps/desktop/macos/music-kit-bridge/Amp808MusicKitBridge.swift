@@ -11,6 +11,31 @@ private struct PlaybackQueueContext: Sendable {
     let playlistIndexByQueueEntryID: [String: Int]
 }
 
+private struct PlaybackQueueAnchor: Sendable {
+    let playlistID: String
+    let playlistCount: Int
+    let selectedPlaylistIndex: Int
+}
+
+func queueIndexForSelectedOccurrence(
+    playlistCount: Int,
+    queueCount: Int,
+    selectedPlaylistIndex: Int
+) -> Int? {
+    guard playlistCount > 0,
+          queueCount > 0,
+          (0..<playlistCount).contains(selectedPlaylistIndex) else {
+        return nil
+    }
+    if queueCount == playlistCount {
+        return selectedPlaylistIndex
+    }
+    if queueCount == playlistCount - selectedPlaylistIndex {
+        return 0
+    }
+    return nil
+}
+
 func orderedQueueOccurrenceMap(
     playlistCount: Int,
     queueCount: Int,
@@ -67,6 +92,27 @@ func queueEntryOccurrenceMap(
     return occurrenceByEntryID
 }
 
+func resolvedQueueEntryOccurrenceMap(
+    existing: [String: Int]?,
+    entryIDs: [String],
+    playlistCount: Int,
+    selectedPlaylistIndex: Int,
+    currentQueueEntryID: String?
+) -> [String: Int]? {
+    if let existing {
+        return existing
+    }
+    guard let currentQueueEntryID else {
+        return nil
+    }
+    return queueEntryOccurrenceMap(
+        entryIDs: entryIDs,
+        playlistCount: playlistCount,
+        selectedPlaylistIndex: selectedPlaylistIndex,
+        selectedQueueEntryID: currentQueueEntryID
+    )
+}
+
 @available(macOS 14.0, *)
 func repeatModeForCommandValue(_ value: UInt64) -> MusicPlayer.RepeatMode? {
     switch value {
@@ -94,6 +140,7 @@ func shuffleModeForCommandValue(_ value: UInt64) -> MusicPlayer.ShuffleMode? {
 }
 
 @MainActor private var playbackQueueContext: PlaybackQueueContext?
+@MainActor private var playbackQueueAnchor: PlaybackQueueAnchor?
 
 public typealias Amp808MusicKitConnectionCallback = @convention(c) (
     UnsafeMutableRawPointer?,
@@ -873,29 +920,60 @@ public func playTrack(
             let player = ApplicationMusicPlayer.shared
             await MainActor.run {
                 playbackQueueContext = nil
+                playbackQueueAnchor = PlaybackQueueAnchor(
+                    playlistID: playlistID,
+                    playlistCount: entries.count,
+                    selectedPlaylistIndex: playlistIndex
+                )
             }
             player.queue = ApplicationMusicPlayer.Queue(
                 playlist: detailedPlaylist,
-                startingAt: entry
+                startingAt: entries[entries.startIndex]
             )
             try await player.prepareToPlay()
+            let queueEntries = player.queue.entries
+            guard let selectedQueueIndex = queueIndexForSelectedOccurrence(
+                playlistCount: entries.count,
+                queueCount: queueEntries.count,
+                selectedPlaylistIndex: playlistIndex
+            ), queueEntries.indices.contains(selectedQueueIndex) else {
+                await MainActor.run {
+                    playbackQueueContext = nil
+                    playbackQueueAnchor = nil
+                }
+                sendPlaybackEnvelope(
+                    PlaybackEnvelope(
+                        version: envelopeVersion,
+                        kind: "playback",
+                        requestID: requestID,
+                        trackID: trackID,
+                        status: "failed",
+                        error: "playback_failed"
+                    ),
+                    completion: completion
+                )
+                return
+            }
+            player.queue.currentEntry = queueEntries[selectedQueueIndex]
             try await player.play()
 
-            let queueContext = player.queue.currentEntry.flatMap { selectedQueueEntry in
-                queueEntryOccurrenceMap(
-                    entryIDs: player.queue.entries.map(\.id),
-                    playlistCount: entries.count,
-                    selectedPlaylistIndex: playlistIndex,
-                    selectedQueueEntryID: selectedQueueEntry.id
-                ).map { playlistIndexByQueueEntryID in
+            let queueContext = resolvedQueueEntryOccurrenceMap(
+                existing: nil,
+                entryIDs: player.queue.entries.map(\.id),
+                playlistCount: entries.count,
+                selectedPlaylistIndex: playlistIndex,
+                currentQueueEntryID: player.queue.currentEntry?.id
+            ).map { playlistIndexByQueueEntryID in
                     PlaybackQueueContext(
                         playlistID: playlistID,
                         playlistIndexByQueueEntryID: playlistIndexByQueueEntryID
                     )
-                }
             }
             await MainActor.run {
                 playbackQueueContext = queueContext
+                if queueContext != nil {
+                    playbackQueueAnchor = nil
+                }
             }
 
             sendPlaybackEnvelope(
@@ -910,6 +988,10 @@ public func playTrack(
                 completion: completion
             )
         } catch {
+            await MainActor.run {
+                playbackQueueContext = nil
+                playbackQueueAnchor = nil
+            }
             sendPlaybackEnvelope(
                 PlaybackEnvelope(
                     version: envelopeVersion,
@@ -1026,6 +1108,10 @@ public func controlPlayback(
             }
         case 2:
             player.stop()
+            await MainActor.run {
+                playbackQueueContext = nil
+                playbackQueueAnchor = nil
+            }
             sendTransportEnvelope(
                 TransportEnvelope(
                     version: envelopeVersion,
@@ -1186,6 +1272,20 @@ public func observePlaybackPosition(
         let playbackTime = ApplicationMusicPlayer.shared.playbackTime
         let milliseconds = playbackTime * 1_000
         let player = ApplicationMusicPlayer.shared
+        if let anchor = playbackQueueAnchor,
+           let playlistIndexByQueueEntryID = resolvedQueueEntryOccurrenceMap(
+               existing: playbackQueueContext?.playlistIndexByQueueEntryID,
+               entryIDs: player.queue.entries.map(\.id),
+               playlistCount: anchor.playlistCount,
+               selectedPlaylistIndex: anchor.selectedPlaylistIndex,
+               currentQueueEntryID: player.queue.currentEntry?.id
+           ) {
+            playbackQueueContext = PlaybackQueueContext(
+                playlistID: anchor.playlistID,
+                playlistIndexByQueueEntryID: playlistIndexByQueueEntryID
+            )
+            playbackQueueAnchor = nil
+        }
         guard let queueContext = playbackQueueContext,
               let currentEntry = player.queue.currentEntry,
               let playlistIndex = queueContext.playlistIndexByQueueEntryID[currentEntry.id] else {

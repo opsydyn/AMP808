@@ -792,6 +792,38 @@ Apple playback shuffle evidence recorded on 2026-11-12:
   Connect action after relaunch, and manual VoiceOver, denied/revoked, offline/failure, and a live
   observed natural transition remain separate acceptance gates.
 
+Apple natural-transition evidence recorded on 2026-11-12:
+
+- MusicKit can briefly report position unavailable while an application-owned queue starts or
+  changes entries. The coordinator now retries that specific condition for a bounded twenty polls
+  (about two seconds at the existing polling interval), resets the allowance after a successful
+  observation, and continues to fail all other position errors immediately. Persistent position
+  unavailability still ends reconciliation rather than creating a second playback clock.
+- The Swift bridge preserves a playlist/count/selected-occurrence anchor when queue-entry identity
+  is not immediately available, then resolves the stable queue-entry map from a later current-entry
+  observation. Pure bridge tests cover lazy resolution and reject a full queue whose current entry
+  does not represent the requested occurrence.
+- Live diagnosis found that `ApplicationMusicPlayer.Queue(playlist:startingAt:)` materialised all
+  22 playlist entries but could leave queue occurrence zero current when occurrence two was
+  requested. A generic playable-item queue was rejected because this local-library playlist could
+  not be prepared reliably. The bridge instead prepares the playlist-aware queue from its first
+  entry, validates the materialised full-queue or suffix-queue shape, and explicitly selects the
+  requested queue occurrence before calling `play()`. Unexpected shapes fail closed.
+- The base desktop suite passes 255 tests and the projectM-enabled suite passes 257. The full
+  locked workspace passes 332 tests with three existing live tests ignored; strict Clippy passes
+  for both desktop profiles with warnings denied, the Swift 6 queue contract passes with warnings
+  denied, formatting and `git diff --check` pass, and the clean development-signed bundle builds
+  and passes its validator.
+- A fresh development-signed run loaded 170 playlists and selected occurrence three of
+  `808: The Playlist`. AMP808 and MusicKit both identified `Let the Music Play` at 03:33 as Playing,
+  rather than silently playing occurrence one. With no Next command or queue mutation, MusicKit
+  naturally advanced to occurrence four, `Hip Hop, Be Bop (Don't Stop)`, and AMP808 reconciled its
+  accessible Playing marker plus progress at 00:52 of 05:40. Stop then removed progress and exposed
+  the stopped state.
+- This qualifies requested-occurrence startup and a live observed natural transition under the
+  application-owned MusicKit queue. Manual VoiceOver, denied/revoked, and offline/failure
+  acceptance remain separate gates.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
