@@ -81,6 +81,18 @@ func repeatModeForCommandValue(_ value: UInt64) -> MusicPlayer.RepeatMode? {
     }
 }
 
+@available(macOS 14.0, *)
+func shuffleModeForCommandValue(_ value: UInt64) -> MusicPlayer.ShuffleMode? {
+    switch value {
+    case 0:
+        MusicPlayer.ShuffleMode.off
+    case 1:
+        .songs
+    default:
+        nil
+    }
+}
+
 @MainActor private var playbackQueueContext: PlaybackQueueContext?
 
 public typealias Amp808MusicKitConnectionCallback = @convention(c) (
@@ -194,6 +206,7 @@ private struct TransportEnvelope: Encodable {
     let trackID: String
     let status: String
     let repeatMode: String?
+    let shuffleMode: String?
     let error: String?
 
     init(
@@ -203,6 +216,7 @@ private struct TransportEnvelope: Encodable {
         trackID: String,
         status: String,
         repeatMode: String? = nil,
+        shuffleMode: String? = nil,
         error: String?
     ) {
         self.version = version
@@ -211,6 +225,7 @@ private struct TransportEnvelope: Encodable {
         self.trackID = trackID
         self.status = status
         self.repeatMode = repeatMode
+        self.shuffleMode = shuffleMode
         self.error = error
     }
 
@@ -221,6 +236,7 @@ private struct TransportEnvelope: Encodable {
         case trackID = "track_id"
         case status
         case repeatMode = "repeat_mode"
+        case shuffleMode = "shuffle_mode"
         case error
     }
 }
@@ -376,6 +392,18 @@ private func repeatModeLabel(_ mode: MusicPlayer.RepeatMode?) -> String {
         "all"
     case .some(.one):
         "one"
+    @unknown default:
+        "unknown"
+    }
+}
+
+@available(macOS 14.0, *)
+private func shuffleModeLabel(_ mode: MusicPlayer.ShuffleMode?) -> String {
+    switch mode {
+    case nil, .some(.off):
+        "off"
+    case .some(.songs):
+        "songs"
     @unknown default:
         "unknown"
     }
@@ -919,8 +947,9 @@ public func controlPlayback(
     guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
         return 3
     }
-    guard command <= 6,
-          command != 6 || commandValue <= 2 else {
+    guard command <= 7,
+          command != 6 || commandValue <= 2,
+          command != 7 || commandValue <= 1 else {
         return 4
     }
     guard trackIDLength <= UInt(Int.max),
@@ -1088,6 +1117,23 @@ public func controlPlayback(
                     trackID: trackID,
                     status: playbackStatusLabel(player.state.playbackStatus),
                     repeatMode: repeatModeLabel(player.state.repeatMode),
+                    error: nil
+                ),
+                completion: completion
+            )
+        case 7:
+            guard let shuffleMode = shuffleModeForCommandValue(commandValue) else {
+                preconditionFailure("validated MusicKit shuffle mode became invalid")
+            }
+            player.state.shuffleMode = shuffleMode
+            sendTransportEnvelope(
+                TransportEnvelope(
+                    version: envelopeVersion,
+                    kind: "transport",
+                    requestID: requestID,
+                    trackID: trackID,
+                    status: playbackStatusLabel(player.state.playbackStatus),
+                    shuffleMode: shuffleModeLabel(player.state.shuffleMode),
                     error: nil
                 ),
                 completion: completion

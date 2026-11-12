@@ -816,6 +816,7 @@ enum AppleTransportCommand {
     Previous,
     Seek { position_ms: u64 },
     SetRepeat { mode: AppleRepeatMode },
+    SetShuffle { mode: AppleShuffleMode },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -848,6 +849,30 @@ impl AppleRepeatMode {
             Self::Off => "off",
             Self::All => "all",
             Self::One => "one",
+        }
+    }
+}
+
+/// Describes MusicKit's app-scoped queue shuffle policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AppleShuffleMode {
+    #[default]
+    Off,
+    Songs,
+}
+
+impl AppleShuffleMode {
+    const fn toggle(self) -> Self {
+        match self {
+            Self::Off => Self::Songs,
+            Self::Songs => Self::Off,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Songs => "songs",
         }
     }
 }
@@ -915,6 +940,12 @@ pub(crate) enum ApplePlaybackState {
         track_id: AppleMusicId,
         request_id: RequestId,
         target_mode: AppleRepeatMode,
+        continuation: ApplePlaybackContinuation,
+    },
+    SettingShuffle {
+        track_id: AppleMusicId,
+        request_id: RequestId,
+        target_mode: AppleShuffleMode,
         continuation: ApplePlaybackContinuation,
     },
     Failed {
@@ -1535,6 +1566,7 @@ pub(crate) struct AppleMusicCoordinator {
     position_error: Option<String>,
     playback_error: Option<String>,
     repeat_mode: AppleRepeatMode,
+    shuffle_mode: AppleShuffleMode,
     request_sequence: u64,
     error: Option<String>,
     #[cfg(test)]
@@ -1599,6 +1631,8 @@ pub(crate) enum TestTransport {
     Stopped,
     RepeatPlaying { mode: AppleRepeatMode },
     RepeatPaused { mode: AppleRepeatMode },
+    ShufflePlaying { mode: AppleShuffleMode },
+    ShufflePaused { mode: AppleShuffleMode },
 }
 
 #[cfg(test)]
@@ -1655,6 +1689,7 @@ impl AppleMusicCoordinator {
             position_error: None,
             playback_error: None,
             repeat_mode: AppleRepeatMode::Off,
+            shuffle_mode: AppleShuffleMode::Off,
             request_sequence: 0,
             error: None,
             #[cfg(test)]
@@ -1834,14 +1869,22 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return;
         };
-        let Some((target_index, target_track_id)) = self.next_track(track_id) else {
+        let target = match self.shuffle_mode {
+            AppleShuffleMode::Off => self
+                .next_track(track_id)
+                .map(|(index, id)| (Some(index), id)),
+            AppleShuffleMode::Songs => self
+                .shuffled_navigation_track(track_id)
+                .map(|id| (None, id)),
+        };
+        let Some((target_index, target_track_id)) = target else {
             return;
         };
         let target_track_id = target_track_id.clone();
         self.reset_position_observation();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
-        self.transport_target_index = Some(target_index);
+        self.transport_target_index = target_index;
         self.playback_error = None;
         self.playback = ApplePlaybackState::SkippingNext {
             track_id: target_track_id.clone(),
@@ -1858,21 +1901,32 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return false;
         };
-        self.next_track(track_id).is_some()
+        match self.shuffle_mode {
+            AppleShuffleMode::Off => self.next_track(track_id).is_some(),
+            AppleShuffleMode::Songs => self.shuffled_navigation_track(track_id).is_some(),
+        }
     }
 
     pub(crate) fn skip_to_previous(&mut self) {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return;
         };
-        let Some((target_index, target_track_id)) = self.previous_track(track_id) else {
+        let target = match self.shuffle_mode {
+            AppleShuffleMode::Off => self
+                .previous_track(track_id)
+                .map(|(index, id)| (Some(index), id)),
+            AppleShuffleMode::Songs => self
+                .shuffled_navigation_track(track_id)
+                .map(|id| (None, id)),
+        };
+        let Some((target_index, target_track_id)) = target else {
             return;
         };
         let target_track_id = target_track_id.clone();
         self.reset_position_observation();
         let request_id = self.next_request_id();
         self.transport_request_id = Some(request_id);
-        self.transport_target_index = Some(target_index);
+        self.transport_target_index = target_index;
         self.playback_error = None;
         self.playback = ApplePlaybackState::SkippingPrevious {
             track_id: target_track_id.clone(),
@@ -1892,7 +1946,10 @@ impl AppleMusicCoordinator {
         let ApplePlaybackState::Playing { track_id } = &self.playback else {
             return false;
         };
-        self.previous_track(track_id).is_some()
+        match self.shuffle_mode {
+            AppleShuffleMode::Off => self.previous_track(track_id).is_some(),
+            AppleShuffleMode::Songs => self.shuffled_navigation_track(track_id).is_some(),
+        }
     }
 
     pub(crate) fn seek_by(&mut self, delta_ms: i64) {
@@ -1971,6 +2028,41 @@ impl AppleMusicCoordinator {
         }
     }
 
+    pub(crate) const fn shuffle_mode(&self) -> AppleShuffleMode {
+        self.shuffle_mode
+    }
+
+    pub(crate) fn toggle_shuffle(&mut self) {
+        let (track_id, continuation) = match &self.playback {
+            ApplePlaybackState::Playing { track_id } => {
+                (track_id.clone(), ApplePlaybackContinuation::Playing)
+            }
+            ApplePlaybackState::Paused { track_id } => {
+                (track_id.clone(), ApplePlaybackContinuation::Paused)
+            }
+            _ => return,
+        };
+        let target_mode = self.shuffle_mode.toggle();
+        let request_id = self.next_request_id();
+        self.transport_request_id = Some(request_id);
+        self.transport_target_index = None;
+        self.playback_error = None;
+        self.playback = ApplePlaybackState::SettingShuffle {
+            track_id: track_id.clone(),
+            request_id,
+            target_mode,
+            continuation,
+        };
+        match self.create_transport_task(
+            request_id,
+            &track_id,
+            AppleTransportCommand::SetShuffle { mode: target_mode },
+        ) {
+            Ok(task) => self.transport_task = Some(task),
+            Err(error) => self.fail_playback(track_id, error.to_string()),
+        }
+    }
+
     fn next_track(&self, active_track_id: &AppleMusicId) -> Option<(usize, &AppleMusicId)> {
         let queue = self.playback_queue.as_ref()?;
         if queue.current_track()?.id() != active_track_id {
@@ -1987,6 +2079,15 @@ impl AppleMusicCoordinator {
         }
         let index = queue.current_index.checked_sub(1)?;
         queue.track(index).map(|track| (index, track.id()))
+    }
+
+    fn shuffled_navigation_track(&self, active_track_id: &AppleMusicId) -> Option<&AppleMusicId> {
+        let queue = self.playback_queue.as_ref()?;
+        let current_track_id = queue.current_track()?.id();
+        if queue.tracks.len() < 2 || current_track_id != active_track_id {
+            return None;
+        }
+        Some(current_track_id)
     }
 
     fn playback_queue_snapshot(
@@ -2468,6 +2569,7 @@ impl AppleMusicCoordinator {
         }
         let response_status = response.status();
         let response_repeat_mode = response.repeat_mode();
+        let response_shuffle_mode = response.shuffle_mode();
         let response_track_id = response.into_track_id();
         if self.active_playback_track() != Some(&response_track_id) {
             self.fail_active_playback(
@@ -2539,6 +2641,35 @@ impl AppleMusicCoordinator {
                     },
                 }
             }
+            (
+                ApplePlaybackState::SettingShuffle {
+                    target_mode,
+                    continuation,
+                    ..
+                },
+                status,
+            ) if response_shuffle_mode == Some(*target_mode)
+                && matches!(
+                    (continuation, status),
+                    (
+                        ApplePlaybackContinuation::Playing,
+                        AppleTransportStatus::Playing
+                    ) | (
+                        ApplePlaybackContinuation::Paused,
+                        AppleTransportStatus::Paused
+                    )
+                ) =>
+            {
+                self.shuffle_mode = *target_mode;
+                match continuation {
+                    ApplePlaybackContinuation::Playing => ApplePlaybackState::Playing {
+                        track_id: response_track_id,
+                    },
+                    ApplePlaybackContinuation::Paused => ApplePlaybackState::Paused {
+                        track_id: response_track_id,
+                    },
+                }
+            }
             _ => {
                 self.fail_active_playback(
                     "Apple Music returned an inconsistent transport result".to_owned(),
@@ -2570,6 +2701,7 @@ impl AppleMusicCoordinator {
             | ApplePlaybackState::SkippingPrevious { track_id, .. }
             | ApplePlaybackState::Seeking { track_id, .. }
             | ApplePlaybackState::SettingRepeat { track_id, .. }
+            | ApplePlaybackState::SettingShuffle { track_id, .. }
             | ApplePlaybackState::Failed { track_id } => Some(track_id),
             ApplePlaybackState::Idle => None,
         }
@@ -2718,6 +2850,22 @@ impl AppleMusicCoordinator {
             }
             TestTransport::RepeatPaused { mode } => {
                 Ok(TransportTask::completed_with_repeat_for_test(
+                    request_id,
+                    track_id.clone(),
+                    AppleTransportStatus::Paused,
+                    mode,
+                ))
+            }
+            TestTransport::ShufflePlaying { mode } => {
+                Ok(TransportTask::completed_with_shuffle_for_test(
+                    request_id,
+                    track_id.clone(),
+                    AppleTransportStatus::Playing,
+                    mode,
+                ))
+            }
+            TestTransport::ShufflePaused { mode } => {
+                Ok(TransportTask::completed_with_shuffle_for_test(
                     request_id,
                     track_id.clone(),
                     AppleTransportStatus::Paused,
@@ -2946,12 +3094,12 @@ mod tests {
     use super::{
         AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState,
         AppleObservedPlaybackStatus, ApplePlaybackPosition, ApplePlaybackState, ApplePlaylist,
-        ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, AppleTransportCommand,
-        AuthorisationOutcome, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
-        ConnectionSubscription, PageCursor, PageProgress, PaginationError, PlaylistPage,
-        PlaylistPager, RequestId, SubscriptionCapabilities, SubscriptionOffer, SubscriptionState,
-        TestConnection, TestPlayback, TestPlaylistPage, TestPosition, TestTrackPage, TestTransport,
-        TrackPage, TransitionOutcome,
+        ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, AppleShuffleMode,
+        AppleTransportCommand, AuthorisationOutcome, AuthorisationStatus, CatalogPlayback,
+        CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor, PageProgress,
+        PaginationError, PlaylistPage, PlaylistPager, RequestId, SubscriptionCapabilities,
+        SubscriptionOffer, SubscriptionState, TestConnection, TestPlayback, TestPlaylistPage,
+        TestPosition, TestTrackPage, TestTransport, TrackPage, TransitionOutcome,
     };
 
     fn authorised_session() -> AppleMusicSession {
@@ -3776,6 +3924,60 @@ mod tests {
     }
 
     #[test]
+    fn shuffled_next_waits_for_native_position_identity_at_the_playlist_boundary() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track = |id: &str, title: &str| {
+            ApplePlaylistTrack::new(
+                AppleMusicId::try_from(id).expect("fixture track id should be valid"),
+                title.to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                None,
+            )
+        };
+        let third = AppleMusicId::try_from("i.third").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                track("i.first", "First Light"),
+                track("i.second", "Second Sun"),
+                track("i.third", "Third Orbit"),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, third.clone(), 2);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::ShufflePlaying {
+            mode: AppleShuffleMode::Songs,
+        });
+        coordinator.toggle_shuffle();
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        assert!(coordinator.can_skip_to_next());
+        coordinator.skip_to_next();
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::SkippingNext { track_id, .. } if track_id == &third
+        ));
+        assert_eq!(
+            coordinator.test_transport_request(),
+            Some(AppleTransportCommand::Next)
+        );
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id: third }
+        );
+    }
+
+    #[test]
     fn previous_exposes_target_identity_until_music_kit_confirms_navigation() {
         let playlist_id =
             AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
@@ -3850,6 +4052,55 @@ mod tests {
             .expect("native position should be exposed after the matching response");
         assert_eq!(position.elapsed_ms(), 12_345);
         assert_eq!(position.duration_ms(), Some(245_000));
+    }
+
+    #[test]
+    fn shuffled_previous_is_available_at_the_original_first_occurrence() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track = |id: &str, title: &str| {
+            ApplePlaylistTrack::new(
+                AppleMusicId::try_from(id).expect("fixture track id should be valid"),
+                title.to_owned(),
+                "Signal Artist".to_owned(),
+                None,
+                None,
+            )
+        };
+        let first = AppleMusicId::try_from("i.first").expect("fixture id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_track_pages(vec![TestTrackPage::Completed(TrackPage::new(
+            playlist_id.clone(),
+            vec![
+                track("i.first", "First Light"),
+                track("i.second", "Second Sun"),
+            ],
+            None,
+        ))]);
+        coordinator.load_playlist_tracks(playlist_id.clone());
+        assert!(!coordinator.poll());
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, first.clone(), 0);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::ShufflePlaying {
+            mode: AppleShuffleMode::Songs,
+        });
+        coordinator.toggle_shuffle();
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Playing);
+
+        assert!(coordinator.can_skip_to_previous());
+        coordinator.skip_to_previous();
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::SkippingPrevious { track_id, .. } if track_id == &first
+        ));
+        assert!(!coordinator.poll());
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id: first }
+        );
     }
 
     #[test]
@@ -4004,6 +4255,97 @@ mod tests {
         assert_eq!(
             coordinator.playback(),
             &ApplePlaybackState::Playing { track_id }
+        );
+    }
+
+    #[test]
+    fn shuffle_toggles_from_off_to_songs_and_waits_for_native_confirmation() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::ShufflePlaying {
+            mode: AppleShuffleMode::Songs,
+        });
+
+        coordinator.toggle_shuffle();
+
+        assert!(matches!(
+            coordinator.playback(),
+            ApplePlaybackState::SettingShuffle {
+                track_id: active,
+                target_mode: AppleShuffleMode::Songs,
+                ..
+            } if active == &track_id
+        ));
+        assert_eq!(coordinator.shuffle_mode(), AppleShuffleMode::Off);
+        assert_eq!(
+            coordinator.test_transport_request(),
+            Some(AppleTransportCommand::SetShuffle {
+                mode: AppleShuffleMode::Songs,
+            })
+        );
+        assert!(!coordinator.poll());
+        assert_eq!(coordinator.shuffle_mode(), AppleShuffleMode::Songs);
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Playing { track_id }
+        );
+    }
+
+    #[test]
+    fn shuffle_mode_change_preserves_paused_playback() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::Paused);
+        coordinator.pause();
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::ShufflePaused {
+            mode: AppleShuffleMode::Songs,
+        });
+
+        coordinator.toggle_shuffle();
+
+        assert!(!coordinator.poll());
+        assert_eq!(coordinator.shuffle_mode(), AppleShuffleMode::Songs);
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Paused { track_id }
+        );
+    }
+
+    #[test]
+    fn shuffle_mode_rejects_a_mismatched_native_confirmation() {
+        let playlist_id =
+            AppleMusicId::try_from("p.cosmic").expect("fixture playlist id should be valid");
+        let track_id = AppleMusicId::try_from("i.first").expect("fixture track id should be valid");
+        let mut coordinator = AppleMusicCoordinator::new();
+        coordinator.use_test_playback(TestPlayback::Completed);
+        coordinator.play_track(playlist_id, track_id.clone(), 0);
+        assert!(!coordinator.poll());
+        coordinator.use_test_transport(TestTransport::ShufflePlaying {
+            mode: AppleShuffleMode::Off,
+        });
+
+        coordinator.toggle_shuffle();
+        assert!(!coordinator.poll());
+
+        assert_eq!(coordinator.shuffle_mode(), AppleShuffleMode::Off);
+        assert_eq!(
+            coordinator.playback(),
+            &ApplePlaybackState::Failed { track_id }
+        );
+        assert_eq!(
+            coordinator.playback_error(),
+            Some("Apple Music returned an inconsistent transport result")
         );
     }
 

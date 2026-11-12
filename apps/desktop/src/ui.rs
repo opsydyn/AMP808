@@ -24,8 +24,8 @@ use crate::app::DesktopApp;
 use crate::app::transport::TransportState;
 use crate::apple_music::{
     AppleMusicCoordinator, AppleMusicId, AppleMusicSession, AppleMusicState, ApplePlaybackState,
-    ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, CatalogPlayback,
-    SubscriptionState,
+    ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, AppleShuffleMode,
+    CatalogPlayback, SubscriptionState,
 };
 use crate::cosmic::{CosmicBackgroundHost, CosmicMotion, CosmicSignal, CosmicStatus};
 use crate::library::{LibraryCatalogue, LibraryTrack, LocalPlaylist, LocalPlaylistId, ScanSummary};
@@ -1640,6 +1640,12 @@ impl PlayerView {
 
     fn cycle_apple_repeat(&mut self, cx: &mut Context<Self>) {
         self.apple_music.cycle_repeat();
+        self.schedule_apple_music_poll(cx);
+        cx.notify();
+    }
+
+    fn toggle_apple_shuffle(&mut self, cx: &mut Context<Self>) {
+        self.apple_music.toggle_shuffle();
         self.schedule_apple_music_poll(cx);
         cx.notify();
     }
@@ -4148,6 +4154,10 @@ impl Render for PlayerView {
                 "Setting Apple Music repeat to {}",
                 target_mode.name()
             )),
+            ApplePlaybackState::SettingShuffle { target_mode, .. } => Some(format!(
+                "Setting Apple Music shuffle to {}",
+                target_mode.name()
+            )),
             ApplePlaybackState::Failed { .. } => {
                 Some(self.apple_music.playback_error().map_or_else(
                     || "Apple Music playback could not start".to_owned(),
@@ -4184,6 +4194,14 @@ impl Render for PlayerView {
         let apple_repeat_accessibility_label = format!(
             "Cycle Apple Music repeat mode, currently {}",
             apple_repeat_mode.name()
+        );
+        let apple_can_shuffle = apple_can_repeat;
+        let apple_shuffle_mode = self.apple_music.shuffle_mode();
+        let apple_shuffle_label =
+            format!("SHUFFLE {}", apple_shuffle_mode.name().to_ascii_uppercase());
+        let apple_shuffle_accessibility_label = format!(
+            "Toggle Apple Music shuffle, currently {}",
+            apple_shuffle_mode.name()
         );
         let apple_playback_progress = self.apple_music.playback_position().map(|position| {
             let elapsed = format_time(position.elapsed_ms() as f64 / 1_000.0);
@@ -4238,6 +4256,9 @@ impl Render for PlayerView {
                             ApplePlaybackState::Seeking { .. } if active => ", seeking",
                             ApplePlaybackState::SettingRepeat { .. } if active => {
                                 ", setting repeat"
+                            }
+                            ApplePlaybackState::SettingShuffle { .. } if active => {
+                                ", setting shuffle"
                             }
                             ApplePlaybackState::Failed { .. } if active => ", playback failed",
                             _ => "",
@@ -4374,6 +4395,25 @@ impl Render for PlayerView {
                     .accessibility_label(apple_repeat_accessibility_label)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.cycle_apple_repeat(cx);
+                    })),
+                )
+            })
+            .when(apple_can_shuffle, |controls| {
+                controls.child(
+                    hardware_button(
+                        "settings-toggle-apple-shuffle",
+                        if apple_shuffle_mode == AppleShuffleMode::Off {
+                            HardwareButtonTone::Neutral
+                        } else {
+                            HardwareButtonTone::Primary
+                        },
+                        self.skin,
+                        cx,
+                    )
+                    .label(apple_shuffle_label)
+                    .accessibility_label(apple_shuffle_accessibility_label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_apple_shuffle(cx);
                     })),
                 )
             })
@@ -5639,8 +5679,8 @@ mod tests {
     use crate::app::transport::TransportState;
     use crate::apple_music::{
         AppleArtworkUrl, AppleMusicId, AppleMusicState, ApplePlaybackState, ApplePlaylist,
-        ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, CatalogPlayback,
-        CloudLibrary, ConnectionResult, ConnectionSubscription, PlaylistPage,
+        ApplePlaylistTrack, ApplePlaylistTracksState, AppleRepeatMode, AppleShuffleMode,
+        CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PlaylistPage,
         SubscriptionCapabilities, SubscriptionOffer, TestConnection, TestPlayback,
         TestPlaylistPage, TestPosition, TestTrackPage, TestTransport, TrackPage,
     };
@@ -6006,6 +6046,10 @@ mod tests {
                 window.find("settings-cycle-apple-repeat").label(),
                 Some("Cycle Apple Music repeat mode, currently off")
             );
+            assert_eq!(
+                window.find("settings-toggle-apple-shuffle").label(),
+                Some("Toggle Apple Music shuffle, currently off")
+            );
             window.click("settings-cycle-apple-repeat", cx);
         })
         .expect("test window remains available");
@@ -6024,7 +6068,10 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Playing { .. }
                 ));
-                view.apple_music.use_test_transport(TestTransport::Playing);
+                view.apple_music
+                    .use_test_transport(TestTransport::ShufflePlaying {
+                        mode: AppleShuffleMode::Songs,
+                    });
             });
         });
         cx.update_window(window, |_, window, cx| {
@@ -6032,6 +6079,33 @@ mod tests {
             assert_eq!(
                 window.find("settings-cycle-apple-repeat").label(),
                 Some("Cycle Apple Music repeat mode, currently all")
+            );
+            window.click("settings-toggle-apple-shuffle", cx);
+        })
+        .expect("test window remains available");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::SettingShuffle {
+                        target_mode: AppleShuffleMode::Songs,
+                        ..
+                    }
+                ));
+                assert!(!view.poll_apple_music_connection(cx));
+                assert_eq!(view.apple_music.shuffle_mode(), AppleShuffleMode::Songs);
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { .. }
+                ));
+                view.apple_music.use_test_transport(TestTransport::Playing);
+            });
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-toggle-apple-shuffle").label(),
+                Some("Toggle Apple Music shuffle, currently songs")
             );
             window.click("settings-seek-forward-apple-playback", cx);
         })
@@ -6050,6 +6124,13 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::Playing { .. }
                 ));
+                view.apple_music
+                    .use_test_positions(vec![TestPosition::CompletedForOccurrence {
+                        playlist_id: AppleMusicId::try_from("p.signal")
+                            .expect("fixture playlist id should be valid"),
+                        playlist_index: 2,
+                        elapsed_ms: 1_000,
+                    }]);
             });
         });
         cx.update_window(window, |_, window, cx| {
@@ -6063,12 +6144,27 @@ mod tests {
                     view.apple_music.playback(),
                     ApplePlaybackState::SkippingNext { .. }
                 ));
+                assert!(view.poll_apple_music_connection(cx));
+                assert_eq!(
+                    view.apple_music.playback(),
+                    &ApplePlaybackState::Playing {
+                        track_id: AppleMusicId::try_from("i.second-sun")
+                            .expect("fixture track id should be valid"),
+                    }
+                );
                 assert!(!view.poll_apple_music_connection(cx));
                 assert!(matches!(
                     view.apple_music.playback(),
                     ApplePlaybackState::Playing { track_id }
                         if track_id.as_str() == "i.third-orbit"
                 ));
+                view.apple_music
+                    .use_test_positions(vec![TestPosition::CompletedForOccurrence {
+                        playlist_id: AppleMusicId::try_from("p.signal")
+                            .expect("fixture playlist id should be valid"),
+                        playlist_index: 1,
+                        elapsed_ms: 500,
+                    }]);
             });
         });
         cx.update_window(window, |_, window, cx| {
@@ -6087,6 +6183,12 @@ mod tests {
                 assert!(matches!(
                     view.apple_music.playback(),
                     ApplePlaybackState::SkippingPrevious { .. }
+                ));
+                assert!(view.poll_apple_music_connection(cx));
+                assert!(matches!(
+                    view.apple_music.playback(),
+                    ApplePlaybackState::Playing { track_id }
+                        if track_id.as_str() == "i.third-orbit"
                 ));
                 assert!(!view.poll_apple_music_connection(cx));
                 assert!(matches!(

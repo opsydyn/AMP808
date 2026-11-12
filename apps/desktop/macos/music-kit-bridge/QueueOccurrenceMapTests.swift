@@ -139,6 +139,21 @@ private enum QueueOccurrenceMapTests {
             nil,
             "unknown repeat values must fail closed"
         )
+        requireEqual(
+            shuffleModeForCommandValue(0),
+            MusicPlayer.ShuffleMode.off,
+            "shuffle value zero must disable shuffle"
+        )
+        requireEqual(
+            shuffleModeForCommandValue(1),
+            MusicPlayer.ShuffleMode.songs,
+            "shuffle value one must shuffle songs"
+        )
+        requireEqual(
+            shuffleModeForCommandValue(2),
+            nil,
+            "unknown shuffle values must fail closed"
+        )
     }
 
     private static func requireEqual(
@@ -170,6 +185,16 @@ private enum QueueOccurrenceMapTests {
     private static func requireEqual(
         _ actual: MusicPlayer.RepeatMode?,
         _ expected: MusicPlayer.RepeatMode?,
+        _ message: String
+    ) {
+        guard actual == expected else {
+            fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
+        }
+    }
+
+    private static func requireEqual(
+        _ actual: MusicPlayer.ShuffleMode?,
+        _ expected: MusicPlayer.ShuffleMode?,
         _ message: String
     ) {
         guard actual == expected else {

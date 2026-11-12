@@ -14,9 +14,9 @@ use serde::Deserialize;
 
 use super::{
     AppleArtworkUrl, AppleMusicId, AppleObservedPlaybackStatus, ApplePlaylist, ApplePlaylistTrack,
-    AppleRepeatMode, AppleTransportCommand, AppleTransportStatus, AuthorisationStatus,
-    CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription, PageCursor,
-    PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
+    AppleRepeatMode, AppleShuffleMode, AppleTransportCommand, AppleTransportStatus,
+    AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult, ConnectionSubscription,
+    PageCursor, PlaylistPage, RequestId, SubscriptionCapabilities, SubscriptionOffer, TrackPage,
 };
 
 const CAPABILITY_ENVELOPE_VERSION: u16 = 1;
@@ -212,6 +212,7 @@ struct WireTransport {
     track_id: String,
     status: String,
     repeat_mode: Option<String>,
+    shuffle_mode: Option<String>,
     error: Option<String>,
 }
 
@@ -664,6 +665,7 @@ pub(crate) struct TransportResponse {
     track_id: AppleMusicId,
     status: AppleTransportStatus,
     repeat_mode: Option<AppleRepeatMode>,
+    shuffle_mode: Option<AppleShuffleMode>,
 }
 
 impl TransportResponse {
@@ -704,11 +706,21 @@ impl TransportResponse {
                 _ => Err(BridgeProtocolError::UnknownRepeatMode),
             })
             .transpose()?;
+        let shuffle_mode = wire
+            .shuffle_mode
+            .as_deref()
+            .map(|mode| match mode {
+                "off" => Ok(AppleShuffleMode::Off),
+                "songs" => Ok(AppleShuffleMode::Songs),
+                _ => Err(BridgeProtocolError::UnknownShuffleMode),
+            })
+            .transpose()?;
         Ok(Self {
             request_id: RequestId::new(wire.request_id),
             track_id,
             status,
             repeat_mode,
+            shuffle_mode,
         })
     }
 
@@ -728,6 +740,10 @@ impl TransportResponse {
         self.repeat_mode
     }
 
+    pub(crate) const fn shuffle_mode(&self) -> Option<AppleShuffleMode> {
+        self.shuffle_mode
+    }
+
     #[cfg(test)]
     fn completed_for_test(
         request_id: RequestId,
@@ -739,6 +755,7 @@ impl TransportResponse {
             track_id,
             status,
             repeat_mode: None,
+            shuffle_mode: None,
         }
     }
 
@@ -754,6 +771,23 @@ impl TransportResponse {
             track_id,
             status,
             repeat_mode: Some(repeat_mode),
+            shuffle_mode: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn completed_with_shuffle_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+        shuffle_mode: AppleShuffleMode,
+    ) -> Self {
+        Self {
+            request_id,
+            track_id,
+            status,
+            repeat_mode: None,
+            shuffle_mode: Some(shuffle_mode),
         }
     }
 }
@@ -909,6 +943,7 @@ pub(crate) enum BridgeProtocolError {
     InvalidTrackIdentifier,
     UnknownPlaybackStatus,
     UnknownRepeatMode,
+    UnknownShuffleMode,
     PlaylistRequestFailed,
     TrackRequestFailed,
     PlaybackFailed,
@@ -961,6 +996,9 @@ impl fmt::Display for BridgeProtocolError {
             Self::UnknownRepeatMode => {
                 formatter.write_str("Apple Music returned an unknown repeat mode")
             }
+            Self::UnknownShuffleMode => {
+                formatter.write_str("Apple Music returned an unknown shuffle mode")
+            }
             Self::PlaylistRequestFailed => {
                 formatter.write_str("Apple Music could not load the playlist library")
             }
@@ -994,6 +1032,7 @@ impl Error for BridgeProtocolError {
             | Self::InvalidTrackIdentifier
             | Self::UnknownPlaybackStatus
             | Self::UnknownRepeatMode
+            | Self::UnknownShuffleMode
             | Self::PlaylistRequestFailed
             | Self::TrackRequestFailed
             | Self::PlaybackFailed
@@ -1433,6 +1472,13 @@ const fn transport_bridge_arguments(command: AppleTransportCommand) -> (u8, u64)
                 AppleRepeatMode::One => 2,
             },
         ),
+        AppleTransportCommand::SetShuffle { mode } => (
+            7,
+            match mode {
+                AppleShuffleMode::Off => 0,
+                AppleShuffleMode::Songs => 1,
+            },
+        ),
     }
 }
 
@@ -1524,6 +1570,28 @@ impl TransportTask {
                 track_id,
                 status,
                 repeat_mode,
+            )))
+            .expect("the test transport receiver remains live during construction");
+        Self {
+            receiver,
+            _test_sender: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_with_shuffle_for_test(
+        request_id: RequestId,
+        track_id: AppleMusicId,
+        status: AppleTransportStatus,
+        shuffle_mode: AppleShuffleMode,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(TransportResponse::completed_with_shuffle_for_test(
+                request_id,
+                track_id,
+                status,
+                shuffle_mode,
             )))
             .expect("the test transport receiver remains live during construction");
         Self {
@@ -2005,8 +2073,8 @@ mod tests {
         transport_bridge_arguments,
     };
     use crate::apple_music::{
-        AppleObservedPlaybackStatus, AppleRepeatMode, AppleTransportCommand, AppleTransportStatus,
-        AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
+        AppleObservedPlaybackStatus, AppleRepeatMode, AppleShuffleMode, AppleTransportCommand,
+        AppleTransportStatus, AuthorisationStatus, CatalogPlayback, CloudLibrary, ConnectionResult,
         ConnectionSubscription, PageCursor, RequestId, SubscriptionCapabilities, SubscriptionOffer,
     };
 
@@ -2045,6 +2113,22 @@ mod tests {
                 mode: AppleRepeatMode::One,
             }),
             (6, 2)
+        );
+    }
+
+    #[test]
+    fn shuffle_transport_encoding_carries_the_typed_mode_value() {
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::SetShuffle {
+                mode: AppleShuffleMode::Off,
+            }),
+            (7, 0)
+        );
+        assert_eq!(
+            transport_bridge_arguments(AppleTransportCommand::SetShuffle {
+                mode: AppleShuffleMode::Songs,
+            }),
+            (7, 1)
         );
     }
 
@@ -2253,6 +2337,26 @@ mod tests {
         .expect_err("an unknown repeat mode must fail closed");
 
         assert!(matches!(error, BridgeProtocolError::UnknownRepeatMode));
+    }
+
+    #[test]
+    fn transport_envelope_confirms_the_applied_shuffle_mode() {
+        let response = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":65,"track_id":"i.first","status":"playing","shuffle_mode":"songs","error":null}"#,
+        )
+        .expect("an applied shuffle mode should cross the bridge");
+
+        assert_eq!(response.shuffle_mode(), Some(AppleShuffleMode::Songs));
+    }
+
+    #[test]
+    fn transport_envelope_rejects_an_unknown_shuffle_mode() {
+        let error = TransportResponse::parse(
+            br#"{"version":1,"kind":"transport","request_id":66,"track_id":"i.first","status":"playing","shuffle_mode":"albums","error":null}"#,
+        )
+        .expect_err("an unknown shuffle mode must fail closed");
+
+        assert!(matches!(error, BridgeProtocolError::UnknownShuffleMode));
     }
 
     #[test]

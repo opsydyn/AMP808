@@ -290,8 +290,10 @@ memory ownership, error redaction, and MusicKit capability before product UI exp
       identity-checked transport boundary and expose observable transitional and terminal states.
       Bounded relative seeking uses that boundary only when native elapsed time and duration are
       known. Repeat cycles Off, All, and One only after MusicKit confirms the applied native mode
-      and preserves whether playback was playing or paused. Native elapsed time is exposed through
-      an accessible progress indicator and remains stable while paused.
+      and preserves whether playback was playing or paused. Shuffle toggles Off and Songs through
+      the same native-confirmed contract and preserves exact playlist-occurrence identity after
+      MusicKit reorders the queue. Native elapsed time is exposed through an accessible progress
+      indicator and remains stable while paused.
 - [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
       submits synthetic samples to the analysis or projectM pipelines.
 - [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
@@ -753,6 +755,43 @@ Apple queue-entry identity prerequisite evidence recorded on 2026-11-08:
   scoped to the queue AMP808 created. Native shuffle command/state, shuffled live acceptance, and
   manual VoiceOver acceptance remain separate work.
 
+Apple playback shuffle evidence recorded on 2026-11-12:
+
+- The desktop-private Apple domain models MusicKit's Off and Songs states independently of the TUI
+  playlist type. A user action toggles the target only while playback is Playing or Paused,
+  exposes an observable `SettingShuffle` state, blocks overlapping transport intent, and does not
+  display the target as applied until the native response confirms it.
+- The typed transport boundary carries `SetShuffle` as command 7 with a bounded value of 0 or 1.
+  Swift maps those values to MusicKit's `.off` and `.songs`, assigns
+  `ApplicationMusicPlayer.state.shuffleMode`, and returns both the actual native shuffle mode and
+  playback status. Rust rejects unknown modes, mismatched modes, stale identity, and a changed
+  playback disposition instead of accepting requested state as proof.
+- GPUI exposes one keyboard-focusable transport-row control with the accessibility labels
+  `Toggle Apple Music shuffle, currently off` and `currently songs`. The active Songs state uses
+  the existing primary hardware tone and the control remains available while paused.
+- Coordinator tests cover native-confirmed activation, paused-state preservation, and mismatched
+  confirmation. Bridge tests cover both command values, successful parsing, and fail-closed
+  unknown values. Swift 6 tests with warnings denied cover both native values and invalid input,
+  while the GPUI interaction test exercises the accessible Off-to-Songs transition.
+- While Songs is active, Previous and Next remain available at the original list boundaries for a
+  queue with more than one entry. The coordinator retains the current occurrence through transport
+  confirmation and waits for MusicKit's position/current-entry observation instead of predicting
+  sequential adjacency; focused tests cover both boundary controls and authoritative identity
+  reconciliation.
+- The base desktop suite passes 253 tests, the projectM-enabled desktop suite passes 255 tests,
+  the full locked workspace passes, strict base and projectM desktop Clippy pass with warnings
+  denied, formatting and `git diff --check` pass, and the development-signed bundle builds and
+  passes its validator.
+- In the fresh signed build, reconnecting loaded 170 playlists and a 48-entry playlist. Playback
+  began on occurrence one (`One More Time`, 05:20), the visible control changed from Off to Songs
+  only after native confirmation, and Next selected non-adjacent occurrence four
+  (`Vacuum Boogie`, 06:08) while retaining Songs. Pausing at 00:05 and toggling Songs to Off kept
+  playback paused; Stop then removed the transport controls and exposed the stopped state.
+- This qualifies native shuffle state, shuffled queue navigation, stable occurrence identity,
+  paused-state preservation, and accessible labels. The session still required an explicit
+  Connect action after relaunch, and manual VoiceOver, denied/revoked, offline/failure, and a live
+  observed natural transition remain separate acceptance gates.
+
 Official Apple references checked through 2026-11-08:
 
 - <https://developer.apple.com/help/account/services/musickit/>
@@ -765,6 +804,8 @@ Official Apple references checked through 2026-11-08:
 - <https://developer.apple.com/documentation/musickit/musicplayer/playbacktime>
 - <https://developer.apple.com/documentation/musickit/musicplayer/repeatmode>
 - <https://developer.apple.com/documentation/musickit/musicplayer/state-swift.class/repeatmode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/shufflemode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/state-swift.class/shufflemode>
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>
