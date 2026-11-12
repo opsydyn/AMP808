@@ -719,10 +719,39 @@ Apple playback repeat evidence recorded on 2026-11-08:
   cycled Off to All to One to Off. Pausing at 00:14 kept playback paused while Repeat changed from
   Off to All; Resume retained All and Stop removed the transport controls and exposed
   `Apple Music playback stopped`.
-- Shuffle remains separate. The current ordered queue-index map assumes playlist order, while
+- Shuffle remained separate at that point. The ordered queue-index map assumed playlist order, while
   MusicKit shuffle may reorder queue entries; shipping shuffle safely requires a stable
   queue-entry-to-playlist-occurrence identity map rather than reusing repeat's scalar mode path.
   A live observed natural transition and manual VoiceOver acceptance also remain open.
+
+Apple queue-entry identity prerequisite evidence recorded on 2026-11-08:
+
+- Apple documents `MusicPlayer.Queue.Entry.id` as the unique identifier of a playback-queue entry
+  and exposes the entries of `ApplicationMusicPlayer.Queue`. AMP808 now captures those native
+  identifiers only after it has created and started its app-scoped queue.
+- The bridge uses the known selected occurrence once to map each initial queue-entry identifier to
+  its exact ordered playlist occurrence. Later position reconciliation looks up the native current
+  entry by that stable map and no longer derives identity from the entry's current array position.
+  A reordered native queue can therefore preserve duplicate playlist occurrences without exposing
+  MusicKit identifiers through FFI or changing the Rust domain contract.
+- Queue identity establishment fails closed for blank, duplicate, missing-selected, oversized, or
+  otherwise inconsistent entry sets. Playback can continue under MusicKit ownership, but AMP808
+  will report position unavailable rather than guess an occurrence.
+- Swift 6 tests with warnings denied cover full queues, suffix queues, unique identities for exact
+  duplicate occurrences, reordered lookup, blank and duplicate identifiers, missing selected
+  identity, and queue shapes outside the loaded playlist. The focused desktop suite passes 245
+  tests, the full locked workspace and strict desktop Clippy pass, formatting and
+  `git diff --check` pass, the development-signed bundle builds and passes its validator, and the
+  bridge contract is unchanged.
+- In the fresh signed build, whole-playlist playback exposed occurrence one (`One More Time`) at
+  00:12 of 05:20. Next changed the selected occurrence to `Love Story`, changed duration to 03:21,
+  and advanced its progress from 00:00 to 00:03. Stop then removed progress and exposed the
+  stopped state. This qualifies the existing start, identity reconciliation, Next, and Stop paths
+  against the captured map; it is not shuffled-playback evidence.
+- This is a prerequisite rather than shuffle delivery. Apple documents entry uniqueness but does
+  not promise identity survival across replacement with a different queue; the map is therefore
+  scoped to the queue AMP808 created. Native shuffle command/state, shuffled live acceptance, and
+  manual VoiceOver acceptance remain separate work.
 
 Official Apple references checked through 2026-11-08:
 
@@ -739,6 +768,8 @@ Official Apple references checked through 2026-11-08:
 - <https://developer.apple.com/documentation/musickit/systemmusicplayer>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry/id>
+- <https://developer.apple.com/documentation/musickit/applicationmusicplayer/queue-swift.class>
 - <https://developer.apple.com/documentation/musickit/musicplayer/queue/init%28playlist%3Astartingat%3A%29>
 - <https://developer.apple.com/documentation/bundleresources/information-property-list/nsapplemusicusagedescription>
 

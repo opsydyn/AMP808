@@ -45,31 +45,79 @@ private enum QueueOccurrenceMapTests {
             "a queue beginning at the selected occurrence must map its tail"
         )
         requireEqual(
-            selectedQueueAnchorIndex(
-                knownSelectedQueueIndex: nil,
-                queueCount: 2,
-                currentQueueIndex: 0
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-0", "queue-1", "queue-2", "queue-3"],
+                playlistCount: 4,
+                selectedPlaylistIndex: 2,
+                selectedQueueEntryID: "queue-2"
             ),
-            0,
-            "a newly resolved current entry must become the selected queue anchor"
+            ["queue-0": 0, "queue-1": 1, "queue-2": 2, "queue-3": 3],
+            "queue entry identity must preserve exact playlist occurrences"
         )
         requireEqual(
-            selectedQueueAnchorIndex(
-                knownSelectedQueueIndex: nil,
-                queueCount: 2,
-                currentQueueIndex: 2
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-0", "queue-0"],
+                playlistCount: 2,
+                selectedPlaylistIndex: 0,
+                selectedQueueEntryID: "queue-0"
             ),
             nil,
-            "an out-of-range current queue entry must fail closed"
+            "duplicate queue entry identity must fail closed"
         )
         requireEqual(
-            selectedQueueAnchorIndex(
-                knownSelectedQueueIndex: 1,
-                queueCount: 2,
-                currentQueueIndex: 0
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-2", "queue-3"],
+                playlistCount: 4,
+                selectedPlaylistIndex: 2,
+                selectedQueueEntryID: "queue-2"
             ),
-            1,
-            "a previously resolved queue anchor must remain authoritative"
+            ["queue-2": 2, "queue-3": 3],
+            "a suffix queue must retain playlist occurrence identity"
+        )
+        requireEqual(
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-0", "   "],
+                playlistCount: 2,
+                selectedPlaylistIndex: 0,
+                selectedQueueEntryID: "queue-0"
+            ),
+            nil,
+            "blank queue entry identity must fail closed"
+        )
+        requireEqual(
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-0", "queue-1"],
+                playlistCount: 2,
+                selectedPlaylistIndex: 0,
+                selectedQueueEntryID: "queue-missing"
+            ),
+            nil,
+            "a missing selected queue identity must fail closed"
+        )
+        let reorderedPlaylistIndices = queueEntryOccurrenceMap(
+            entryIDs: ["queue-0", "queue-1", "queue-2", "queue-3"],
+            playlistCount: 4,
+            selectedPlaylistIndex: 2,
+            selectedQueueEntryID: "queue-2"
+        ).map { occurrenceMap in
+            ["queue-3", "queue-0", "queue-2", "queue-1"].compactMap {
+                occurrenceMap[$0]
+            }
+        }
+        requireEqual(
+            reorderedPlaylistIndices,
+            [3, 0, 2, 1],
+            "later queue order must not change an entry's playlist occurrence"
+        )
+        requireEqual(
+            queueEntryOccurrenceMap(
+                entryIDs: ["queue-0", "queue-1", "queue-2"],
+                playlistCount: 2,
+                selectedPlaylistIndex: 0,
+                selectedQueueEntryID: "queue-0"
+            ),
+            nil,
+            "a queue extending beyond the playlist must fail closed"
         )
         requireEqual(
             repeatModeForCommandValue(0),
@@ -103,7 +151,17 @@ private enum QueueOccurrenceMapTests {
         }
     }
 
-    private static func requireEqual(_ actual: Int?, _ expected: Int?, _ message: String) {
+    private static func requireEqual(_ actual: [Int]?, _ expected: [Int]?, _ message: String) {
+        guard actual == expected else {
+            fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
+        }
+    }
+
+    private static func requireEqual(
+        _ actual: [String: Int]?,
+        _ expected: [String: Int]?,
+        _ message: String
+    ) {
         guard actual == expected else {
             fatalError("\(message): expected \(String(describing: expected)), got \(String(describing: actual))")
         }
