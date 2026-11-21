@@ -1,5 +1,18 @@
-# Keep the first Moon slice as one workspace-level project beside Cargo.lock.
+versionConstraint: '2.6.5'
+
 projects:
   root: '.'
+  web: 'apps/web'
 
 defaultProject: root
+
+experiments:
+  casOutputsCache: true
+
+cache:
+  unstable_sharedWorktreeCache: true
+
+pipeline:
+  installDependencies: false
+  syncProjects: false
+  syncWorkspace: false

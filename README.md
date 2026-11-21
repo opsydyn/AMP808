@@ -334,6 +334,25 @@ moon run release-gate
 task surface for the same commands. The native `amp808` package is binary-only, while workspace
 library targets continue to participate in doctest checks.
 
+### Cached local checks with Moon
+
+With [Moon 2.6.5](https://github.com/moonrepo/moon/releases/tag/v2.6.5), Rust, nextest, and
+the web build prerequisites above on your PATH, run from the repository root:
+
+```bash
+moon run root:lint root:nextest
+moon run web:pages
+moon run web:pages -- --public-url /
+```
+
+Moon shares successful check results and `apps/web/dist-pages/` between linked Git
+worktrees on the same machine. Trunk's usual development and CI builds write to
+`apps/web/dist/`. Cargo manages its own build artifacts under `target/`. Use the direct
+command `cargo nextest run --locked --profile ci` to produce the CI JUnit report.
+
+Use `moon run --cache off root:lint root:nextest web:pages` to execute all three tasks.
+For a cold build, also start with an empty Cargo target directory.
+
 ### Project Structure
 
 ```text

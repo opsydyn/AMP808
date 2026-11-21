@@ -1,0 +1,37 @@
+tasks:
+  pages:
+    command: 'trunk build --config Trunk.toml --locked --release --dist dist-pages'
+    inputs:
+      - 'Cargo.toml'
+      - 'Trunk.toml'
+      - 'index.html'
+      - 'src/**/*'
+      - '/Cargo.toml'
+      - '/Cargo.lock'
+      - '/rust-toolchain.toml'
+      - '/apps/*/Cargo.toml'
+      - '/crates/amp808-core/**/*'
+      - '/.cargo/config*'
+      - '.cargo/config*'
+      - '$CARGO_BUILD_RUSTFLAGS'
+      - '$CARGO_ENCODED_RUSTFLAGS'
+      - '$CARGO_PROFILE_*'
+      - '$CARGO_TARGET_*'
+      - '$RUSTFLAGS'
+      - '$RUSTC'
+      - '$RUSTC_WRAPPER'
+      - '$RUSTC_WORKSPACE_WRAPPER'
+      - '$TRUNK_BUILD_*'
+      - '$TRUNK_TOOLS_*'
+      - '$WASM_BINDGEN_*'
+    outputs:
+      - 'dist-pages/'
+    checks:
+      - check: fingerprint
+        script: 'rustc --version --verbose'
+      - check: fingerprint
+        script: 'trunk --version'
+      - check: fingerprint
+        script: 'wasm-bindgen --version'
+      - check: fingerprint
+        script: 'wasm-opt --version'
