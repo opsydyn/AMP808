@@ -1,6 +1,7 @@
 /target
 /.moon/cache/
 /apps/web/dist/
+/apps/web/dist-pages/
 *.mp3
 .DS_Store
 /cliamp-go

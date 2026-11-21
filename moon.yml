@@ -8,9 +8,8 @@ env:
 fileGroups:
   sources:
     - 'apps/tui/src/**/*'
-    - 'apps/tui/Cargo.toml'
     - 'apps/web/src/**/*'
-    - 'apps/web/Cargo.toml'
+    - 'apps/*/Cargo.toml'
     - 'crates/*/src/**/*'
     - 'crates/*/Cargo.toml'
     - 'Cargo.toml'
@@ -23,12 +22,28 @@ fileGroups:
     - 'apps/desktop/src/**/*'
     - 'apps/desktop/tests/**/*'
     - 'apps/desktop/Cargo.toml'
+    - 'crates/*/src/**/*'
+    - 'crates/*/Cargo.toml'
     - 'Cargo.toml'
     - 'Cargo.lock'
     - 'rust-toolchain.toml'
   tests:
     - 'apps/*/tests/**/*'
     - 'crates/*/tests/**/*'
+  cargoConfig:
+    - '.cargo/config*'
+    - '$CARGO_BUILD_TARGET'
+    - '$CARGO_BUILD_RUSTFLAGS'
+    - '$CARGO_ENCODED_RUSTFLAGS'
+    - '$RUSTFLAGS'
+    - '$RUSTC'
+    - '$RUSTC_WRAPPER'
+    - '$RUSTC_WORKSPACE_WRAPPER'
+    - '$CC'
+    - '$CFLAGS'
+    - '$PKG_CONFIG_PATH'
+    - '$PKG_CONFIG_LIBDIR'
+    - '$OPENSSL_DIR'
   release:
     - '.github/workflows/release.yml'
     - 'release-plz.toml'
@@ -46,6 +61,8 @@ tasks:
       - '@group(workspaceLayout)'
   build:
     command: 'cargo build --locked'
+    options:
+      cache: false
     inputs:
       - '@group(sources)'
   check:
@@ -87,6 +104,7 @@ tasks:
     inputs:
       - '@group(desktopSources)'
     options:
+      cache: false
       runInCI: false
   desktop-milkdrop-test-macos:
     command: 'cargo test --locked -p amp808-r3tr0 --features milkdrop-projectm'
@@ -105,18 +123,63 @@ tasks:
     inputs:
       - '@group(sources)'
       - '@group(tests)'
+      - 'apps/desktop/src/**/*'
+      - 'apps/desktop/build.rs'
+      - 'file://rustfmt.toml?optional'
+      - 'file://.rustfmt.toml?optional'
+    checks:
+      - check: fingerprint
+        script: 'cargo fmt --version'
   lint:
     command: 'cargo clippy --all-targets --locked -- -D warnings'
     inputs:
       - '@group(sources)'
       - '@group(tests)'
+      - '@group(cargoConfig)'
+      - 'file://clippy.toml?optional'
+      - 'file://.clippy.toml?optional'
+      - '$CARGO_PROFILE_*'
+      - '$CARGO_TARGET_*'
+    checks:
+      - check: fingerprint
+        script: 'rustc --version --verbose'
+      - check: fingerprint
+        script: 'cargo clippy --version'
+      - check: fingerprint
+        script: 'pkg-config --modversion alsa openssl'
   test:
     command: 'cargo test --locked'
     inputs:
       - '@group(sources)'
       - '@group(tests)'
+      - '@group(cargoConfig)'
+      - '$CARGO_PROFILE_*'
+      - '$CARGO_TARGET_*'
+    checks:
+      - check: fingerprint
+        script: 'rustc --version --verbose'
+      - check: fingerprint
+        script: 'pkg-config --modversion alsa openssl'
+  nextest:
+    command: 'cargo nextest run --locked'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - '@group(cargoConfig)'
+      - '.config/nextest.toml'
+      - '$CARGO_PROFILE_*'
+      - '$CARGO_TARGET_*'
+    checks:
+      - check: fingerprint
+        script: 'rustc --version --verbose'
+      - check: fingerprint
+        script: 'cargo nextest --version'
+      - check: fingerprint
+        script: 'pkg-config --modversion alsa openssl'
   release-gate:
     command: 'bash scripts/check-release-gate.sh'
+    options:
+      cache: false
     inputs:
       - '@group(sources)'
       - '@group(tests)'
