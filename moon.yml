@@ -1,0 +1,123 @@
+# ADR-0021: These workspace-level tasks mirror the authoritative Cargo gates.
+language: rust
+layer: application
+
+env:
+  CARGO_TERM_COLOR: always
+
+fileGroups:
+  sources:
+    - 'apps/tui/src/**/*'
+    - 'apps/tui/Cargo.toml'
+    - 'apps/web/src/**/*'
+    - 'apps/web/Cargo.toml'
+    - 'crates/*/src/**/*'
+    - 'crates/*/Cargo.toml'
+    - 'Cargo.toml'
+    - 'Cargo.lock'
+    - 'rust-toolchain.toml'
+  desktopSources:
+    - 'apps/desktop/assets/**/*'
+    - 'apps/desktop/build.rs'
+    - 'apps/desktop/macos/**/*'
+    - 'apps/desktop/src/**/*'
+    - 'apps/desktop/tests/**/*'
+    - 'apps/desktop/Cargo.toml'
+    - 'Cargo.toml'
+    - 'Cargo.lock'
+    - 'rust-toolchain.toml'
+  tests:
+    - 'apps/*/tests/**/*'
+    - 'crates/*/tests/**/*'
+  release:
+    - '.github/workflows/release.yml'
+    - 'release-plz.toml'
+    - 'scripts/check-release-gate.sh'
+  workspaceLayout:
+    - 'Cargo.toml'
+    - 'apps/*/Cargo.toml'
+    - 'crates/*/Cargo.toml'
+    - 'scripts/check-workspace-layout.sh'
+
+tasks:
+  layout:
+    command: 'bash scripts/check-workspace-layout.sh'
+    inputs:
+      - '@group(workspaceLayout)'
+  build:
+    command: 'cargo build --locked'
+    inputs:
+      - '@group(sources)'
+  check:
+    command: 'cargo check --locked'
+    inputs:
+      - '@group(sources)'
+  check-web:
+    command: 'cargo check --locked -p amp808_web --target wasm32-unknown-unknown'
+    inputs:
+      - '@group(sources)'
+  desktop-check:
+    command: 'cargo check --locked -p amp808-r3tr0'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-apple-config-check:
+    command: 'bash scripts/check-apple-music-bundle-config.sh'
+    inputs:
+      - 'apps/desktop/macos/Info.plist'
+      - 'apps/desktop/macos/AMP808-R3TR0.entitlements'
+      - 'scripts/check-apple-music-bundle-config.sh'
+    options:
+      runInCI: false
+  desktop-test:
+    command: 'cargo test --locked -p amp808-r3tr0'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-lint:
+    command: 'cargo clippy --locked -p amp808-r3tr0 --tests -- -D warnings'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-build-macos:
+    command: 'cargo build --locked -p amp808-r3tr0'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-milkdrop-test-macos:
+    command: 'cargo test --locked -p amp808-r3tr0 --features milkdrop-projectm'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  desktop-milkdrop-lint-macos:
+    command: 'cargo clippy --locked -p amp808-r3tr0 --tests --features milkdrop-projectm -- -D warnings'
+    inputs:
+      - '@group(desktopSources)'
+    options:
+      runInCI: false
+  format:
+    command: 'cargo fmt --all --check'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  lint:
+    command: 'cargo clippy --all-targets --locked -- -D warnings'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  test:
+    command: 'cargo test --locked'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+  release-gate:
+    command: 'bash scripts/check-release-gate.sh'
+    inputs:
+      - '@group(sources)'
+      - '@group(tests)'
+      - '@group(release)'

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-03-16
 decision-makers: alan
 ---
@@ -209,3 +209,45 @@ Implementation note, March 17, 2026:
 - Phase 2 algorithm choice is now fixed:
   - custom onset-envelope autocorrelation
   - no external BPM dependency in the current product phase
+
+### 2026-11-07 desktop extension
+
+The decision now applies to AMP808-R3TR0 as well as the Ratatui application. The existing
+dependency-free estimator will move into `amp808-core` as pure sample-to-tempo analysis used by
+both front ends. Ratatui and GPUI retain ownership of presentation labels and unsupported-state
+policy; decoder, GPUI, persistence, and provider types must not enter the shared crate.
+
+For desktop playback, the existing analysis worker will update the estimator from the existing
+bounded PCM tap and publish `Estimating` or `Locked` alongside each signal snapshot. A new playback
+session creates a new estimator, so changing tracks resets tempo state. Pausing preserves the last
+published tempo while continuing to suppress live waveform and level motion. With no local
+session, the sidebar presents BPM as unavailable.
+
+The left player sidebar will present BPM prominently and add only technical metadata supported by
+the local decoder boundary: container, codec, sample rate, channel count, duration, and bit depth
+when known. Bitrate is shown only if Symphonia reports a trustworthy value; it must not be guessed
+from file size. Missing values use an explicit unavailable marker rather than invented metadata.
+
+The desktop extension deliberately excludes beat grids, DJ sync, persistence, BPM search or
+sorting, remote-provider enrichment, full-track pre-analysis, and new native or FFI dependencies.
+
+Desktop extension verification:
+
+- [x] Shared deterministic tests lock near 90, 120, 128, and 160 BPM without octave substitution.
+- [x] The desktop analysis worker publishes estimating and locked tempo states off the render and
+  audio threads.
+- [x] A new playback session resets BPM and pause preserves the last published tempo.
+- [x] The left sidebar exposes BPM and decoder-confirmed technical metadata with an accessible
+  summary and honest unavailable states.
+- [x] Ratatui continues to use the same shared estimator without changing its visible labels.
+- [x] Workspace tests, desktop projectM tests, relevant strict Clippy gates, formatting, and
+  whitespace checks pass.
+
+Qualification on 2026-11-07 used deterministic synthetic click tracks and literal local WAV
+fixtures. The estimator locked within tolerance at 90, 120, 128, and 160 BPM. Desktop analysis,
+pause preservation, technical metadata, unavailable-state, and accessibility tests passed. The
+default workspace suite, desktop base and projectM suites, relevant strict Clippy gates,
+formatting, and whitespace checks passed. The full workspace all-target Clippy command remains
+blocked by two unrelated pre-existing `useless_vec` findings in `apps/web/src/main.rs`; that file
+was not changed. Symphonia 0.6 exposes no trustworthy bitrate value for the tested local media, so
+the sidebar reports bitrate as unavailable rather than estimating it from file size.

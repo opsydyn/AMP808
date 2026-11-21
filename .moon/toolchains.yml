@@ -1,0 +1,3 @@
+# ADR-0021: Moon orchestrates the existing Cargo toolchain; rust-toolchain.toml
+# remains the single Rust version pin for the repository.
+rust: {}

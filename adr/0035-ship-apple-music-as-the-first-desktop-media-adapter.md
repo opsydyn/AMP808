@@ -1,0 +1,879 @@
+---
+status: accepted
+date: 2026-11-07
+decision-makers: alan
+consulted: Apple Music API and MusicKit documentation, cliamp provider prior art
+informed: AMP808 contributors
+---
+
+# Ship Apple Music as the first desktop media adapter
+
+## Context and Problem Statement
+
+AMP808-R3TR0 is a macOS-first GPUI desktop player with local playback, a persistent local
+catalogue, playlists, MilkDrop visualisation, and a cancellable `yt-dlp` integration. Apple Music
+is required for the first provider phase and is a product differentiator rather than another PCM
+source. Apple owns playback and does not expose decoded samples to AMP808, while authorised
+MusicKit clients can browse a subscriber's library, playlists, catalogue, recommendations, and
+history and can ask a MusicKit player to play selected items.
+
+During the first playback-handoff compile spike on 2026-11-08, Xcode 26.5's macOS MusicKit module
+proved that `SystemMusicPlayer` is explicitly unavailable on macOS. The same module exposes
+`ApplicationMusicPlayer` on macOS 14 and later, including queue, prepare, play, pause, stop, seek,
+and skip operations. The accepted decision is therefore amended to use
+`ApplicationMusicPlayer` for the desktop product. Music.app automation remains separate TUI prior
+art rather than a dependency of this GUI.
+
+The Ratatui application already contains useful Apple prior art: ADR-0012 controls `Music.app`,
+ADR-0013 introduced a metadata client, and ADR-0020 reopened read-only Apple Music work. That code
+must not be imported into the decoupled desktop product or changed during this delivery. The GUI
+must first prove its own product and adapter contract. TUI parity is a required follow-up after the
+GUI delivery is complete; only then should the project decide whether the proven Apple boundary
+belongs in a shared crate.
+
+How should AMP808-R3TR0 add authorised Apple Music metadata, playlist browsing, and deterministic
+playback selection without leaking Swift, MusicKit, tokens, Apple DTOs, or GPUI types across the
+application's domain boundaries?
+
+## Decision Drivers
+
+- Apple Music is required for the first provider phase and is AMP808-R3TR0's initial provider USP.
+- The shipping app must obtain informed user consent instead of requiring users to paste tokens.
+- The user's Apple Developer Program membership permits an explicit App ID with the MusicKit App
+  Service and automatic developer-token generation.
+- Selecting a song or playlist must have a defined playback result, not end at a metadata-only
+  browser.
+- Apple playback remains external to AMP808's CPAL/Symphonia engine; no false PCM, BPM, EQ, or
+  MilkDrop claims are allowed.
+- Provider DTOs, authentication, platform FFI, application state, and GPUI presentation must have
+  explicit owners.
+- The first implementation must not create a speculative shared crate or modify `apps/tui`.
+- Production publication, notarisation, and release signing remain deferred, while a
+  development-signed bundle is required for live MusicKit acceptance.
+
+## Considered Options
+
+- Add a desktop-private Apple adapter backed by a thin native MusicKit bridge and
+  `ApplicationMusicPlayer`.
+- Copy the TUI Apple Music REST client and require manually supplied developer and user tokens.
+- Import the TUI `PlaybackBackend`, Apple API client, and UI-facing provider model into the desktop.
+- Create a shared Apple Music crate before the desktop contract is proven.
+- Keep Apple metadata in Rust but continue using only `osascript` for transport.
+
+## Decision Outcome
+
+Chosen option: **add a desktop-private Apple adapter backed by a thin native MusicKit bridge and
+`ApplicationMusicPlayer`**, because it gives the desktop product native consent, automatically
+managed tokens, typed metadata, and a deterministic playlist-to-playback handoff while keeping
+Apple and Swift details outside GPUI and the local audio engine.
+
+1. Add a desktop-owned Apple Music bounded context under `apps/desktop`.
+   - Domain values describe authorisation, subscription availability, Apple media references,
+     playlists, tracks, paging, artwork descriptors, and playback state.
+   - Application state is an explicit enum covering unavailable, unauthorised, authorising,
+     loading, loaded, empty, playing, failed, and access-revoked outcomes. Request identity rejects
+     stale async responses.
+   - IDs and URLs are validated newtypes. Absence uses `Option`; no empty-string or integer
+     sentinels represent missing data.
+2. Define a narrow, consumer-owned Apple port in Rust. It exposes only the use cases the desktop
+   needs: inspect capability, request authorisation, load library playlists, load playlist tracks,
+   set an app-scoped MusicKit queue, and issue supported transport commands.
+3. Implement the port with a small in-process Swift/MusicKit bridge.
+   - Swift and MusicKit types do not cross the boundary.
+   - The bridge returns versioned, bounded UTF-8 response envelopes through a C-compatible ABI;
+     Rust validates and maps them into domain values.
+   - Allocation and release occur on the same side of the boundary. Rust owns a safe RAII wrapper
+     around any bridge-owned buffer or handle.
+   - Every exported operation has a request ID and exactly one terminal result. Cancellation or
+     supersession prevents a late result from replacing current UI state.
+   - The bridge never returns developer tokens, music-user tokens, private keys, raw request
+     headers, or unredacted Apple response bodies.
+4. Use `MusicAuthorization` for consent and MusicKit automatic developer and user-token handling.
+   AMP808 does not embed a Media Services private key, generate JWTs, persist a music-user token,
+   or ask a user to paste credentials.
+5. Use MusicKit's macOS-supported `ApplicationMusicPlayer` for selected Apple songs and playlists.
+   This preserves ADR-0012's core boundary—Apple owns the protected playback path rather than
+   AMP808's local decoder—while replacing brittle desktop AppleScript selection with an official
+   MusicKit queue and transport API. Unlike `SystemMusicPlayer` on Apple mobile platforms, this
+   player is app-scoped and does not control Music.app.
+6. Keep Apple playback outside `audio.rs`, `playback.rs`, `analysis.rs`, and `milkdrop.rs`.
+   - Apple mode exposes no PCM samples.
+   - BPM is unavailable.
+   - EQ and sample-derived MilkDrop are unavailable.
+   - The cosmic underlay may remain ambient but must not claim Apple audio reactivity.
+7. Present Apple Music as a distinct desktop library mode with keyboard and VoiceOver access.
+   The UI includes consent, unavailable/subscription, loading, empty, loaded, failed, and revoked
+   states; playlist and track selection; metadata; artwork where available; and honest capability
+   labels.
+8. Keep the implementation private to `apps/desktop` through GUI delivery and native acceptance.
+   After completion, perform a separate boundary review to decide whether pure Rust domain values,
+   the Apple port, and/or the native bridge should move to a shared crate before TUI parity work.
+   No shared-crate extraction is pre-approved by this ADR.
+
+### Domain and Boundary Review
+
+- **Apple Music domain** owns Apple media identity, authorisation and subscription state,
+  collection navigation, and the meaning of an Apple playback request.
+- **Application coordinator** owns request lifecycle, stale-response rejection, retry, selection,
+  and conversion from adapter results into desktop state.
+- **MusicKit bridge** owns Swift concurrency, MusicKit requests, automatic token use, Apple DTO
+  decoding, `ApplicationMusicPlayer`, and platform error translation.
+- **Desktop UI** owns presentation, focus, accessible labels, and user commands. It never imports
+  Swift, raw FFI, tokens, or Apple response DTOs.
+- **Local playback** continues to own CPAL, Symphonia, PCM analysis, BPM, EQ, and projectM. It never
+  imports Apple Music domain or bridge types.
+- **Local library** owns local files and local playlists. Apple resources are remote references and
+  are not silently inserted into SQLite-backed local playlists.
+- **Ratatui application** remains unchanged until the desktop delivery is accepted.
+
+Allowed dependency direction:
+
+```text
+desktop UI -> Apple application coordinator -> Apple port/domain <- MusicKit bridge
+desktop UI -> local playback (existing, separate)
+```
+
+The verdict is **safe with noted risk**. The native bridge and development-signing requirements
+are new build and runtime boundaries, so the first implementation slice must prove bridge loading,
+memory ownership, error redaction, and MusicKit capability before product UI expansion.
+
+### Consequences
+
+- Good, because users authorise Apple access through the native system consent flow.
+- Good, because Apple playlists can become playable through the official macOS MusicKit player.
+- Good, because automatic token management keeps private keys and pasted tokens out of the app.
+- Good, because a typed anti-corruption layer prevents Apple DTOs and Swift types from becoming the
+  future Spotify, SoundCloud, or YouTube domain model.
+- Good, because the desktop can prove the adapter before the TUI or a shared crate depends on it.
+- Bad, because the repository gains a Swift build artifact and an FFI boundary alongside Cargo.
+- Bad, because live acceptance requires a MusicKit-enabled App ID, an Apple Music subscription,
+  user consent, and a development-signed bundle.
+- Bad, because Apple playback cannot drive AMP808's PCM-derived EQ, BPM, or MilkDrop path.
+- Neutral, because production release signing and publication remain separate work.
+
+## Non-goals
+
+- No changes to `apps/tui` during the desktop implementation.
+- No shared Apple Music crate during GUI delivery.
+- No Spotify, SoundCloud, YouTube, or generic multi-provider registry in this implementation.
+- No Apple private key, embedded manually generated developer token, pasted music-user token, or
+  token-issuing backend.
+- No direct Apple stream URL, audio decoding, PCM capture, BPM inference, EQ, or audio-reactive
+  projectM input.
+- No Apple library mutations, playlist creation, favourites, ratings, or destructive actions in
+  the first read-only slice.
+- No silent import of Apple items into the local catalogue, queue, or persisted local playlists.
+- No production signing, notarisation, distribution packaging, or App Store submission.
+
+## Implementation Plan
+
+### Affected paths
+
+- `apps/desktop/src/apple_music.rs`: private domain values, validated identifiers, state machine,
+  port contract, coordinator, typed commands/events, and pure tests.
+- `apps/desktop/src/apple_music/macos.rs`: safe Rust wrapper around the native bridge and error
+  mapping. This is the only Rust module allowed to contain bridge FFI declarations.
+- `apps/desktop/macos/music-kit-bridge/`: Swift source and C-compatible bridge contract for
+  authorisation, library playlists, playlist tracks, `ApplicationMusicPlayer`, and transport state.
+- `apps/desktop/build.rs`: macOS-only deterministic bridge compilation/linking into Cargo's
+  `OUT_DIR`; non-macOS builds expose an unavailable adapter without invoking Swift tools.
+- `apps/desktop/Cargo.toml`: register `build.rs`; add `serde = "1"`, `serde_json = "1"`, and
+  `thiserror = "2"` if the first failing tests prove the versioned response-envelope boundary.
+- `apps/desktop/src/main.rs`: register the private module and construct the production adapter only
+  on macOS.
+- `apps/desktop/src/app.rs`: add provider-neutral desktop commands and state transitions without
+  importing MusicKit or Swift types.
+- `apps/desktop/src/ui.rs`: add Apple library mode, consent and recovery UI, playlist/track
+  navigation, metadata/artwork presentation, keyboard behavior, and accessibility semantics.
+- `apps/desktop/macos/Info.plist`: declare the stable bundle identifier and a concise
+  `NSAppleMusicUsageDescription` explaining playlist, metadata, and playback access.
+- `apps/desktop/macos/AMP808-R3TR0.entitlements`: add only MusicKit-related capability material
+  proven necessary by the development profile; do not enable App Sandbox implicitly.
+- `.moon/tasks.yml` or the existing desktop Moon task configuration: make bridge checks explicit
+  without replacing Cargo as build authority.
+- `adr/README.md`: index this decision and record acceptance evidence after delivery.
+
+### Dependencies and configuration
+
+- Use Apple's installed Swift toolchain and MusicKit framework; do not add a third-party Apple Music
+  SDK or FFI generator in the first slice.
+- Add Rust serialization/error dependencies only at the adapter boundary and keep them out of
+  `amp808-core`.
+- Register an explicit App ID matching AMP808-R3TR0's bundle identifier and enable the MusicKit App
+  Service in Certificates, Identifiers & Profiles.
+- Development acceptance uses that App ID and a development signing identity. Production identity,
+  notarisation, and publication remain deferred.
+
+### TDD delivery slices
+
+1. **Pure Apple domain contract**
+   - Write failing tests for legal authorisation/loading/playback states, stale request rejection,
+     validated IDs, pagination, empty results, denial, revocation, and retry.
+   - Implement the smallest desktop-private Rust domain and fake port that passes them.
+2. **Bridge contract spike**
+   - Write failing ABI contract tests for version negotiation, bounded UTF-8 envelopes, exactly-once
+     completion, invalid payloads, memory release, redacted errors, and unavailable capability.
+   - Compile a minimal Swift bridge and prove an unauthorised status request in a development bundle
+     before adding broader MusicKit calls.
+3. **Authorisation and subscription**
+   - Add the usage description and MusicKit-enabled development identity.
+   - Cover not-determined, denied, restricted, authorised, unsubscribed, revoked, and bridge-failure
+     states without blocking GPUI.
+4. **Read-only playlists and metadata**
+   - Fetch all library playlist pages and selected playlist-track pages.
+   - Map identifiers, names, artists, albums, durations, genres, artwork descriptors, catalog
+     equivalence, editability, and missing fields into Rust domain values.
+   - Reject repeated/off-contract pagination and never report a partial page sequence as complete.
+5. **MusicKit playback handoff**
+   - Set `ApplicationMusicPlayer` queues from a selected song or playlist and expose prepare, play,
+     pause, next, previous, stop, repeat, shuffle, current entry, duration, position, and failure.
+   - Keep local playback and Apple playback mutually explicit; switching modes tears down only the
+     outgoing coordinator and never fabricates PCM state.
+6. **GPUI product surface**
+   - Add accessible library navigation, metadata, artwork, loading/progress, denial/recovery, and
+     transport controls using the existing AMP808-R3TR0 skin.
+   - Preserve all local-library, queue, visualiser, keyboard, and VoiceOver behavior.
+7. **Native acceptance and handoff**
+   - Validate a normal authorised account and denied/revoked/error paths in the same
+     development-signed bundle.
+   - Record observed metadata, playlist paging, selection playback, relaunch, focus, keyboard,
+     VoiceOver, and non-PCM capability labels separately.
+   - After GUI acceptance, create a new bounded TUI-parity plan and review whether sharing the Apple
+     boundary is now justified.
+
+### Patterns to follow
+
+- Follow `apps/desktop/src/remote.rs` and `remote_transfer.rs` for typed lifecycle events and
+  cancellation/stale-result discipline.
+- Follow `apps/desktop/src/preset_folder/macos.rs` for a platform-specific implementation hidden
+  behind a safe Rust boundary.
+- Use `thiserror` for adapter/library errors and application-level context only at the composition
+  boundary.
+- Hand-write `Debug` for any type that could contain a credential, header, Apple diagnostic, or
+  user-library payload requiring redaction.
+- Keep public/shared signatures free of `Arc`, `Mutex`, GPUI entities, Swift handles, and foreign
+  framework types.
+- Keep bridge buffers bounded and validate all lengths, versions, discriminants, and UTF-8 before
+  deserialisation.
+
+### Patterns to avoid
+
+- Do not extend the TUI's three-method `Provider` trait to cover Apple playback.
+- Do not copy Apple API DTOs into domain types or use an untyped metadata map.
+- Do not block the GPUI thread on Swift concurrency, HTTP, artwork, or player preparation.
+- Do not let the Swift bridge call GPUI or local playback directly.
+- Do not log tokens, headers, raw Apple bodies, complete user playlists, or private library IDs.
+- Do not use a shell command, `osascript`, private Apple frameworks, or fabricated Apple stream
+  URLs for selected-item playback.
+- Do not extract a shared crate merely to make paths symmetrical.
+
+## Verification
+
+- [x] The Apple domain/state tests fail before implementation and pass after each TDD slice.
+- [x] Apple domain and application modules import no GPUI, Swift, FFI, `reqwest`, CPAL, Symphonia,
+      projectM, or SQLite types.
+- [x] Raw bridge declarations exist only in `apps/desktop/src/apple_music/macos.rs`; every unsafe
+      block documents its safety invariant and has adversarial length/version/null tests.
+- [ ] Missing Swift tooling or unavailable MusicKit produces a typed build/runtime diagnostic, not
+      an unexplained linker failure or panic.
+- [ ] The app starts and local playback remains fully functional when Apple access is unavailable,
+      denied, restricted, unsubscribed, revoked, offline, or rate-limited.
+- [x] The native consent dialog uses the configured `NSAppleMusicUsageDescription`; no product UI
+      requests a developer token, music-user token, private key, team ID, or key ID.
+- [x] All playlist pages load in order; repeated or malformed cursors fail without
+      presenting partial data as complete.
+- [x] Selecting a playlist loads all ordered playlist entries through validated pages and presents
+      a virtualized, fuzzy-searchable, read-only track browser with honest missing metadata.
+- [x] Selecting a playable playlist entry sets the app-scoped MusicKit queue and begins playback
+      through `ApplicationMusicPlayer`; the preparing and playing states remain observable after
+      the request completes. Pause, resume, stop, previous, and next use the same typed,
+      identity-checked transport boundary and expose observable transitional and terminal states.
+      Bounded relative seeking uses that boundary only when native elapsed time and duration are
+      known. Repeat cycles Off, All, and One only after MusicKit confirms the applied native mode
+      and preserves whether playback was playing or paused. Shuffle toggles Off and Songs through
+      the same native-confirmed contract and preserves exact playlist-occurrence identity after
+      MusicKit reorders the queue. Native elapsed time is exposed through an accessible progress
+      indicator and remains stable while paused.
+- [x] Apple mode labels BPM, EQ, waveform, and audio-reactive MilkDrop as unavailable and never
+      submits synthetic samples to the analysis or projectM pipelines.
+- [ ] Keyboard-only and VoiceOver users can authorise, browse playlists, choose tracks, recover from
+      failure, and operate transport controls.
+- [x] `apps/tui` has no implementation diff in this delivery.
+- [x] Desktop base and projectM test suites, workspace tests, strict focused Clippy, formatting,
+      bridge tests, and `git diff --check` pass.
+- [ ] A development-signed native acceptance records authorised, denied/revoked, offline/failure,
+      relaunch, playlist paging, selected playback, keyboard, VoiceOver, and capability-label
+      evidence separately.
+- [ ] Only after GUI acceptance does a separate boundary review decide whether to create a shared
+      Apple Music crate for TUI parity.
+
+## Pros and Cons of the Options
+
+### Desktop-private MusicKit adapter with `ApplicationMusicPlayer`
+
+- Good, because it uses Apple's native consent and automatic token management.
+- Good, because a selected playlist or song maps to an official playback queue.
+- Good, because it can later expose a proven contract to the TUI without coupling the two UIs now.
+- Bad, because Swift build/linking, FFI memory ownership, and signed capability testing are new.
+
+### Raw Apple Music REST client with manual tokens
+
+- Good, because the TUI already demonstrates the HTTP and fixture-testing approach.
+- Good, because most implementation could remain Rust-only.
+- Bad, because a pasted music-user token is not an acceptable shipping authorization experience.
+- Bad, because direct REST metadata still does not provide a deterministic selected-item playback
+  implementation.
+
+### Import the TUI backend and provider model
+
+- Good, because it could reuse existing code quickly.
+- Bad, because it violates the desktop product boundary from ADR-0021 and ADR-0022.
+- Bad, because the TUI `Provider -> Track` contract assumes playable URLs and does not model Apple
+  authorization or system transport.
+
+### Create a shared Apple Music crate immediately
+
+- Good, because both frontends could eventually use one implementation.
+- Bad, because only the GUI shipping contract is currently authorised and proven.
+- Bad, because premature extraction could freeze TUI, GPUI, Swift, or token assumptions into a
+  public workspace contract.
+
+### Keep AppleScript transport with new metadata
+
+- Good, because the TUI has working AppleScript prior art.
+- Bad, because mapping an arbitrary catalog or playlist selection to a Music.app script is less
+  deterministic than setting an app-scoped MusicKit queue.
+- Bad, because it would retain two Apple integration mechanisms after introducing MusicKit for
+  authorization and metadata.
+
+## More Information
+
+Related decisions:
+
+- ADR-0012: Add a macOS Music.app playback backend.
+- ADR-0013: Use the Apple Music API as a metadata-only integration.
+- ADR-0020: Reopen Apple Music API for TUI-rich Music.app integration.
+- ADR-0021: Adopt a Moon-orchestrated Cargo monorepo layout.
+- ADR-0022: Add the macOS-first AMP808-R3TR0 desktop player with GPUI Kit.
+- ADR-0031: Stage remote media acquisition behind a provider-agnostic desktop job.
+- ADR-0032: Run `yt-dlp` behind a cancellable desktop transfer adapter.
+
+Implementation evidence recorded 2026-11-07 for the bounded authorization slice:
+
+- The GPUI header exposes a visible, labelled Apple Music control. Authorization starts only from
+  its click or keyboard activation; startup and render paths do not start the bridge.
+- `AppleMusicCoordinator` owns request identity, bridge task lifetime, retry, terminal mapping, and
+  stale-result rejection. GPUI imports the coordinator and domain presentation only; the raw FFI
+  declaration remains confined to `apple_music/macos.rs`.
+- The Swift bridge validates the exact bundle identifier and usage description before calling
+  `MusicAuthorization.request()`, then reports one versioned terminal connection envelope. An
+  unbundled native test proves this guard returns without prompting.
+- Focused Apple tests passed 30/30, strict focused Clippy passed with warnings denied, the desktop
+  suite passed 194/194, and the workspace passed 526 tests with 3 live-only tests ignored.
+- Live authorization in a MusicKit-enabled, development-signed `.app`, account/subscription
+  behavior, consent UI, and VoiceOver observation remain unqualified and are the next native gate.
+
+Native delivery evidence recorded 2026-11-07:
+
+- The explicit App ID `com.opsydyn.amp808r3tr0` was registered in the Apple Developer portal with
+  only the MusicKit App Service selected. Reopening its configuration showed MusicKit still
+  enabled. No Media ID, private key, manually generated token, or speculative entitlement was
+  created.
+- `build-apple-music-dev-app.sh` assembles the Cargo binary and checked-in `Info.plist` into a
+  staged `.app`, signs it with an explicitly supplied identity, validates it before promotion, and
+  preserves an existing output bundle rather than deleting it.
+- `check-apple-music-dev-app.sh` validates the exact bundle identity, executable, usage
+  description, signature integrity, and linked MusicKit request symbol. It rejects ad-hoc signing
+  by default; an explicit opt-in exists only for assembly testing.
+- An ad-hoc bundle passed the assembly validator when opt-in was present and was rejected by the
+  development validator without it. This proves packaging behavior, not MusicKit authorization.
+- Development signing remains blocked because Keychain contains no valid code-signing identity
+  and Xcode could not retrieve the configured development team. Certificate recovery, a genuinely
+  development-signed bundle, and live authorization remain open evidence gates.
+
+Native authorization evidence recorded later on 2026-11-07:
+
+- After the Xcode account refresh, Xcode retrieved the OPSYDYN LTD development team and created an
+  Apple Development certificate and matching private key. Installing Apple's official Worldwide
+  Developer Relations G3 intermediate certificate made that identity valid for code signing.
+- `build-apple-music-dev-app.sh` produced a non-ad-hoc, development-signed
+  `AMP808-R3TR0.app`. The repository validator passed, the signature identifier is
+  `com.opsydyn.amp808r3tr0`, a development team identifier is present, and `codesign` reports the
+  two expected file-access entitlements.
+- Launching that bundle and activating its labelled Apple Music control exercised the native
+  authorization path. The UI progressed from `NOT CONNECTED` through `WAITING FOR AUTHORISATION`
+  to `CONNECTED / CATALOG + LIBRARY`; macOS recorded full Media Library authorization for the
+  exact application identifier.
+- This qualifies development signing, bundle identity, live authorization, and subscription
+  capability discovery only. Denied/revoked recovery, relaunch persistence, playlist paging,
+  selected playback, keyboard navigation, VoiceOver, and the full non-PCM capability-label pass
+  remain separate native acceptance gates.
+
+Read-only playlist-gallery evidence recorded on 2026-11-08:
+
+- Apple sign-in now belongs to a dedicated GPUI Settings / Accounts surface. The signed app
+  exposes not-connected, authorising, connected, loading, loaded, and retry states with labelled
+  controls and status semantics; the player header links to Settings rather than owning consent.
+- After native authorization, the coordinator fetched all 170 playlists from the live account
+  across multiple `MusicLibraryRequest<Playlist>` pages before exposing the collection. The UI did
+  not present a partial page sequence as a completed library.
+- The first live response exposed artwork outside the HTTPS resource invariant. The boundary was
+  refined test-first: opaque playlist identity and cursor progression remain strict, while invalid
+  optional artwork is omitted and rendered with the existing honest placeholder instead of
+  discarding the entire library. Swift also omits artwork that is not a hosted HTTPS URL before
+  crossing FFI. No URL, playlist identifier, or provider payload was logged for diagnosis.
+- The final development-signed build displayed the 170-entry gallery with accessible image and
+  selection labels. Selecting one entry changed its accessibility label to the explicit selected
+  state. This qualifies read-only paging, gallery presentation, and selection only; playlist-track
+  loading, MusicKit playback, manual keyboard/VoiceOver acceptance, denial/revocation, and relaunch
+  persistence remain open.
+
+Selected-playlist track-browser evidence recorded on 2026-11-08:
+
+- MusicKit playlist entries are loaded through the playlist relationship and its documented
+  `MusicItemCollection` pagination. The versioned FFI envelope preserves opaque entry identity,
+  playlist identity, order, duplicates, title, artist, optional album, optional duration, request
+  identity, and cursor progression; malformed identifiers, repeated cursors, wrong-playlist pages,
+  stale selections, and provider failures remain typed and redacted.
+- The GPUI Settings surface now uses a master/detail flow. The bounded playlist gallery is replaced
+  on selection by a visible track browser with a `CHANGE PLAYLIST` recovery action, fuzzy search
+  across title/artist/album, honest `Unknown album` and `--:--` fallbacks, and a virtualized result
+  list with status and list-item accessibility semantics.
+- The development-signed app loaded a real selected playlist containing 48 entries and exposed
+  ordered title, artist, album, and duration metadata. A live multi-term artist query reduced the
+  status to `1 of 48 tracks shown`, and the return action restored the playlist gallery. No
+  playback or library mutation was performed.
+- Focused Apple and GPUI tests pass, strict desktop Clippy passes with warnings denied apart from
+  the repository's explicit dead-code allowance, formatting and `git diff --check` pass, and the
+  full workspace passes 611 tests with 3 live-only tests ignored. The signed bundle validator also
+  passes.
+- This qualifies read-only selected-playlist loading, pagination, search, virtualization,
+  master/detail recovery, and live metadata display. `ApplicationMusicPlayer` handoff, manual
+  keyboard/VoiceOver acceptance, denial/revocation, offline/failure, and relaunch persistence
+  remain separate gates.
+
+Selected-entry MusicKit playback evidence recorded on 2026-11-08:
+
+- Xcode 26.5's macOS MusicKit interface and the bridge compile proved `SystemMusicPlayer` is
+  unavailable on macOS while `ApplicationMusicPlayer` is supported from macOS 14. ADR-0035 now
+  records the supported app-scoped player rather than carrying the mobile-only assumption.
+- The first signed spike could load an individual `Playlist.Entry` but failed during MusicKit
+  playback preparation. The playback request was refined test-first to preserve both the source
+  playlist identity and selected entry identity. Swift reloads that playlist relationship and uses
+  `ApplicationMusicPlayer.Queue(playlist:startingAt:)`, Apple's playlist-specific initializer.
+- The signed app exposed each selected-playlist result as a keyboard- and accessibility-visible
+  play button. Native acceptance observed the selected entry move from `Preparing Apple Music
+  playback` to `Playing through Apple Music`; the Swift bridge emits playing only after both
+  `prepareToPlay()` and `play()` succeed. The app was then closed to stop the app-scoped test
+  playback.
+- Bridge responses remain versioned and bounded, request and track identities are checked before
+  state changes, newer requests supersede unfinished ones, and provider failures are redacted at
+  the Rust boundary. Local PCM, BPM, EQ, and audio-reactive MilkDrop remain explicitly unavailable.
+- This qualifies one-entry selection and playback start. Next/previous, position observation,
+  queue navigation, whole-playlist activation, failure recovery, and manual keyboard/VoiceOver
+  acceptance remain separate slices.
+
+Apple pause/resume transport evidence recorded on 2026-11-08:
+
+- The coordinator now owns typed pause and resume commands and exposes `Pausing`, `Paused`,
+  `Resuming`, and `Playing` states. Request and track identity must match the active operation, and
+  an inconsistent terminal status fails closed instead of silently mutating playback state.
+- One versioned `transport` bridge envelope carries only request identity, track identity, and the
+  validated `paused` or `playing` result. Native failure detail is redacted at the Rust boundary;
+  Swift uses the existing app-scoped `ApplicationMusicPlayer` for both operations.
+- GPUI exposes `PAUSE APPLE` only while playing and `RESUME APPLE` only while paused. Both are
+  native buttons with explicit accessibility labels, while transitional state remains visible and
+  non-interactive.
+- Live development-signed acceptance observed `Playing through Apple Music` change to
+  `Apple Music playback paused`, with the action changing from Pause to Resume. Resuming returned
+  the status to Playing and restored the Pause action. The app was terminated after the check to
+  stop app-scoped playback.
+- Focused coordinator, bridge-parser, redaction, and GPUI tests pass. Strict desktop Clippy passes
+  with warnings denied apart from the repository's explicit dead-code allowance; the full locked
+  workspace passes 619 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies observable pause/resume and accessible pointer activation. Next/previous,
+  position observation, queue navigation, whole-playlist activation, failure recovery, and manual
+  keyboard/VoiceOver acceptance remain separate slices.
+
+Apple Stop transport evidence recorded on 2026-11-08:
+
+- The existing typed transport command and response boundary now includes Stop and the validated
+  `stopped` result. The coordinator exposes `Stopping` until the response matches both request and
+  track identity, then preserves the selected entry in an observable `Stopped` state. A wrong
+  terminal status fails closed as a playback error.
+- Stop is valid from both Playing and Paused. GPUI exposes a distinct `STOP APPLE` button with the
+  accessibility label `Stop Apple Music playback` in both states, removes transport controls after
+  completion, and labels the selected entry and status as stopped.
+- Live development-signed acceptance observed Playing with Pause and Stop controls, then
+  `Apple Music playback stopped` after activating Stop. Both active transport controls disappeared,
+  and the selected entry remained visibly labelled stopped. The app was closed after acceptance.
+- Focused state-machine, inconsistent-response, bridge-parser, and GPUI tests pass. Strict desktop
+  Clippy passes with warnings denied apart from the repository's explicit dead-code allowance; the
+  full locked workspace passes 622 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies explicit termination of app-scoped Apple playback. Next/previous, position
+  observation, queue navigation, whole-playlist activation, failure recovery, and manual
+  keyboard/VoiceOver acceptance remain separate slices.
+
+Apple Previous/Next queue-navigation evidence recorded on 2026-11-08:
+
+- The existing typed transport boundary now includes Previous and Next commands. Swift calls
+  `ApplicationMusicPlayer.skipToPreviousEntry()` and `skipToNextEntry()` on the same app-scoped
+  player; it does not rebuild the queue or create a second playback owner.
+- Rust derives the expected adjacent entry identity from the already loaded, ordered playlist and
+  exposes `SkippingPrevious` or `SkippingNext` until the native response matches both request and
+  target identity. Navigation is available only while Playing and does not wrap at playlist
+  boundaries.
+- GPUI exposes `PREVIOUS APPLE` and `NEXT APPLE` only when an adjacent loaded entry exists. Both
+  are native buttons with explicit accessibility labels; the active result remains visible in the
+  playlist while the transport state changes.
+- Live development-signed acceptance started a non-boundary playlist entry, observed Playing with
+  both navigation controls, moved the active row to the next entry, returned it to the previous
+  entry, and then observed the existing stopped state after terminating playback. The app window
+  was closed after the check.
+- Focused coordinator and GPUI interaction tests pass. Strict desktop Clippy passes with warnings
+  denied apart from the repository's explicit dead-code allowance; the full locked workspace
+  passes 624 tests with 3 ignored, and the signed bundle validator passes.
+- This qualifies unique-entry Previous/Next navigation and accessible pointer activation. An
+  existing ambiguity remains when a playlist contains repeated occurrences with the same entry
+  identifier, because both the selection and adjacency paths resolve the first matching identity.
+  Position observation, whole-playlist activation, failure recovery, and manual keyboard/VoiceOver
+  acceptance remain separate slices.
+
+Apple playback-position evidence recorded on 2026-11-08:
+
+- The native bridge reads `ApplicationMusicPlayer.playbackTime` on the main actor and returns a
+  versioned `position` envelope containing request identity, selected-entry identity, and bounded
+  non-negative elapsed milliseconds. Invalid, failed, stale-request, and wrong-track responses do
+  not replace the active snapshot; provider detail remains redacted.
+- Swift returns the current playable queue item's optional MusicKit duration alongside native
+  elapsed time. Rust treats that native duration as authoritative and falls back to the optional
+  duration owned by the loaded playlist entry when MusicKit omits it. It does not extrapolate from
+  a local clock, infer a queue transition when elapsed time reaches a duration, or claim access to
+  Apple PCM. When both durations are missing, the value remains explicit and indeterminate rather
+  than becoming a fabricated percentage.
+- GPUI runs one guarded Apple polling loop and samples the native boundary at approximately 5 Hz
+  while Playing. The Settings surface exposes elapsed time, duration, and a determinate progress
+  rail with `ProgressIndicator` semantics when duration is known. Pause retains the final observed
+  value; Stop and queue navigation clear the superseded snapshot. A failed observation remains
+  visible without terminating playback, and Resume retries it.
+- Live development-signed acceptance observed the accessible native progress advance from 00:03
+  to 00:09 against a 03:21 entry, remain unchanged during a two-second paused interval, and
+  disappear after Stop while the selected entry remained visibly stopped. The signed bundle
+  validator passes.
+- Coordinator tests cover native time plus loaded duration, queue-change clearing, mismatched-track
+  rejection, and failure recovery. The versioned parser covers valid identity/time and redacted
+  failure; the GPUI interaction test covers the accessible progress contract. Strict desktop
+  Clippy passes with warnings denied apart from the repository's explicit dead-code allowance, and
+  the full locked workspace passes 630 tests with 3 ignored.
+- This qualifies selected-entry playback-position observation. Seeking and reconciliation when
+  MusicKit automatically changes the current queue entry at a natural boundary remain separate
+  slices, as do whole-playlist activation, repeat/shuffle, and manual keyboard/VoiceOver
+  acceptance.
+
+Apple current-entry reconciliation evidence recorded on 2026-11-08:
+
+- Playlist occurrence, rather than playlist-entry identifier alone, is now the playback identity.
+  GPUI passes the original ordered playlist index even when search filters the visible rows; Swift
+  validates both that index and the expected opaque entry identifier before constructing the
+  MusicKit queue. This removes the previously recorded ambiguity for duplicate playlist entries.
+- MusicKit's playlist queue initializer defines the selected playlist occurrence and preserves the
+  queue's relative order. Swift records the selected queue-entry identifier when MusicKit exposes
+  it, then position observations derive a bounded relative-position mapping from queue indices to
+  ordered playlist indices. The observation context is owned on `MainActor`, while MusicKit's
+  non-Sendable player remains in its established task rather than crossing actor isolation.
+- Rust snapshots the exact ordered playlist handed to MusicKit. A matching native occurrence
+  updates the Playing identity and selects that occurrence's duration; a response for another
+  playlist or outside the playback snapshot cannot replace active state. Browsing a different
+  playlist therefore cannot corrupt the active playback identity or duration.
+- Coordinator tests cover natural-entry reconciliation, exact duplicate-occurrence selection,
+  duration changes, wrong-playlist rejection, and occurrence-aware Previous/Next behavior. Bridge
+  parser tests cover the versioned playlist identity/index envelope, and the existing GPUI
+  interaction test continues to cover active-row, progress, and transport semantics.
+- The strict locked desktop Clippy gate passes with warnings denied apart from the repository's
+  explicit dead-code allowance. The development-signed Swift bridge compiles, links, signs, and
+  passes the bundle validator.
+- An earlier bridge revision attempted to validate every native queue item's optional MusicKit
+  item identifier against the corresponding library playlist entry before accepting playback.
+  Live unified logs later proved `prepareToPlay` completed while that validation prevented
+  `play()` from being called. Queue-item identity is not used as a cross-surface invariant: Apple
+  documents the queue entry's item as optional, and library relationship identifiers need not be
+  the queue entry's playable-item identifier. Playback now starts after successful preparation;
+  the bounded positional mapping is observation-only and cannot veto playback.
+- Live signed observation confirmed stable playback and accessible progress from 00:04 through
+  04:59, plus keyboard activation of Stop. MusicKit did not change `currentEntry` during that run,
+  even though the selected entry's listed duration was 03:21, so an actual native natural-boundary
+  reconciliation was not observed and is not claimed as accepted.
+- A follow-up bridge diagnostic reads duration from the same native queue item used for
+  `currentEntry` identity and carries it in the versioned position envelope. Coordinator tests
+  prove native duration precedence plus loaded-playlist fallback, while the parser test proves the
+  optional wire field. This diagnoses stale playlist-entry metadata without turning elapsed time
+  into a second playback clock or transition authority.
+- A fresh development-signed run reported the same 03:21 duration from the native playable queue
+  item and the loaded playlist entry. MusicKit kept that same occurrence Playing through 03:44,
+  did not change `currentEntry`, and stopped only after keyboard activation of AMP808's Stop
+  control. The earlier overrun is therefore reproduced as MusicKit provider/runtime behaviour,
+  not explained by stale AMP808 duration metadata, and must not be repaired by fabricating a
+  transition from elapsed time.
+- Apple documents `playbackTime` as time within the current entry, `currentEntry` as the active
+  queue identity, and `playbackStatus` as the player state. The installed macOS 26.5 SDK exposes
+  stopped, playing, paused, interrupted, seeking-forward, and seeking-backward states but no
+  separate ended state. The versioned position envelope therefore carries optional native status:
+  `currentEntry` remains occurrence authority, `playbackStatus == stopped` ends AMP808's Playing
+  state, and elapsed time remains display-only even when it exceeds nominal duration.
+- Parser tests cover typed status, legacy envelopes without status, and redacted rejection of
+  unsupported values. Coordinator tests prove native stopped-state reconciliation and prove that
+  native playing state remains authoritative beyond nominal duration. No local timer, inferred
+  end event, or second playback owner was added.
+- A fresh development-signed acceptance run exercised the status-aware production bridge from
+  00:04 through 03:35 against a native 03:21 duration. MusicKit continued to report Playing and
+  the same `currentEntry`; AMP808 therefore kept the occurrence Playing while clamping only the
+  visual percentage to 100%. Keyboard activation of Stop then removed progress and exposed the
+  stopped state. This verifies the authority rule but still does not constitute a naturally
+  advanced or naturally stopped provider event.
+- This qualifies deterministic occurrence identity and automated reconciliation behavior. Seeking,
+  repeat/shuffle, whole-playlist activation, a live observed natural transition, and manual
+  VoiceOver acceptance remain separate work.
+
+Whole-playlist activation evidence recorded on 2026-11-08:
+
+- The application coordinator starts a fully loaded playlist from occurrence zero by reusing the
+  existing occurrence-aware MusicKit handoff. It snapshots the complete ordered playlist already
+  owned by the coordinator; search remains presentation-only and does not rebuild or reorder the
+  playback request. Loading and empty states cannot launch playback.
+- GPUI exposes a primary `PLAY PLAYLIST` control with the accessibility label
+  `Play selected Apple Music playlist`. It is disabled until a non-empty playlist is fully loaded
+  and remains beside the existing master/detail recovery action.
+- Coordinator tests prove occurrence-zero activation and an empty-playlist no-op. The GPUI
+  interaction test filters the visible rows so that only occurrence two remains, then proves the
+  playlist action still requests the hidden first occurrence. The locked desktop suite passes
+  234 tests, strict desktop Clippy passes with warnings denied apart from the repository's explicit
+  dead-code allowance, the full locked workspace passes, formatting and `git diff --check` pass,
+  and the development-signed bundle builds and passes its validator.
+- Unified logging diagnosed the initial live failure: `prepareToPlay` completed with the target
+  queue descriptor, but AMP808's invalid post-prepare cross-surface identity check prevented the
+  bridge from calling `play()`. The bridge now starts playback immediately after successful
+  preparation and establishes optional queue-observation context afterward. Focused Swift 6 tests
+  with warnings denied cover suffix queues, full queues with duplicate occurrence positions,
+  selected-occurrence offsets, overflow rejection, and lazy queue-anchor resolution.
+- A fresh development-signed run loaded 48 tracks, filtered the presentation to show only track
+  two (`Love Story`, 03:21), and activated `Play selected Apple Music playlist`. MusicKit started
+  the hidden first occurrence and AMP808 exposed `Playing through Apple Music` plus accessible
+  progress at 00:04 of 05:20, matching track one (`One More Time`) rather than the visible search
+  result. Activating Stop removed progress and exposed `Apple Music playback stopped`.
+- This qualifies the desktop command, accessibility surface, loading guard, occurrence-zero
+  request, live whole-playlist start, positional progress reconciliation, and Stop recovery.
+  Seeking, repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance
+  remain separate work.
+
+Apple playback seeking evidence recorded on 2026-11-08:
+
+- The coordinator accepts relative seek intent only while Apple playback is Playing and both
+  authoritative elapsed time and a positive current-entry duration are available. It clamps the
+  target into the current entry, clears the superseded position observation, exposes an explicit
+  `Seeking` state, and returns to Playing only after the identity-checked MusicKit transport
+  response. Missing timing data causes a no-op rather than a fabricated local clock.
+- The existing transport boundary now carries a typed `Seek { position_ms }` command as bridge
+  command 5 with an unsigned millisecond payload. Existing pause, resume, stop, next, and previous
+  commands retain codes 0 through 4 and a zero payload. Swift assigns the converted seconds to
+  `ApplicationMusicPlayer.playbackTime`; subsequent position polling remains the authoritative
+  result instead of treating the requested target as proof of completion.
+- GPUI exposes keyboard-focusable `Seek Apple Music back 10 seconds` and
+  `Seek Apple Music forward 10 seconds` buttons only while seek prerequisites hold. Live visual
+  inspection found the first layout pushed Pause and Stop below the fixed footer. The corrected
+  build groups seek, queue navigation, Pause, and Stop in one wrapping transport row so all five
+  controls remain visible at the default window size.
+- Coordinator tests cover target calculation, native confirmation, missing-position rejection,
+  and duration clamping. A macOS boundary test covers command and payload encoding, while the GPUI
+  interaction test covers both accessible controls and the observable Seeking-to-Playing
+  transition. The desktop suite passes 238 tests, strict focused Clippy passes with warnings
+  denied apart from the repository's explicit dead-code allowance, the full locked workspace
+  passes, Swift 6 bridge tests pass with warnings denied, and the signed bundle passes validation.
+- In the first signed run, +10 advanced progress from 00:01 to 00:14 and -10 moved it back to
+  00:08, proving both native directions before the layout defect was corrected. In the final
+  signed build, all five controls were visible without scrolling, +10 advanced progress from
+  00:06 to 00:21, and the visible Stop control removed progress and exposed
+  `Apple Music playback stopped`.
+- This qualifies bounded relative seeking during active Apple playback. Paused seeking,
+  repeat/shuffle, a live observed natural transition, and manual VoiceOver acceptance remain
+  separate work.
+
+Apple playback repeat evidence recorded on 2026-11-08:
+
+- The desktop-private Apple domain models Off, All, and One independently of the TUI playlist
+  type. A user action cycles the next mode only while playback is Playing or Paused, exposes an
+  observable `SettingRepeat` state, blocks overlapping transport intent, and preserves the prior
+  playback disposition after native confirmation.
+- The existing typed transport boundary carries `SetRepeat` as command 6 with a bounded value of
+  0, 1, or 2. Swift maps those values to MusicKit's `.none`, `.all`, and `.one`, assigns
+  `ApplicationMusicPlayer.state.repeatMode`, and returns both the actual native repeat mode and
+  playback status. Rust rejects unknown modes, mismatched modes, stale identity, and a changed
+  playback disposition instead of displaying the requested value as proof.
+- GPUI exposes one wrapping transport-row control with the accessible labels
+  `Cycle Apple Music repeat mode, currently off`, `currently all`, and `currently one`. The button
+  uses the active hardware tone for All and One and remains available while paused.
+- Coordinator tests cover the complete cycle, native-confirmed application, paused-state
+  preservation, and mismatched confirmation. Bridge tests cover every command value, successful
+  parsing, and fail-closed unknown values. The GPUI interaction test exercises the accessible
+  control and its Off-to-All transition. The desktop suite passes 245 tests, strict focused Clippy
+  passes with warnings denied apart from the repository's explicit dead-code allowance, Swift 6
+  bridge tests pass with warnings denied, and the development-signed bundle passes validation.
+- In the fresh signed build, One More Time advanced from 00:00 to 00:11 while the visible control
+  cycled Off to All to One to Off. Pausing at 00:14 kept playback paused while Repeat changed from
+  Off to All; Resume retained All and Stop removed the transport controls and exposed
+  `Apple Music playback stopped`.
+- Shuffle remained separate at that point. The ordered queue-index map assumed playlist order, while
+  MusicKit shuffle may reorder queue entries; shipping shuffle safely requires a stable
+  queue-entry-to-playlist-occurrence identity map rather than reusing repeat's scalar mode path.
+  A live observed natural transition and manual VoiceOver acceptance also remain open.
+
+Apple queue-entry identity prerequisite evidence recorded on 2026-11-08:
+
+- Apple documents `MusicPlayer.Queue.Entry.id` as the unique identifier of a playback-queue entry
+  and exposes the entries of `ApplicationMusicPlayer.Queue`. AMP808 now captures those native
+  identifiers only after it has created and started its app-scoped queue.
+- The bridge uses the known selected occurrence once to map each initial queue-entry identifier to
+  its exact ordered playlist occurrence. Later position reconciliation looks up the native current
+  entry by that stable map and no longer derives identity from the entry's current array position.
+  A reordered native queue can therefore preserve duplicate playlist occurrences without exposing
+  MusicKit identifiers through FFI or changing the Rust domain contract.
+- Queue identity establishment fails closed for blank, duplicate, missing-selected, oversized, or
+  otherwise inconsistent entry sets. Playback can continue under MusicKit ownership, but AMP808
+  will report position unavailable rather than guess an occurrence.
+- Swift 6 tests with warnings denied cover full queues, suffix queues, unique identities for exact
+  duplicate occurrences, reordered lookup, blank and duplicate identifiers, missing selected
+  identity, and queue shapes outside the loaded playlist. The focused desktop suite passes 245
+  tests, the full locked workspace and strict desktop Clippy pass, formatting and
+  `git diff --check` pass, the development-signed bundle builds and passes its validator, and the
+  bridge contract is unchanged.
+- In the fresh signed build, whole-playlist playback exposed occurrence one (`One More Time`) at
+  00:12 of 05:20. Next changed the selected occurrence to `Love Story`, changed duration to 03:21,
+  and advanced its progress from 00:00 to 00:03. Stop then removed progress and exposed the
+  stopped state. This qualifies the existing start, identity reconciliation, Next, and Stop paths
+  against the captured map; it is not shuffled-playback evidence.
+- This is a prerequisite rather than shuffle delivery. Apple documents entry uniqueness but does
+  not promise identity survival across replacement with a different queue; the map is therefore
+  scoped to the queue AMP808 created. Native shuffle command/state, shuffled live acceptance, and
+  manual VoiceOver acceptance remain separate work.
+
+Apple playback shuffle evidence recorded on 2026-11-12:
+
+- The desktop-private Apple domain models MusicKit's Off and Songs states independently of the TUI
+  playlist type. A user action toggles the target only while playback is Playing or Paused,
+  exposes an observable `SettingShuffle` state, blocks overlapping transport intent, and does not
+  display the target as applied until the native response confirms it.
+- The typed transport boundary carries `SetShuffle` as command 7 with a bounded value of 0 or 1.
+  Swift maps those values to MusicKit's `.off` and `.songs`, assigns
+  `ApplicationMusicPlayer.state.shuffleMode`, and returns both the actual native shuffle mode and
+  playback status. Rust rejects unknown modes, mismatched modes, stale identity, and a changed
+  playback disposition instead of accepting requested state as proof.
+- GPUI exposes one keyboard-focusable transport-row control with the accessibility labels
+  `Toggle Apple Music shuffle, currently off` and `currently songs`. The active Songs state uses
+  the existing primary hardware tone and the control remains available while paused.
+- Coordinator tests cover native-confirmed activation, paused-state preservation, and mismatched
+  confirmation. Bridge tests cover both command values, successful parsing, and fail-closed
+  unknown values. Swift 6 tests with warnings denied cover both native values and invalid input,
+  while the GPUI interaction test exercises the accessible Off-to-Songs transition.
+- While Songs is active, Previous and Next remain available at the original list boundaries for a
+  queue with more than one entry. The coordinator retains the current occurrence through transport
+  confirmation and waits for MusicKit's position/current-entry observation instead of predicting
+  sequential adjacency; focused tests cover both boundary controls and authoritative identity
+  reconciliation.
+- The base desktop suite passes 253 tests, the projectM-enabled desktop suite passes 255 tests,
+  the full locked workspace passes, strict base and projectM desktop Clippy pass with warnings
+  denied, formatting and `git diff --check` pass, and the development-signed bundle builds and
+  passes its validator.
+- In the fresh signed build, reconnecting loaded 170 playlists and a 48-entry playlist. Playback
+  began on occurrence one (`One More Time`, 05:20), the visible control changed from Off to Songs
+  only after native confirmation, and Next selected non-adjacent occurrence four
+  (`Vacuum Boogie`, 06:08) while retaining Songs. Pausing at 00:05 and toggling Songs to Off kept
+  playback paused; Stop then removed the transport controls and exposed the stopped state.
+- This qualifies native shuffle state, shuffled queue navigation, stable occurrence identity,
+  paused-state preservation, and accessible labels. The session still required an explicit
+  Connect action after relaunch, and manual VoiceOver, denied/revoked, offline/failure, and a live
+  observed natural transition remain separate acceptance gates.
+
+Apple natural-transition evidence recorded on 2026-11-12:
+
+- MusicKit can briefly report position unavailable while an application-owned queue starts or
+  changes entries. The coordinator now retries that specific condition for a bounded twenty polls
+  (about two seconds at the existing polling interval), resets the allowance after a successful
+  observation, and continues to fail all other position errors immediately. Persistent position
+  unavailability still ends reconciliation rather than creating a second playback clock.
+- The Swift bridge preserves a playlist/count/selected-occurrence anchor when queue-entry identity
+  is not immediately available, then resolves the stable queue-entry map from a later current-entry
+  observation. Pure bridge tests cover lazy resolution and reject a full queue whose current entry
+  does not represent the requested occurrence.
+- Live diagnosis found that `ApplicationMusicPlayer.Queue(playlist:startingAt:)` materialised all
+  22 playlist entries but could leave queue occurrence zero current when occurrence two was
+  requested. A generic playable-item queue was rejected because this local-library playlist could
+  not be prepared reliably. The bridge instead prepares the playlist-aware queue from its first
+  entry, validates the materialised full-queue or suffix-queue shape, and explicitly selects the
+  requested queue occurrence before calling `play()`. Unexpected shapes fail closed.
+- The base desktop suite passes 255 tests and the projectM-enabled suite passes 257. The full
+  locked workspace passes 332 tests with three existing live tests ignored; strict Clippy passes
+  for both desktop profiles with warnings denied, the Swift 6 queue contract passes with warnings
+  denied, formatting and `git diff --check` pass, and the clean development-signed bundle builds
+  and passes its validator.
+- A fresh development-signed run loaded 170 playlists and selected occurrence three of
+  `808: The Playlist`. AMP808 and MusicKit both identified `Let the Music Play` at 03:33 as Playing,
+  rather than silently playing occurrence one. With no Next command or queue mutation, MusicKit
+  naturally advanced to occurrence four, `Hip Hop, Be Bop (Don't Stop)`, and AMP808 reconciled its
+  accessible Playing marker plus progress at 00:52 of 05:40. Stop then removed progress and exposed
+  the stopped state.
+- This qualifies requested-occurrence startup and a live observed natural transition under the
+  application-owned MusicKit queue. Manual VoiceOver, denied/revoked, and offline/failure
+  acceptance remain separate gates.
+
+Official Apple references checked through 2026-11-08:
+
+- <https://developer.apple.com/help/account/services/musickit/>
+- <https://developer.apple.com/documentation/musickit/musicauthorization>
+- <https://developer.apple.com/documentation/musickit/using-automatic-token-generation-for-apple-music-api>
+- <https://developer.apple.com/documentation/applemusicapi/get-all-library-playlists>
+- <https://developer.apple.com/documentation/musickit/playlist/entries>
+- <https://developer.apple.com/documentation/musickit/musicitemcollection>
+- <https://developer.apple.com/documentation/musickit/applicationmusicplayer>
+- <https://developer.apple.com/documentation/musickit/musicplayer/playbacktime>
+- <https://developer.apple.com/documentation/musickit/musicplayer/repeatmode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/state-swift.class/repeatmode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/shufflemode>
+- <https://developer.apple.com/documentation/musickit/musicplayer/state-swift.class/shufflemode>
+- <https://developer.apple.com/documentation/musickit/systemmusicplayer>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/entry/id>
+- <https://developer.apple.com/documentation/musickit/applicationmusicplayer/queue-swift.class>
+- <https://developer.apple.com/documentation/musickit/musicplayer/queue/init%28playlist%3Astartingat%3A%29>
+- <https://developer.apple.com/documentation/bundleresources/information-property-list/nsapplemusicusagedescription>
+
+Implementation evidence recorded on 2026-11-07:
+
+- The desktop-private Rust domain contract and pagination guard were implemented test-first.
+- A Swift 6.3 `@c` bridge now returns a versioned, bounded authorization-capability envelope. The
+  generated C header confirms the Rust ABI declarations, and a linked host test round-trips request
+  identity through `MusicAuthorization.currentStatus`.
+- Rust owns bridge buffers through a non-cloneable RAII wrapper while Swift performs allocation and
+  release. Adversarial tests cover null pointers, oversized lengths, invalid UTF-8, malformed JSON,
+  unsupported versions, unexpected kinds, unknown statuses, error redaction, and exactly-once
+  release.
+- This is host-process evidence only. Development-signed app-bundle authorization, subscription,
+  consent, and revocation acceptance remain open for the next delivery slices.
+- The permanent desktop identifier is now recorded as `com.opsydyn.amp808r3tr0` in a linted
+  `Info.plist`, with an `NSAppleMusicUsageDescription` that names playlist browsing, metadata, and
+  Apple Music playback. A repository check guards both values. App ID registration and enabling
+  the MusicKit App Service remain explicit Apple Developer portal work rather than a fabricated
+  entitlement.
+- Passive `MusicAuthorization.currentStatus` values now map into distinct not-determined, denied,
+  restricted, authorised, and unknown domain states without entering the consent-requesting state.
+  Subscription inspection has independent catalog-playback, offer, and cloud-library capabilities;
+  query failure does not revoke authorised library access. A versioned subscription wire envelope
+  is covered, but the native async `MusicSubscription.current` call is not yet exported.
+- Focused Apple tests (21), the desktop suite (185), strict focused Clippy, plist validation,
+  formatting, and the full workspace suite (517 passed, 3 ignored live tests) passed. `apps/tui`
+  has no implementation diff from this delivery.
+
+Revisit this decision if MusicKit automatic token generation cannot be made reliable from the
+Rust-hosted application bundle, if the C-compatible bridge cannot meet the memory and error
+contract without private API, if `ApplicationMusicPlayer` cannot play the required library/catalog
+items, or after accepted GUI delivery when TUI parity provides evidence for or against a shared
+crate.

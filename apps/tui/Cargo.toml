@@ -1,0 +1,99 @@
+[package]
+name = "amp808"
+version = "0.1.7"
+edition = "2024"
+rust-version = "1.85"
+description = "Winamp-inspired terminal music player with streaming, album art, and TR-808 views."
+license = "MIT"
+readme = "../../README.md"
+repository = "https://github.com/opsydyn/AMP808"
+homepage = "https://github.com/opsydyn/AMP808"
+keywords = ["music", "terminal", "tui", "audio-player", "ratatui"]
+categories = ["command-line-utilities", "multimedia::audio"]
+include = [
+    "/src/**",
+    "/Cargo.toml",
+]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+allow_attributes_without_reason = "warn"
+dbg_macro = "deny"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[dependencies]
+amp808-core = { path = "../../crates/amp808-core" }
+# TUI
+ratatui = { version = "0.30", features = ["crossterm", "unstable-widget-ref"] }
+crossterm = "0.29"
+ratatui-explorer = "0.3"
+
+# Effects
+tachyonfx = "0.25"
+
+# Album art
+ratatui-image = { version = "10", default-features = false, features = [
+    "image-defaults",
+    "crossterm",
+] }
+image = "0.25"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Audio playback
+cpal = "0.18"
+symphonia = { version = "0.5", features = ["all"] }
+
+# DSP
+rustfft = "6"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# HTTP
+reqwest = { version = "0.12", features = ["stream", "blocking", "json"] }
+
+# XML (RSS feeds)
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Temp directories
+tempfile = "3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# URL parsing
+url = "2"
+
+# Random (shuffle)
+rand = "0.9"
+
+# Home directory
+dirs = "6"
+
+# Glob expansion
+glob = "0.3"
+
+# Signal handling
+ctrlc = "3"
+
+# Hashing (Subsonic API auth)
+md5 = "0.7"
+tui-big-text = "0.8.2"
+
+[dev-dependencies]
+proptest = "1.11.0"
